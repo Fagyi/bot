@@ -3343,10 +3343,12 @@ class CryptoBotApp:
         except Exception:
             pass
 
-    # ---------- Jel-generátor: EMA + slope ----------
+    # ---------- Jel-generátor: EMA keresztezés (HOSSZÚ metszés) + slope ----------
     def _mb_signal_from_ema(self, series, fast: int, slow: int) -> tuple[str, float, float]:
         """
-        EMA keresztezés + slope megerősítés.
+        EMA keresztezés a HOSSZÚ (slow) oldaláról nézve + slope-megerősítés a HOSSZÚ-n.
+        BUY:   ha a slow EMA alulról a fast fölé kerül (es_p < ef_p  és  es_l > ef_l) ÉS slow emelkedik
+        SELL:  ha a slow EMA felülről a fast alá kerül (es_p > ef_p  és  es_l < ef_l) ÉS slow esik
         Vissza: ('buy'|'sell'|'hold', ema_fast_last, ema_slow_last)
         """
         import pandas as pd
@@ -3361,19 +3363,22 @@ class CryptoBotApp:
         ef_l, es_l = float(ema_f.iloc[last]), float(ema_s.iloc[last])
         ef_p, es_p = float(ema_f.iloc[prev]), float(ema_s.iloc[prev])
 
-        # slope feltétel – csak akkor jelezzen, ha a gyors EMA trendje összhangban van a keresztezéssel
-        slope_up   = ef_l > ef_p
-        slope_down = ef_l < ef_p
+        # slope a HOSSZÚ-n (slow EMA)
+        slope_up_s   = es_l > es_p
+        slope_down_s = es_l < es_p
 
-        if ef_p < es_p and ef_l > es_l and slope_up:
+        # HOSSZÚ keresztezés logika
+        if es_p < ef_p and es_l > ef_l and slope_up_s:
             return 'buy', ef_l, es_l
-        if ef_p > es_p and ef_l < es_l and slope_down:
+        if es_p > ef_p and es_l < ef_l and slope_down_s:
             return 'sell', ef_l, es_l
         return 'hold', ef_l, es_l
 
-    # ---------- HTF trend filter (EMA fast/slow szerint) ----------
+    # ---------- HTF trend filter (HOSSZÚ fölötte = bull) ----------
     def _mb_trend_filter(self, symbol: str, tf: str = "1h", fast: int = 20, slow: int = 50) -> int:
-        """+1 bull, -1 bear, 0 semleges – magasabb idősík trendje EMA alapján."""
+        """+1 bull, -1 bear, 0 semleges – magasabb idősík trendje a HOSSZÚ SZERINT.
+           Bull, ha slow > fast; Bear, ha slow < fast.
+        """
         try:
             ohlcv = self.exchange.fetch_ohlcv(symbol, tf, limit=max(slow*2, 120))  # type: ignore[arg-type]
             if not ohlcv:
@@ -3383,8 +3388,8 @@ class CryptoBotApp:
             s = df['c'].astype(float)
             ema_f = s.ewm(span=fast, adjust=False).mean().iloc[-1]
             ema_s = s.ewm(span=slow, adjust=False).mean().iloc[-1]
-            if ema_f > ema_s: return +1
-            if ema_f < ema_s: return -1
+            if ema_s > ema_f: return +1   # long fölötte → bull
+            if ema_s < ema_f: return -1   # long alatta → bear
             return 0
         except Exception:
             return 0
