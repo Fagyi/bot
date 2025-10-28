@@ -2443,13 +2443,20 @@ class CryptoBotApp:
         if not hasattr(self, "_mb_stopping"): 
             self._mb_stopping = False
 
+    # --- Thread-safe logoló segéd ---
+    def _safe_log(self, text: str):
+        try:
+            self.root.after(0, lambda: (self.mb_log.insert(tk.END, text), self.mb_log.see(tk.END)))
+        except Exception:
+            pass
+
     def mb_start(self):
         """Margin bot indítás (dry-runban is futhat)."""
         self._mb_stopping = False   # biztos ami biztos
         self._mb_summary_done = False
 
         if getattr(self, "_mb_running", False):
-            self.mb_log.insert(tk.END, "⚠️ A bot már fut.\n"); self.mb_log.see(tk.END)
+            self._safe_log("⚠️ A bot már fut.\n")
             return
 
         if self.exchange is None:
@@ -2465,8 +2472,6 @@ class CryptoBotApp:
         self._sim_pos_short = []
         self._sim_history = []
         self._sim_pnl_usdt = 0.0
-        self._pool_balance_quote = 0.0
-        self._pool_used_quote = 0.0
 
         # belső állapotok, ha hiányoznának
         if not hasattr(self, "_sim_pnl_usdt"):     self._sim_pnl_usdt     = 0.0
@@ -2480,13 +2485,13 @@ class CryptoBotApp:
         self._mb_running = True
         self.mb_start_btn.configure(state=tk.DISABLED)
         self.mb_stop_btn.configure(state=tk.NORMAL)
-        self.mb_log.insert(tk.END, "▶️ Bot indul…\n"); self.mb_log.see(tk.END)
+        self._safe_log("▶️ Bot indul…\n")
 
         def _loop():
             try:
                 self._mb_worker()
             except Exception as e:
-                self.mb_log.insert(tk.END, f"❌ Bot hiba: {e}\n"); self.mb_log.see(tk.END)
+                self._safe_log(f"❌ Bot hiba: {e}\n")
             finally:
                 self._mb_running = False
                 self.root.after(0, lambda: (
@@ -2500,16 +2505,19 @@ class CryptoBotApp:
     def mb_stop(self):
         """Margin bot leállítása + biztonságos pozíciózárás (SIM/LIVE)."""
         if not getattr(self, "_mb_running", False):
-            self.mb_log.insert(tk.END, "ℹ️ A bot nem fut.\n")
-            self.mb_log.see(tk.END)
+            self._safe_log("ℹ️ A bot nem fut.\n")
             return
 
-        # manuális leállítás jelző
+        # manuális leállítás jelző – előbb stopping, majd kicsi puffer és futás flag le
         self._mb_stopping = True
+        try:
+            import time as _t
+            _t.sleep(0.1)
+        except Exception:
+            pass
         self._mb_running = False
 
-        self.mb_log.insert(tk.END, "⏹️ Bot leállítása folyamatban...\n")
-        self.mb_log.see(tk.END)
+        self._safe_log("⏹️ Bot leállítása folyamatban...\n")
 
         try:
             sym = self._mb_get_str("mb_symbol", self._mb_get_str("mt_symbol", DEFAULT_SYMBOL)).replace("/", "-")
@@ -2521,8 +2529,7 @@ class CryptoBotApp:
                 last_px = float(self.exchange.fetch_ticker(sym)["last"])
             except Exception:
                 last_px = None
-                self.mb_log.insert(tk.END, "⚠️ Ár lekérés nem sikerült, utolsó ismert ár kerül felhasználásra.\n")
-                self.mb_log.see(tk.END)
+                self._safe_log("⚠️ Ár lekérés nem sikerült, utolsó ismert ár kerül felhasználásra.\n")
 
             # --- összes pozíció zárása (long + short listák) ---
             for side in ("buy", "sell"):
@@ -2533,8 +2540,7 @@ class CryptoBotApp:
                     px = float(last_px if last_px is not None else pos.get("peak", pos.get("entry", 0.0)))
                     close_side = "sell" if side == "buy" else "buy"
 
-                    self.mb_log.insert(tk.END, f"🔻 Pozíció zárása ({close_side.upper()}) @ {px:.6f} | dry={dry}\n")
-                    self.mb_log.see(tk.END)
+                    self._safe_log(f"🔻 Pozíció zárása ({close_side.upper()}) @ {px:.6f} | dry={dry}\n")
 
                     if dry:
                         # szimulált zárás (ugyanaz mint _close_sim_by_index)
@@ -2562,12 +2568,10 @@ class CryptoBotApp:
                         except Exception:
                             pass
 
-                        self.mb_log.insert(
-                            tk.END,
+                        self._safe_log(
                             f"🔚 SIM CLOSE {side.upper()} @ {px:.6f} | sz={sz:.6f} | "
                             f"PnL={pnl:+.2f} USDT | Total={self._sim_pnl_usdt:+.2f}\n"
                         )
-                        self.mb_log.see(tk.END)
                         del lst[i]
                         continue  # ne növeld az i-t, mert rövidebb lett a lista
 
@@ -2583,14 +2587,11 @@ class CryptoBotApp:
                                     auto_borrow=False
                                 )
                                 oid = (getattr(resp, 'data', None) or {}).get('orderId')
-                                self.mb_log.insert(tk.END, f"✅ LIVE pozíció zárva – orderId={oid}\n")
-                                self.mb_log.see(tk.END)
+                                self._safe_log(f"✅ LIVE pozíció zárva – orderId={oid}\n")
                             else:
-                                self.mb_log.insert(tk.END, "ℹ️ Nulla méret – nincs zárás szükség.\n")
-                                self.mb_log.see(tk.END)
+                                self._safe_log("ℹ️ Nulla méret – nincs zárás szükség.\n")
                         except Exception as e:
-                            self.mb_log.insert(tk.END, f"❌ LIVE zárási hiba: {e}\n")
-                            self.mb_log.see(tk.END)
+                            self._safe_log(f"❌ LIVE zárási hiba: {e}\n")
 
                         # sim tükör PnL frissítés
                         entry = float(pos.get('entry', 0.0))
@@ -2609,12 +2610,10 @@ class CryptoBotApp:
             try:
                 self._mb_do_summary_once("mb_stop")
             except Exception as e:
-                self.mb_log.insert(tk.END, f"⚠️ Összegzés hiba (stop): {e}\n")
-                self.mb_log.see(tk.END)
+                self._safe_log(f"⚠️ Összegzés hiba (stop): {e}\n")
 
         except Exception as e:
-            self.mb_log.insert(tk.END, f"❌ Stop során hiba: {e}\n")
-            self.mb_log.see(tk.END)
+            self._safe_log(f"❌ Stop során hiba: {e}\n")
 
         # --- worker szál szelíd megvárása (maximum ~1s) ---
         try:
@@ -2657,10 +2656,11 @@ class CryptoBotApp:
             except Exception:
                 pass
             init_pool = ui_budget if ui_budget > 0 else max(0.0, avail_quote)
-            self._pool_balance_quote = float(init_pool)
-            self._pool_used_quote = 0.0
+            with self._mb_lock:
+                self._pool_balance_quote = float(init_pool)
+                self._pool_used_quote = 0.0
             # védő log
-            self.mb_log.insert(tk.END, f"🏦 Pool init: balance={self._pool_balance_quote:.2f} {quote0}, used={self._pool_used_quote:.2f}\n"); self.mb_log.see(tk.END)
+            self._safe_log(f"🏦 Pool init: balance={self._pool_balance_quote:.2f} {quote0}, used={self._pool_used_quote:.2f}\n")
 
         # --- belső helperek: lista oldalszerint, nyitás/zárás multi, menedzsment per-pozíció ---
         def _pos_list(side: str):
@@ -2703,10 +2703,9 @@ class CryptoBotApp:
                 _pos_list(side).append(pos)
                 self._pool_used_quote += float(commit_usdt)
 
-            self.mb_log.insert(
-                tk.END,
+            self._safe_log(
                 f"🧪 SIM OPEN {side.upper()} @ {entry_px:.6f} | sz={size_base:.6f} | commit={commit_usdt:.2f} USDT | pool used={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f}\n"
-            ); self.mb_log.see(tk.END)
+            )
 
         def _close_sim_by_index(side: str, idx: int, exit_px: float):
             """Teljes zárás adott indexű pozícióra; PnL visszaír a pool-ba, commit felszabadul."""
@@ -2743,10 +2742,9 @@ class CryptoBotApp:
             except Exception:
                 pass
 
-            self.mb_log.insert(
-                tk.END,
+            self._safe_log(
                 f"🔚 SIM CLOSE {side.upper()} @ {exit_px:.6f} | sz={sz:.6f} | PnL={pnl:+.2f} USDT | Total={self._sim_pnl_usdt:+.2f} | pool used={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f}\n"
-            ); self.mb_log.see(tk.END)
+            )
 
             del lst[idx]
 
@@ -2755,8 +2753,7 @@ class CryptoBotApp:
             if pos.get('half_closed', False):
                 return
 
-            entry = float(pos['entry'])
-            sz    = float(pos['size'])
+            entry = float(pos['entry']); sz = float(pos['size'])
             close_sz = sz * 0.5
             pnl = (px - entry) * close_sz * (1 if side == 'buy' else -1)
 
@@ -2768,11 +2765,12 @@ class CryptoBotApp:
             with self._mb_lock:
                 self._sim_pnl_usdt += pnl
                 self._pool_balance_quote += pnl
-
-                pos['size'] = sz - close_sz
-                pos['commit_usdt'] = commit_before - release
-                pos['half_closed'] = True
-
+                # pos írások egyben
+                pos.update({
+                    'size': sz - close_sz,
+                    'commit_usdt': commit_before - release,
+                    'half_closed': True
+                })
                 self._pool_used_quote = max(0.0, self._pool_used_quote - release)
 
             # (Opcionális) history bejegyzés a rész-zárásról
@@ -2797,12 +2795,10 @@ class CryptoBotApp:
                 pass
 
             # Log
-            self.mb_log.insert(
-                tk.END,
+            self._safe_log(
                 f"🔹 PARTIAL 50% @ {px:.6f} | zárt={close_sz:.6f} | PnL={pnl:+.2f} | "
                 f"pool used={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f}\n"
             )
-            self.mb_log.see(tk.END)
 
         def _manage_atr_on_pos(pos: dict, last_px: float, atr_val: float) -> bool:
             """
@@ -2922,7 +2918,7 @@ class CryptoBotApp:
                     # --- OHLCV ---
                     ohlcv = self.exchange.fetch_ohlcv(symbol, tf, limit=200)  # type: ignore[arg-type]
                     if not ohlcv:
-                        self.mb_log.insert(tk.END, "⚠️ Nincs candle adat.\n"); self.mb_log.see(tk.END)
+                        self._safe_log("⚠️ Nincs candle adat.\n")
                         time.sleep(2); continue
 
                     df = pd.DataFrame(ohlcv, columns=['ts','o','h','l','c','v'])
@@ -2935,12 +2931,21 @@ class CryptoBotApp:
                     closes = df['c'].astype(float).tolist()
                     last_px = float(closes[-1])
 
-                    # valós idejűbb ár nyitáshoz (jel gyertyából marad)
+                    # valós idejű (ticker) ár – default a candle close
+                    last_px_rt = last_px
                     try:
-                        rt = float(self.exchange.fetch_ticker(symbol)["last"])
-                        last_px_rt = rt if rt > 0 else last_px
+                        tkr = self.exchange.fetch_ticker(symbol)
+                        rt = float(tkr.get("last") or tkr.get("close") or 0.0)
+                        if rt > 0:
+                            last_px_rt = rt
                     except Exception:
-                        last_px_rt = last_px
+                        pass
+
+                    # (opcionális) eltérés százalék logoláshoz
+                    try:
+                        drift_pct = abs(last_px_rt - last_px) / max(last_px, 1e-12) * 100.0
+                    except Exception:
+                        drift_pct = float("nan")
 
                     # --- EMA + HTF jel ---
                     sig_raw, ef_l, es_l = self._mb_signal_from_ema(df['c'], fa, slw)
@@ -2977,15 +2982,21 @@ class CryptoBotApp:
                     combined_sig = brk_sig if brk_sig in ('buy', 'sell') else sig
 
                     # --- LOG: állapot + jel ---
-                    log_line = f"[{symbol} {tf}] px={last_px:.6f}  EMA({fa})={ef_l:.4f} / EMA({slw})={es_l:.4f}"
+                    log_line = (
+                        f"[{symbol} {tf}] px_candle={last_px:.6f} px_mkt={last_px_rt:.6f}  "
+                        f"EMA({fa})={ef_l:.4f} / EMA({slw})={es_l:.4f}"
+                    )
                     if use_htf: log_line += f" HTF={trend_htf:+d}"
                     if use_rsi and rsi_val is not None: log_line += f" RSI({rsi_len})={rsi_val:.2f}"
                     if use_brk and not (math.isnan(hh) or math.isnan(ll)):
                         log_line += f" BRK[{brk_n}] HH={hh:.4f} LL={ll:.4f} ↑{up_lvl:.4f} ↓{dn_lvl:.4f} sig={brk_sig}"
-                    # pool állapot
-                    log_line += f" | POOL used/bal={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f} (ui={budget_ui:.2f})"
-                    log_line += f" → {combined_sig}\n"
-                    self.mb_log.insert(tk.END, log_line); self.mb_log.see(tk.END)
+                    if drift_pct == drift_pct:  # not NaN
+                        log_line += f" drift={drift_pct:.2f}%"
+                    log_line += (
+                        f" | POOL used/bal={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f} "
+                        f"(ui={budget_ui:.2f}) → {combined_sig}\n"
+                    )
+                    self._safe_log(log_line)
 
                     # --- FUTÓ POZÍCIÓK MENEDZSMENTJE (mindkét oldalon) ---
                     atr_val = None
@@ -3024,6 +3035,15 @@ class CryptoBotApp:
                     # --- ÚJ NYITÁS (cooldown + pool limit) ---
                     now = int(time.time())
                     if combined_sig in ('buy','sell') and (now - self._mb_last_cross_ts >= cd_s):
+                        # friss ticker csak nyitás előtt / vagy LIVE módban
+                        try:
+                            if (not dry) or True:  # ha minden nyitásnál szeretnéd
+                                rt = float(self.exchange.fetch_ticker(symbol)["last"])
+                                if rt > 0:
+                                    last_px_rt = rt
+                        except Exception:
+                            pass
+
                         # szabad keret
                         free_pool = max(0.0, self._pool_balance_quote - self._pool_used_quote)
 
@@ -3041,7 +3061,7 @@ class CryptoBotApp:
                         max_quote_for_trade = free_pool * (sizep_to_use / 100.0)
 
                         if max_quote_for_trade <= 0.0:
-                            self.mb_log.insert(tk.END, "ℹ️ Nincs szabad pool a nyitáshoz (keret limit). Kimarad.\n"); self.mb_log.see(tk.END)
+                            self._safe_log("ℹ️ Nincs szabad pool a nyitáshoz (keret limit). Kimarad.\n")
                         else:
                             if inpm == "quote":
                                 # KuCoin-szerű kalkuláció QUOTE módban
@@ -3078,17 +3098,16 @@ class CryptoBotApp:
                                     open_size = 0.0; commit_usdt = 0.0; nominal_q = 0.0
 
                             # log
-                            self.mb_log.insert(
-                                tk.END,
+                            self._safe_log(
                                 f"📈 Jel: {combined_sig.upper()} | px={last_px_rt:.6f} | size%={sizep_to_use:.2f} | "
                                 f"nominal={nominal_q:.2f} | commit={commit_usdt:.2f} | free_pool={free_pool:.2f} | "
                                 f"lev={lev} | mode={mode} dry={dry}\n"
-                            ); self.mb_log.see(tk.END)
+                            )
 
                             # nyitás feltétele
                             opened = False
                             if commit_usdt > free_pool + 1e-9 or open_size <= 0:
-                                self.mb_log.insert(tk.END, "ℹ️ Nulla méret / nincs keret – nincs nyitás.\n"); self.mb_log.see(tk.END)
+                                self._safe_log("ℹ️ Nulla méret / nincs keret – nincs nyitás.\n")
                             else:
                                 if dry:
                                     if use_atr and atr_val is not None:
@@ -3111,13 +3130,13 @@ class CryptoBotApp:
                                             leverage=lev, auto_borrow=auto_borrow
                                         )
                                         oid = (getattr(resp, 'data', None) or {}).get('orderId') if hasattr(resp, 'data') else (resp.get('data', {}) or {}).get('orderId', None)
-                                        self.mb_log.insert(tk.END, f"✅ LIVE order {combined_sig.upper()} elküldve – orderId={oid}\n"); self.mb_log.see(tk.END)
+                                        self._safe_log(f"✅ LIVE order {combined_sig.upper()} elküldve – orderId={oid}\n")
                                         _open_sim(combined_sig, last_px_rt, open_size, commit_usdt,
                                                   atr_pack=(mul_sl, mul_tp1, mul_tp2, mul_tr, atr_val) if (use_atr and atr_val is not None) else None,
                                                   fixed_pack=(tpct, spct, trpct) if use_fixed else None)
                                         opened = True
                                     except Exception as e:
-                                        self.mb_log.insert(tk.END, f"❌ LIVE order hiba: {e}\n"); self.mb_log.see(tk.END)
+                                        self._safe_log(f"❌ LIVE order hiba: {e}\n")
 
                             if opened:
                                 self._mb_last_cross_ts = now
@@ -3129,11 +3148,19 @@ class CryptoBotApp:
                         "1h":3600, "2h":7200, "4h":14400, "6h":21600,
                         "8h":28800, "12h":43200, "1d":86400
                     }.get(tf, 30)
-                    time.sleep(max(2, min(30, tf_sec // 3)))
+                    _sleep_total = max(2, min(30, tf_sec // 3))
+                    for _ in range(int(_sleep_total)):
+                        if not self._mb_running:
+                            break
+                        time.sleep(1)
 
                 except Exception as e:
-                    self.mb_log.insert(tk.END, f"❌ Bot hiba: {e}\n"); self.mb_log.see(tk.END)
+                    msg = str(e)
+                    # tipikus rate limit / hálózati zaj szűrése
+                    if "429" not in msg and "rate" not in msg.lower():
+                        self._safe_log(f"❌ Bot hiba: {e}\n")
                     time.sleep(2)
+
         finally:
             self._mb_running = False
             was_manual = getattr(self, "_mb_stopping", False)
@@ -3153,7 +3180,7 @@ class CryptoBotApp:
             if on and hasattr(self, "mb_use_atr") and self.mb_use_atr.get():
                 self.mb_use_atr.set(False)
                 self._mb_toggle_atr_widgets()
-                self.mb_log.insert(tk.END, "🔧 FIX aktiválva → ATR kikapcsolva.\n"); self.mb_log.see(tk.END)
+                self._safe_log("🔧 FIX aktiválva → ATR kikapcsolva.\n")
 
             state = "normal" if on else "disabled"
             for w in (self.mb_sl_pct, self.mb_tp_pct, self.mb_trail_pct):
@@ -3168,7 +3195,7 @@ class CryptoBotApp:
             if on and hasattr(self, "mb_use_fixed") and self.mb_use_fixed.get():
                 self.mb_use_fixed.set(False)
                 self._mb_toggle_fixed_widgets()
-                self.mb_log.insert(tk.END, "🔧 ATR aktiválva → FIX kikapcsolva.\n"); self.mb_log.see(tk.END)
+                self._safe_log("🔧 ATR aktiválva → FIX kikapcsolva.\n")
 
             state = "normal" if on else "disabled"
             for w in (self.mb_atr_n, self.mb_atr_mul_sl, self.mb_atr_mul_tp1, self.mb_atr_mul_tp2, self.mb_atr_mul_trail):
@@ -3230,14 +3257,12 @@ class CryptoBotApp:
         try:
             hist = getattr(self, "_sim_history", None)
             if not hist:
-                self.mb_log.insert(tk.END, "ℹ️ Nincs lezárt ügylet – nincs összegzés.\n")
-                self.mb_log.see(tk.END)
+                self._safe_log("ℹ️ Nincs lezárt ügylet – nincs összegzés.\n")
                 return
 
             trades = [t for t in hist if not t.get("partial")]  # csak teljes zárások
             if not trades:
-                self.mb_log.insert(tk.END, "ℹ️ Csak rész-zárások történtek – nincs teljes ügylet összegzés.\n")
-                self.mb_log.see(tk.END)
+                self._safe_log("ℹ️ Csak rész-zárások történtek – nincs teljes ügylet összegzés.\n")
                 return
 
             total_pnl = sum(float(t.get("pnl", 0.0)) for t in trades)
@@ -3261,22 +3286,21 @@ class CryptoBotApp:
                 f"• Átlagos PnL: {avg:+.3f} USDT/trade\n"
                 f"• Win rate: {win_rate:.1f}%\n"
             )
-            self.mb_log.insert(tk.END, msg)
-            self.mb_log.see(tk.END)
+            self._safe_log(msg)
         except Exception as e:
-            self.mb_log.insert(tk.END, f"⚠️ Összegzés hiba: {e}\n")
-            self.mb_log.see(tk.END)
+            self._safe_log(f"⚠️ Összegzés hiba: {e}\n")
 
     def _mb_do_summary_once(self, origin: str):
         """Összegzést pontosan egyszer írjunk ki, akárhonnan is érkezik a leállás."""
-        if getattr(self, "_mb_summary_done", False):
-            return
-        self._mb_summary_done = True
+        with self._mb_lock:
+            if getattr(self, "_mb_summary_done", False):
+                return
+            self._mb_summary_done = True
         try:
             self._mb_summary()
         except Exception as e:
-            self.mb_log.insert(tk.END, f"⚠️ Összegzés hiba ({origin}): {e}\n"); self.mb_log.see(tk.END)
-        self.mb_log.insert(tk.END, f"⏹️ Bot leállt. (forrás: {origin})\n"); self.mb_log.see(tk.END)
+            self._safe_log(f"⚠️ Összegzés hiba ({origin}): {e}\n")
+        self._safe_log(f"⏹️ Bot leállt. (forrás: {origin})\n")
 
     def _mb_breakout_signal(self, df, lookback: int = 20, buf_pct: float = 0.05) -> tuple[str, float, float, float, float]:
         """
