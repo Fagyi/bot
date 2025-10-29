@@ -898,6 +898,7 @@ class CryptoBotApp:
             exchange_provider=lambda: self.exchange,  # a már létrehozott KucoinSDKWrapper példány
             log_fn=self.log,                           # a meglévő logoló függvényed
         )
+
         # Szimbólumok betöltése háttérben
         threading.Thread(target=self._load_symbols_async, daemon=True).start()
 
@@ -2526,7 +2527,7 @@ class CryptoBotApp:
             mode = self.mb_mode.get() if hasattr(self, "mb_mode") else "isolated"
 
             try:
-                last_px = float(self.exchange.fetch_ticker(sym)["last"])
+                last_px = float(self.exchange.fetch_last_price(sym))
             except Exception:
                 last_px = None
                 self._safe_log("⚠️ Ár lekérés nem sikerült, utolsó ismert ár kerül felhasználásra.\n")
@@ -2934,8 +2935,7 @@ class CryptoBotApp:
                     # valós idejű (ticker) ár – default a candle close
                     last_px_rt = last_px
                     try:
-                        tkr = self.exchange.fetch_ticker(symbol)
-                        rt = float(tkr.get("last") or tkr.get("close") or 0.0)
+                        rt = float(self.exchange.fetch_last_price(symbol))
                         if rt > 0:
                             last_px_rt = rt
                     except Exception:
@@ -2947,8 +2947,17 @@ class CryptoBotApp:
                     except Exception:
                         drift_pct = float("nan")
 
+                    atr_val = None
+                    if use_atr:
+                        atr_series = self._mb_atr(df, n=atr_n)
+                        atr_val = float(atr_series.iloc[-1])
+                        self._mb_last_atr_val = atr_val 
+
                     # --- EMA + HTF jel ---
-                    sig_raw, ef_l, es_l = self._mb_signal_from_ema(df['c'], fa, slw)
+                    closes_for_sig = df['c'].astype(float).tolist()
+                    sig_raw, ef_l, es_l = self._mb_signal_from_ema_live(
+                        closes_for_sig, fa, slw, last_px_rt=last_px_rt, atr_eps_mult=0.15
+                    )
                     trend_htf = 0
                     if use_htf:
                         trend_htf = self._mb_trend_filter(symbol, htf_tf, fa, slw)
@@ -2998,11 +3007,6 @@ class CryptoBotApp:
                     )
                     self._safe_log(log_line)
 
-                    # --- FUTÓ POZÍCIÓK MENEDZSMENTJE (mindkét oldalon) ---
-                    atr_val = None
-                    if use_atr:
-                        atr_val = float(self._mb_atr(df, n=atr_n).iloc[-1])
-
                     # BUY-ok kezelése
                     i = 0
                     while i < len(self._sim_pos_long):
@@ -3038,7 +3042,7 @@ class CryptoBotApp:
                         # friss ticker csak nyitás előtt / vagy LIVE módban
                         try:
                             if (not dry) or True:  # ha minden nyitásnál szeretnéd
-                                rt = float(self.exchange.fetch_ticker(symbol)["last"])
+                                rt = float(self.exchange.fetch_last_price(symbol))
                                 if rt > 0:
                                     last_px_rt = rt
                         except Exception:
@@ -3172,6 +3176,57 @@ class CryptoBotApp:
                 # manuális stopnál a summary-t már a mb_stop intézte
                 # itt csak a jelzőt engedjük el
                 self._mb_stopping = False
+
+    def _mb_signal_from_ema_live(self, prices, fast: int, slow: int, 
+                                 last_px_rt: float | None, atr_eps_mult: float = 0.15
+                                ) -> tuple[str, float, float]:
+        """
+        EMA keresztezés 'live' utolsó ponttal és ATR-alapú hiszterézissel.
+        atr_eps_mult: az ATR %-os pufferének szorzója (pl. 0.15 → 15% ATR)
+        Vissza: ('buy'|'sell'|'hold', ema_fast_last, ema_slow_last)
+        """
+        import pandas as pd
+        s = pd.Series(prices, dtype='float64').copy()
+        if len(s) < max(fast, slow) + 2:
+            return 'hold', float('nan'), float('nan')
+
+        # utolsó érték cseréje live árra (ha adott és >0)
+        if last_px_rt is not None and last_px_rt > 0:
+            s.iloc[-1] = float(last_px_rt)
+
+        ema_f = s.ewm(span=fast, adjust=False).mean()
+        ema_s = s.ewm(span=slow, adjust=False).mean()
+
+        ef_l, es_l = float(ema_f.iloc[-1]), float(ema_s.iloc[-1])
+        ef_p, es_p = float(ema_f.iloc[-2]), float(ema_s.iloc[-2])
+
+        # slope megerősítés
+        slope_up   = ef_l > ef_p
+        slope_down = ef_l < ef_p
+
+        # ATR-alapú hiszterézis (puffer): ha van ATR sor a self._last_atr_series-ben, használjuk
+        eps = 0.0
+        try:
+            atr_last = float(getattr(self, "_mb_last_atr_val", 0.0))
+            px_last  = float(s.iloc[-1])
+            if atr_last > 0 and px_last > 0:
+                eps = (atr_last / px_last) * atr_eps_mult  # arány
+        except Exception:
+            pass
+
+        # keresztezés + puffer (ef - es arány)
+        def _strong_enough(a, b):
+            try:
+                px_last = float(s.iloc[-1])
+                return abs(a - b) / max(px_last, 1e-12) >= eps
+            except Exception:
+                return True  # ha bármi gáz, ne blokkoljuk
+
+        if ef_p <= es_p and ef_l > es_l and slope_up and _strong_enough(ef_l, es_l):
+            return 'buy', ef_l, es_l
+        if ef_p >= es_p and ef_l < es_l and slope_down and _strong_enough(ef_l, es_l):
+            return 'sell', ef_l, es_l
+        return 'hold', ef_l, es_l
 
     def _mb_toggle_fixed_widgets(self):
         try:
