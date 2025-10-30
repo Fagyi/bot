@@ -1865,23 +1865,79 @@ class CryptoBotApp:
         self.log("A bot ciklusa befejeződött.")
 
     def tick_once(self):
-        try:
-            symbol = self.e_symbol.get().strip().upper().replace('/', '-')
-            tf = self.cb_tf.get().strip()
-            short_n = int(self.e_short.get()); long_n = int(self.e_long.get())
-            ohlcv = self.exchange.fetch_ohlcv(symbol, tf, LIMIT)  # type: ignore[arg-type]
-            if not ohlcv:
-                self.log("⚠️ Nincs candle adat.")
+        """Azonnali manuális frissítés – most már nem blokkolja a GUI-t."""
+        if getattr(self, "_tick_busy", False):
+            self.log("⏳ Frissítés már folyamatban…\n")
+            return
+
+        self._tick_busy = True
+        self.log("🔄 Frissítés indul…")
+
+        # Belső worker thread
+        def _work():
+            import pandas as pd, time
+
+            try:
+                # Paraméterek biztonságos olvasása
+                symbol = self.e_symbol.get().strip().upper().replace("/", "-")
+                tf     = self.cb_tf.get().strip()
+                short  = int(self.e_short.get())
+                long   = int(self.e_long.get())
+            except Exception as e:
+                self.root.after(0, lambda: (
+                    self.log(f"⚠️ Paraméter hiba: {e}"),
+                    setattr(self, "_tick_busy", False)
+                ))
                 return
-            df = pd.DataFrame(ohlcv, columns=['ts','o','h','l','c','v'])
-            df['short'] = df['c'].rolling(short_n).mean()
-            df['long']  = df['c'].rolling(long_n).mean()
-            last = df.iloc[-1]
-            sig = compute_signal_from_ohlcv(ohlcv, short_n, long_n)
-            self.log(f"[{symbol} {tf}] close={last['c']:.4f} short={df['short'].iloc[-1]:.4f} long={df['long'].iloc[-1]:.4f} → {sig}")
-            self.draw_chart(df, symbol, tf)
-        except Exception as e:
-            self.log(f"Hiba a tick-ben: {e}")
+
+            # --- OHLCV lekérés ---
+            try:
+                with getattr(self, "_ex_lock", threading.RLock()):
+                    ohlcv = self.exchange.fetch_ohlcv(symbol, tf, limit=200)
+            except Exception as e:
+                self.root.after(0, lambda: (
+                    self.log(f"❌ Adatlekérési hiba: {e}"),
+                    setattr(self, "_tick_busy", False)
+                ))
+                return
+
+            if not ohlcv:
+                self.root.after(0, lambda: (
+                    self.log("⚠️ Nincs adat a szervertől."),
+                    setattr(self, "_tick_busy", False)
+                ))
+                return
+
+            # --- Számítások ---
+            try:
+                df = pd.DataFrame(ohlcv, columns=['ts','o','h','l','c','v'])
+                df['short'] = df['c'].rolling(short).mean()
+                df['long']  = df['c'].rolling(long).mean()
+            except Exception as e:
+                self.root.after(0, lambda: (
+                    self.log(f"⚠️ Számítási hiba: {e}"),
+                    setattr(self, "_tick_busy", False)
+                ))
+                return
+
+            # --- GUI frissítés a főszálon ---
+            def _update_ui():
+                try:
+                    last = df.iloc[-1]
+                    self.log(
+                        f"[{symbol} {tf}] close={last['c']:.6f}, short={last['short']:.6f}, long={last['long']:.6f}"
+                    )
+                    self.draw_chart(df, symbol, tf)
+                except Exception as e:
+                    self.log(f"⚠️ GUI frissítés hiba: {e}")
+                finally:
+                    self._tick_busy = False
+
+            self.root.after(0, _update_ui)
+
+        # Szál indítása
+        import threading
+        threading.Thread(target=_work, daemon=True).start()
 
     # ---- diagram ----
     def draw_chart(self, df: pd.DataFrame, symbol: str, tf: str):
