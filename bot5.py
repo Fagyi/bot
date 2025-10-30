@@ -3177,57 +3177,6 @@ class CryptoBotApp:
                 # itt csak a jelzőt engedjük el
                 self._mb_stopping = False
 
-    def _mb_signal_from_ema_live(self, prices, fast: int, slow: int, 
-                                 last_px_rt: float | None, atr_eps_mult: float = 0.15
-                                ) -> tuple[str, float, float]:
-        """
-        EMA keresztezés 'live' utolsó ponttal és ATR-alapú hiszterézissel.
-        atr_eps_mult: az ATR %-os pufferének szorzója (pl. 0.15 → 15% ATR)
-        Vissza: ('buy'|'sell'|'hold', ema_fast_last, ema_slow_last)
-        """
-        import pandas as pd
-        s = pd.Series(prices, dtype='float64').copy()
-        if len(s) < max(fast, slow) + 2:
-            return 'hold', float('nan'), float('nan')
-
-        # utolsó érték cseréje live árra (ha adott és >0)
-        if last_px_rt is not None and last_px_rt > 0:
-            s.iloc[-1] = float(last_px_rt)
-
-        ema_f = s.ewm(span=fast, adjust=False).mean()
-        ema_s = s.ewm(span=slow, adjust=False).mean()
-
-        ef_l, es_l = float(ema_f.iloc[-1]), float(ema_s.iloc[-1])
-        ef_p, es_p = float(ema_f.iloc[-2]), float(ema_s.iloc[-2])
-
-        # slope megerősítés
-        slope_up   = ef_l > ef_p
-        slope_down = ef_l < ef_p
-
-        # ATR-alapú hiszterézis (puffer): ha van ATR sor a self._last_atr_series-ben, használjuk
-        eps = 0.0
-        try:
-            atr_last = float(getattr(self, "_mb_last_atr_val", 0.0))
-            px_last  = float(s.iloc[-1])
-            if atr_last > 0 and px_last > 0:
-                eps = (atr_last / px_last) * atr_eps_mult  # arány
-        except Exception:
-            pass
-
-        # keresztezés + puffer (ef - es arány)
-        def _strong_enough(a, b):
-            try:
-                px_last = float(s.iloc[-1])
-                return abs(a - b) / max(px_last, 1e-12) >= eps
-            except Exception:
-                return True  # ha bármi gáz, ne blokkoljuk
-
-        if ef_p <= es_p and ef_l > es_l and slope_up and _strong_enough(ef_l, es_l):
-            return 'buy', ef_l, es_l
-        if ef_p >= es_p and ef_l < es_l and slope_down and _strong_enough(ef_l, es_l):
-            return 'sell', ef_l, es_l
-        return 'hold', ef_l, es_l
-
     def _mb_toggle_fixed_widgets(self):
         try:
             on = bool(self.mb_use_fixed.get())
@@ -3399,34 +3348,68 @@ class CryptoBotApp:
             pass
 
     # ---------- Jel-generátor: EMA keresztezés (HOSSZÚ metszés) + slope ----------
-    def _mb_signal_from_ema(self, series, fast: int, slow: int) -> tuple[str, float, float]:
+    def _mb_signal_from_ema_live(
+        self,
+        series,                    # pd.Series vagy iterálható close-ok
+        fast: int,
+        slow: int,
+        last_px_rt: float | None,  # élő ár (ha van)
+        atr_eps_mult: float = 0.15 # hiszterézis: ATR százalékának szorzója (0.15 ~ 15%)
+    ) -> tuple[str, float, float]:
         """
-        EMA keresztezés a HOSSZÚ (slow) oldaláról nézve + slope-megerősítés a HOSSZÚ-n.
-        BUY:   ha a slow EMA alulról a fast fölé kerül (es_p < ef_p  és  es_l > ef_l) ÉS slow emelkedik
-        SELL:  ha a slow EMA felülről a fast alá kerül (es_p > ef_p  és  es_l < ef_l) ÉS slow esik
+        EMA keresztezés a HOSSZÚ (slow) oldaláról nézve + slope a HOSSZÚ-n.
+        BUY:  ha a slow alulról a fast fölé kerül (es_p < ef_p  és  es_l > ef_l) ÉS a slow emelkedik
+        SELL: ha a slow felülről a fast alá kerül (es_p > ef_p  és  es_l < ef_l) ÉS a slow esik
+        Live ár az utolsó close helyett (ha adott).
+        ATR-alapú puffer (hiszterézis) a zaj kiszűrésére.
         Vissza: ('buy'|'sell'|'hold', ema_fast_last, ema_slow_last)
         """
         import pandas as pd
-        s = pd.Series(series, dtype='float64')
+        s = pd.Series(series, dtype='float64').copy()
         if len(s) < max(fast, slow) + 2:
             return 'hold', float('nan'), float('nan')
 
+        # utolsó érték kiváltása live árral (ha van)
+        if last_px_rt is not None and last_px_rt > 0:
+            s.iloc[-1] = float(last_px_rt)
+
         ema_f = s.ewm(span=fast, adjust=False).mean()
         ema_s = s.ewm(span=slow, adjust=False).mean()
-        last, prev = len(s)-1, len(s)-2
 
-        ef_l, es_l = float(ema_f.iloc[last]), float(ema_s.iloc[last])
-        ef_p, es_p = float(ema_f.iloc[prev]), float(ema_s.iloc[prev])
+        ef_l, es_l = float(ema_f.iloc[-1]), float(ema_s.iloc[-1])
+        ef_p, es_p = float(ema_f.iloc[-2]), float(ema_s.iloc[-2])
 
-        # slope a HOSSZÚ-n (slow EMA)
+        # slope a HOSSZÚ-n (slow EMA) – ez a te korábbi megerősítésed
         slope_up_s   = es_l > es_p
         slope_down_s = es_l < es_p
 
-        # HOSSZÚ keresztezés logika
-        if es_p < ef_p and es_l > ef_l and slope_up_s:
+        # ATR-alapú hiszterézis (puffer) a vissza-false-pozitívok ellen
+        eps = 0.0
+        try:
+            atr_last = float(getattr(self, "_mb_last_atr_val", 0.0))
+            px_last  = float(s.iloc[-1])
+            if atr_last > 0 and px_last > 0 and atr_eps_mult > 0:
+                eps = (atr_last / px_last) * atr_eps_mult  # arány (pl. 0.15 * ATR/ár)
+        except Exception:
+            pass
+
+        # a puffer a slow-fast különbség relatív nagyságát vizsgálja
+        def _strong_enough(a, b):
+            try:
+                px_last = float(s.iloc[-1])
+                return abs(a - b) / max(px_last, 1e-12) >= eps
+            except Exception:
+                return True
+
+        # --- HOSSZÚ keresztezés logika (mint a régi függvényedben) ---
+        # BUY: slow a fast fölé kerül ÉS a slow emelkedik
+        if es_p < ef_p and es_l > ef_l and slope_up_s and _strong_enough(es_l, ef_l):
             return 'buy', ef_l, es_l
-        if es_p > ef_p and es_l < ef_l and slope_down_s:
+
+        # SELL: slow a fast alá kerül ÉS a slow esik
+        if es_p > ef_p and es_l < ef_l and slope_down_s and _strong_enough(es_l, ef_l):
             return 'sell', ef_l, es_l
+
         return 'hold', ef_l, es_l
 
     # ---------- HTF trend filter (HOSSZÚ fölötte = bull) ----------
