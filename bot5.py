@@ -2350,6 +2350,26 @@ class CryptoBotApp:
         self.mb_trail_pct.pack(side=tk.LEFT, padx=(2,0))
         r += 1
 
+        # --- LIVE kitörés / shock (intra-bar) ---
+        live_box = ttk.Labelframe(form, text="LIVE kitörés / shock (intra-bar)", padding=6)
+        live_box.grid(row=r, column=0, columnspan=2, sticky="we", pady=(8,0))
+        live_row1 = ttk.Frame(live_box); live_row1.pack(anchor="w")
+
+        self.mb_use_live = tk.BooleanVar(value=True)
+        ttk.Checkbutton(live_row1, text="Élő ár figyelése (breakout/shock)", variable=self.mb_use_live)\
+           .pack(side=tk.LEFT)
+
+        ttk.Label(live_row1, text="  Shock %:").pack(side=tk.LEFT, padx=(10,2))
+        self.mb_live_shock_pct = ttk.Spinbox(live_row1, from_=0.0, to=10.0, increment=0.05, width=6)
+        self.mb_live_shock_pct.delete(0, tk.END); self.mb_live_shock_pct.insert(0, "1.00")
+        self.mb_live_shock_pct.pack(side=tk.LEFT)
+
+        ttk.Label(live_row1, text="  Shock ATR×:").pack(side=tk.LEFT, padx=(10,2))
+        self.mb_live_shock_atr = ttk.Spinbox(live_row1, from_=0.0, to=5.0, increment=0.05, width=6)
+        self.mb_live_shock_atr.delete(0, tk.END); self.mb_live_shock_atr.insert(0, "1.20")
+        self.mb_live_shock_atr.pack(side=tk.LEFT)
+        r += 1
+
         # --- Breakout (kitörés) detektor – kapcsoló + paraméterek ---
         brk_box = ttk.Labelframe(form, text="Breakout (kitörés)", padding=6)
         brk_box.grid(row=r, column=0, columnspan=2, sticky="we", pady=(8,0))
@@ -2997,6 +3017,9 @@ class CryptoBotApp:
                     except Exception:
                         pass
 
+                    # ADD: egységes élő ár menedzsmenthez/záráshoz
+                    px_for_mgmt = last_px_rt if (last_px_rt and last_px_rt > 0) else last_px
+
                     # (opcionális) eltérés százalék logoláshoz
                     try:
                         drift_pct = abs(last_px_rt - last_px) / max(last_px, 1e-12) * 100.0
@@ -3043,13 +3066,80 @@ class CryptoBotApp:
                             if (brk_sig == 'buy' and trend_htf < 0) or (brk_sig == 'sell' and trend_htf > 0):
                                 brk_sig = 'hold'
 
+                    # --- Intra-bar (élő ár) breakout / kétirányú shock override ---
+                    try:
+                        use_live = self._mb_get_bool('mb_use_live', True)
+
+                        if use_live:
+                            # küszöbök UI-ból
+                            shock_pct = float(self._mb_get_float('mb_live_shock_pct', 1.0))      # %
+                            shock_atr_mul = float(self._mb_get_float('mb_live_shock_atr', 1.2))  # ATR×
+
+                            # 1) élő ár (továbbra is az exchange->ticker az elsődleges)
+                            #    ha nem megy, fallback a saját _fetch_latest_prices-re
+                            try:
+                                rt_tmp = float(self.exchange.fetch_last_price(symbol))
+                                if rt_tmp > 0:
+                                    last_px_rt = rt_tmp
+                            except Exception:
+                                pass
+                            if (not last_px_rt) or last_px_rt <= 0:
+                                try:
+                                    base, quote = symbol.split('-')
+                                    if hasattr(self, "_fetch_latest_prices"):
+                                        d = self._fetch_latest_prices({base, quote})
+                                        if base in d:
+                                            # USDT≈1, így USD ár ≈ USDT ár
+                                            last_px_rt = float(d[base])
+                                except Exception:
+                                    pass
+
+                            # 2) élő breakout a lezárt gyertyára számolt szinteken
+                            live_break_up = (use_brk and not math.isnan(up_lvl) and last_px_rt >= up_lvl)
+                            live_break_dn = (use_brk and not math.isnan(dn_lvl) and last_px_rt <= dn_lvl)
+
+                            # 3) kétirányú shock a candle-close-hoz képest (pozitív és negatív is)
+                            chg = last_px_rt - last_px
+                            chg_pct = (abs(chg) / max(last_px, 1e-12)) * 100.0
+                            shock_hit_pct = (chg_pct >= max(0.0, shock_pct))
+
+                            shock_hit_atr = False
+                            if atr_val is not None and shock_atr_mul > 0:
+                                shock_hit_atr = (abs(chg) >= (shock_atr_mul * atr_val))
+
+                            shock_up = (chg > 0) and (shock_hit_pct or shock_hit_atr)
+                            shock_dn = (chg < 0) and (shock_hit_pct or shock_hit_atr)
+
+                            # HTF-irány tisztelete, ha be van kapcsolva
+                            can_buy  = (not use_htf) or (trend_htf >= 0)
+                            can_sell = (not use_htf) or (trend_htf <= 0)
+
+                            if (live_break_up or shock_up) and can_buy:
+                                brk_sig = 'buy'
+                                self._safe_log(
+                                    f"⚡ LIVE breakout/shock BUY: Élő ár={last_px_rt:.6f} "
+                                    f"(up={up_lvl:.4f} chg={chg:+.4f}, {chg_pct:.2f}%"
+                                    + (f", ATRx≈{abs(chg)/max(atr_val,1e-12):.2f}" if atr_val else "")
+                                    + ")\n"
+                                )
+                            elif (live_break_dn or shock_dn) and can_sell:
+                                brk_sig = 'sell'
+                                self._safe_log(
+                                    f"⚡ LIVE breakout/shock SELL: Élő ár={last_px_rt:.6f} "
+                                    f"(dn={dn_lvl:.4f} chg={chg:+.4f}, {chg_pct:.2f}%"
+                                    + (f", ATRx≈{abs(chg)/max(atr_val,1e-12):.2f}" if atr_val else "")
+                                    + ")\n"
+                                )
+                    except Exception:
+                        pass
+
                     # --- Kombinált jel (breakout elsőbbség) ---
                     combined_sig = brk_sig if brk_sig in ('buy', 'sell') else sig
 
                     # --- LOG: állapot + jel ---
                     log_line = (
-                        f"[{symbol} {tf}] px_candle={last_px:.6f} px_mkt={last_px_rt:.6f}  "
-                        f"EMA({fa})={ef_l:.4f} / EMA({slw})={es_l:.4f}"
+                        f"[{symbol} {tf}] Élő ár={last_px_rt:.6f} Gyertya ár={last_px:.6f} "
+                        f"EMA({fa})={ef_l:.4f}/EMA({slw})={es_l:.4f}"
                     )
                     if use_htf: log_line += f" HTF={trend_htf:+d}"
                     if use_rsi and rsi_val is not None: log_line += f" RSI({rsi_len})={rsi_val:.2f}"
@@ -3059,7 +3149,7 @@ class CryptoBotApp:
                         log_line += f" drift={drift_pct:.2f}%"
                     log_line += (
                         f" | POOL used/bal={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f} "
-                        f"(ui={budget_ui:.2f}) → {combined_sig}\n"
+                        f" → {combined_sig}\n"
                     )
                     self._safe_log(log_line)
 
@@ -3069,12 +3159,12 @@ class CryptoBotApp:
                         pos = self._sim_pos_long[i]
                         need_close = False
                         if pos.get('mgmt') == 'atr' and atr_val is not None:
-                            need_close = _manage_atr_on_pos(pos, last_px, atr_val)
+                            need_close = _manage_atr_on_pos(pos, px_for_mgmt, atr_val)
                         elif pos.get('mgmt') == 'fixed':
-                            need_close = _manage_fixed_on_pos(pos, last_px)
+                            need_close = _manage_fixed_on_pos(pos, px_for_mgmt)
                         # ha zárni kell
                         if need_close:
-                            _close_sim_by_index('buy', i, last_px)
+                            _close_sim_by_index('buy', i, px_for_mgmt)
                             continue  # ne növeld i-t, mert a lista rövidebb lett
                         i += 1
 
@@ -3084,11 +3174,11 @@ class CryptoBotApp:
                         pos = self._sim_pos_short[i]
                         need_close = False
                         if pos.get('mgmt') == 'atr' and atr_val is not None:
-                            need_close = _manage_atr_on_pos(pos, last_px, atr_val)
+                            need_close = _manage_atr_on_pos(pos, px_for_mgmt, atr_val)
                         elif pos.get('mgmt') == 'fixed':
-                            need_close = _manage_fixed_on_pos(pos, last_px)
+                            need_close = _manage_fixed_on_pos(pos, px_for_mgmt)
                         if need_close:
-                            _close_sim_by_index('sell', i, last_px)
+                            _close_sim_by_index('sell', i, px_for_mgmt)
                             continue
                         i += 1
 
