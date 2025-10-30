@@ -1302,7 +1302,7 @@ class CryptoBotApp:
             out["USDT"] = 1.0
         return out
 
-    # ---- util ----
+    # ---- DASHBOARD LOG ----
     def log(self, msg: str):
         def _append(area, text):
             area.insert(tk.END, text + "\n"); area.see(tk.END)
