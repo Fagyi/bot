@@ -1158,7 +1158,7 @@ class CryptoBotApp:
                         unique_currencies.add(quote_ccy)
 
                 # --- 2) Árfolyamok lekérése ---
-                prices: dict[str, float] = self._fetch_latest_prices(unique_currencies)
+                prices: dict[str, float] = self.fetch_last_price(unique_currencies)
 
                 # --- 3. Bevétel és PNL számítás, előbb rekordok (dict), utána rendezés és tuple-képzés ---
                 records = []  # ide gyűjtjük dict formában, hogy legyen min rendezni
@@ -1222,86 +1222,6 @@ class CryptoBotApp:
 
         threading.Thread(target=worker, daemon=True).start()
         
-    def _fetch_latest_prices(self, currencies: set[str]) -> dict[str, float]:
-        """
-        Deviza -> USD ár (USDT ≈ 1.0). Többlépcsős fallback:
-        1) SDK get_fiat_price (ha elérhető)
-        2) REST /api/v1/fiat-price?base=USD&currencies=...
-        3) REST /api/v1/market/orderbook/level1?symbol={CCY}-USDT (egyenként)
-        """
-        out: dict[str, float] = {}
-        if not currencies:
-            return out
-
-        # USDT mindig 1.0
-        cur_list = sorted({c.upper() for c in currencies})
-        if "USDT" in cur_list:
-            out["USDT"] = 1.0
-            cur_list.remove("USDT")
-
-        # --- 1) SDK: get_fiat_price (ha van) ---
-        tried_sdk = False
-        try:
-            if self.exchange and getattr(self.exchange, "_spot_market", None):
-                # próbálunk buildert találni
-                mod = __import__('kucoin_universal_sdk.generate.spot.market', fromlist=['GetFiatPriceReqBuilder'])
-                B = getattr(mod, 'GetFiatPriceReqBuilder')
-                req = B().set_base("USD").set_currencies(",".join(cur_list)).build()
-                resp = self.exchange._spot_market.get_fiat_price(req)  # type: ignore[attr-defined]
-                data = getattr(resp, "data", None) or {}
-                for k, v in (data.items() if isinstance(data, dict) else []):
-                    try:
-                        out[k.upper()] = float(v)
-                    except Exception:
-                        pass
-                tried_sdk = True
-        except Exception:
-            pass
-
-        # --- 2) REST: /fiat-price (ha kell) ---
-        missing = [c for c in cur_list if c not in out]
-        if missing:
-            try:
-                import json, urllib.parse, urllib.request
-                qs = urllib.parse.urlencode({
-                    "base": "USD",
-                    "currencies": ",".join(missing)
-                })
-                url = f"https://api.kucoin.com/api/v1/fiat-price?{qs}"
-                with urllib.request.urlopen(url, timeout=8) as r:
-                    data = json.loads(r.read().decode("utf-8"))
-                    d = (data or {}).get("data", {}) or {}
-                    for k, v in d.items():
-                        try:
-                            out[k.upper()] = float(v)
-                        except Exception:
-                            pass
-            except Exception:
-                # megyünk tovább a 3. lépcsőre
-                pass
-
-        # --- 3) REST fallback: level1 {CCY}-USDT egyenként ---
-        still_missing = [c for c in cur_list if c not in out]
-        for ccy in still_missing:
-            try:
-                import json, urllib.request
-                sym = f"{ccy}-USDT"
-                url = f"https://api.kucoin.com/api/v1/market/orderbook/level1?symbol={sym}"
-                with urllib.request.urlopen(url, timeout=6) as r:
-                    data = json.loads(r.read().decode("utf-8"))
-                    price = float(((data or {}).get("data") or {}).get("price") or 0.0)
-                    if price > 0:
-                        out[ccy] = price  # USDT ára ~1 → USD-ben kifejezve oké
-            except Exception:
-                # végső esetben nem tesszük bele (ne legyen 0)
-                pass
-
-        # végső simítás: semmire se tároljunk 0-t
-        out = {k: v for k, v in out.items() if isinstance(v, (int, float)) and v > 0}
-        if "USDT" not in out:
-            out["USDT"] = 1.0
-        return out
-
     # ---- DASHBOARD LOG ----
     def log(self, msg: str):
         def _append(area, text):
@@ -3076,7 +2996,7 @@ class CryptoBotApp:
                             shock_atr_mul = float(self._mb_get_float('mb_live_shock_atr', 1.2))  # ATR×
 
                             # 1) élő ár (továbbra is az exchange->ticker az elsődleges)
-                            #    ha nem megy, fallback a saját _fetch_latest_prices-re
+                            #    ha nem megy, fallback a saját fetch_last_price-re
                             try:
                                 rt_tmp = float(self.exchange.fetch_last_price(symbol))
                                 if rt_tmp > 0:
@@ -3086,8 +3006,8 @@ class CryptoBotApp:
                             if (not last_px_rt) or last_px_rt <= 0:
                                 try:
                                     base, quote = symbol.split('-')
-                                    if hasattr(self, "_fetch_latest_prices"):
-                                        d = self._fetch_latest_prices({base, quote})
+                                    if hasattr(self, "fetch_last_price"):
+                                        d = self.fetch_last_price({base, quote})
                                         if base in d:
                                             # USDT≈1, így USD ár ≈ USDT ár
                                             last_px_rt = float(d[base])
@@ -3144,7 +3064,7 @@ class CryptoBotApp:
                     if use_htf: log_line += f" HTF={trend_htf:+d}"
                     if use_rsi and rsi_val is not None: log_line += f" RSI({rsi_len})={rsi_val:.2f}"
                     if use_brk and not (math.isnan(hh) or math.isnan(ll)):
-                        log_line += f" BRK[{brk_n}] HH={hh:.4f} LL={ll:.4f} ↑{up_lvl:.4f} ↓{dn_lvl:.4f} sig={brk_sig}"
+                        log_line += f" BRK[{brk_n}] HH={hh:.4f} LL={ll:.4f} ↑{up_lvl:.4f} ↓{dn_lvl:.4f}"
                     if drift_pct == drift_pct:  # not NaN
                         log_line += f" drift={drift_pct:.2f}%"
                     log_line += (
