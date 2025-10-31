@@ -2370,6 +2370,7 @@ class CryptoBotApp:
         """Margin bot indítás (dry-runban is futhat)."""
         self._mb_stopping = False   # biztos ami biztos
         self._mb_summary_done = False
+        self._mb_first_cycle = True  # első ciklus ne aludjon same-bar miatt
 
         if getattr(self, "_mb_running", False):
             self._safe_log("⚠️ A bot már fut.\n")
@@ -2388,6 +2389,18 @@ class CryptoBotApp:
         self._sim_pos_short = []
         self._sim_history = []
         self._sim_pnl_usdt = 0.0
+
+        # --- Hard reset minden run előtt (különösen pool és bar state) ---
+        # töröljük, hogy a worker ÚJRA építse a keretet
+        try: delattr(self, "_pool_balance_quote")
+        except Exception: pass
+        try: delattr(self, "_pool_used_quote")
+        except Exception: pass
+
+        # azonnali aktivitás – ne szűrje ki "ugyanaz a gyertya"
+        self._mb_last_bar_ts = {}
+        # opcionális cache-ek nullázása (ha korábban be lettek vezetve)
+        self._mb_last_rt_px = {} if hasattr(self, "_mb_last_rt_px") else {}
 
         # belső állapotok, ha hiányoznának
         if not hasattr(self, "_sim_pnl_usdt"):     self._sim_pnl_usdt     = 0.0
@@ -2485,8 +2498,8 @@ class CryptoBotApp:
                             pass
 
                         self._safe_log(
-                            f"🔚 SIM CLOSE {side.upper()} @ {px:.6f} | sz={sz:.6f} | "
-                            f"PnL={pnl:+.2f} USDT | Total={self._sim_pnl_usdt:+.2f}\n"
+                            f"🔚 SIM CLOSE {side.upper()} | entry={entry:.6f} → exit={px:.6f} | "
+                            f"sz={sz:.6f} | PnL={pnl:+.2f} USDT | Total={self._sim_pnl_usdt:+.2f}\n"
                         )
                         del lst[i]
                         continue  # ne növeld az i-t, mert rövidebb lett a lista
@@ -2508,7 +2521,11 @@ class CryptoBotApp:
                                 self._safe_log("ℹ️ Nulla méret – nincs zárás szükség.\n")
                         except Exception as e:
                             self._safe_log(f"❌ LIVE zárási hiba: {e}\n")
-
+                        # extra: entry → exit és PnL mirror log éles zárás után
+                        self._safe_log(
+                            f"🔚 LIVE MIRROR {side.upper()} | entry={entry:.6f} → exit={px:.6f} | "
+                            f"sz={sz:.6f} | PnL={pnl:+.2f} USDT\n"
+                        )
                         # sim tükör PnL frissítés
                         entry = float(pos.get('entry', 0.0))
                         sz = float(pos.get('size', 0.0))
@@ -2659,7 +2676,8 @@ class CryptoBotApp:
                 pass
 
             self._safe_log(
-                f"🔚 SIM CLOSE {side.upper()} @ {exit_px:.6f} | sz={sz:.6f} | PnL={pnl:+.2f} USDT | Total={self._sim_pnl_usdt:+.2f} | pool used={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f}\n"
+                f"🔚 SIM CLOSE {side.upper()} | entry={entry:.6f} → exit={exit_px:.6f} | "
+                f"sz={sz:.6f} | PnL={pnl:+.2f} USDT | Total={self._sim_pnl_usdt:+.2f} | pool used={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f}\n"
             )
 
             del lst[idx]
@@ -2712,8 +2730,8 @@ class CryptoBotApp:
 
             # Log
             self._safe_log(
-                f"🔹 PARTIAL 50% @ {px:.6f} | zárt={close_sz:.6f} | PnL={pnl:+.2f} | "
-                f"pool used={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f}\n"
+                f"🔹 PARTIAL 50% | entry={entry:.6f} → exit={px:.6f} | "
+                f"zárt={close_sz:.6f} | PnL={pnl:+.2f} | pool used={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f}\n"
             )
 
         def _manage_atr_on_pos(pos: dict, last_px: float, atr_val: float) -> bool:
@@ -2840,8 +2858,14 @@ class CryptoBotApp:
                     df = pd.DataFrame(ohlcv, columns=['ts','o','h','l','c','v'])
                     last_ts = int(df['ts'].iloc[-1])
                     key = (symbol, tf)
-                    if self._mb_last_bar_ts.get(key, 0) == last_ts:
-                        time.sleep(2); continue
+                    # első ciklusban NE ugorjunk same-bar miatt
+                    if getattr(self, "_mb_first_cycle", False):
+                        self._mb_first_cycle = False
+                    else:
+                        if self._mb_last_bar_ts.get(key, 0) == last_ts:
+                            time.sleep(2)
+                            continue
+
                     self._mb_last_bar_ts[key] = last_ts
 
                     closes = df['c'].astype(float).tolist()
