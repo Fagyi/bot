@@ -2386,6 +2386,12 @@ class CryptoBotApp:
         self._mb_summary_done = False
         self._mb_first_cycle = True  # első ciklus ne aludjon same-bar miatt
 
+        # bezárás-kezelés egyszeri bekötése
+        try:
+            self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        except Exception:
+            pass
+
         if getattr(self, "_mb_running", False):
             self._safe_log("⚠️ A bot már fut.\n")
             return
@@ -2535,15 +2541,15 @@ class CryptoBotApp:
                                 self._safe_log("ℹ️ Nulla méret – nincs zárás szükség.\n")
                         except Exception as e:
                             self._safe_log(f"❌ LIVE zárási hiba: {e}\n")
-                        # extra: entry → exit és PnL mirror log éles zárás után
-                        self._safe_log(
-                            f"🔚 LIVE MIRROR {side.upper()} | entry={entry:.6f} → exit={px:.6f} | "
-                            f"sz={sz:.6f} | PnL={pnl:+.2f} USDT\n"
-                        )
                         # sim tükör PnL frissítés
                         entry = float(pos.get('entry', 0.0))
                         sz = float(pos.get('size', 0.0))
                         pnl = (px - entry) * sz * (1 if side == 'buy' else -1)
+                        # extra: entry → exit és PnL mirror log éles zárás után (MOST már számítás után)
+                        self._safe_log(
+                            f"🔚 LIVE MIRROR {side.upper()} | entry={entry:.6f} → exit={px:.6f} | "
+                            f"sz={sz:.6f} | PnL={pnl:+.2f} USDT\n"
+                        )
                         with self._mb_lock:
                             self._sim_pnl_usdt += pnl
                             self._pool_balance_quote += pnl
@@ -3620,6 +3626,71 @@ class CryptoBotApp:
             return bool(v)
         return self._mb_get([name], _cast, default)
 
+    # ======= ABLAK BEZÁRÁS (piros X) – kulturált leállítás =======
+    def on_close(self):
+        """
+        Piros X-re:
+          1) margin bot kulturált leállítása (mb_stop),
+          2) futó frissítések megvárása nem-blokkoló módon,
+          3) végül ablak bezárása.
+        """
+        if getattr(self, "_closing", False):
+            return
+        self._closing = True
+        try:
+            self._safe_log("🧹 Bezárás kérése – bot leállítása…\n")
+        except Exception:
+            pass
+
+        # 1) margin bot leállítása, ha fut
+        try:
+            if getattr(self, "_mb_running", False):
+                self.mb_stop()
+        except Exception as e:
+            try: self._safe_log(f"⚠️ mb_stop hiba: {e}\n")
+            except Exception: pass
+
+        # 2) nem-blokkoló poll amíg minden el nem állt
+        try:
+            self._poll_shutdown(0)
+        except Exception:
+            try: self.root.destroy()
+            except Exception: pass
+
+    def _poll_shutdown(self, tries: int = 0):
+        """
+        100 ms-onként ellenőrzi, hogy:
+          - a margin bot szála leállt-e (_mb_running == False),
+          - nincs-e épp tick/refresh (_tick_busy == False),
+        majd csak ezután zárja az ablakot.
+        """
+        still_mb   = bool(getattr(self, "_mb_running", False))
+        still_tick = bool(getattr(self, "_tick_busy", False))
+        if still_mb or still_tick:
+            if tries % 10 == 0:
+                try:
+                    self._safe_log("⏳ Leállítás folyamatban… (várok a szálakra)\n")
+                except Exception:
+                    pass
+            try:
+                self.root.after(100, lambda: self._poll_shutdown(tries + 1))
+            except Exception:
+                try: self.root.destroy()
+                except Exception: pass
+            return
+
+        # opcionális: exchange lezárása, ha van ilyen API
+        try:
+            ex = getattr(self, "exchange", None)
+            if ex and hasattr(ex, "close"):
+                ex.close()
+        except Exception:
+            pass
+
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 # ==================== BACKTEST TAB (ÚJ) ====================
 
 import math
