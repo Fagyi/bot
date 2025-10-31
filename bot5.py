@@ -2136,7 +2136,7 @@ class CryptoBotApp:
         ttk.Label(form, text="Idősík").grid(row=r, column=0, sticky="w", pady=(4,0))
         self.mb_tf = ttk.Combobox(form, state="readonly", width=10,
                                   values=["1m","3m","5m","15m","30m","1h","4h","1d"])
-        self.mb_tf.set("3m")
+        self.mb_tf.set("1m")
         self.mb_tf.grid(row=r, column=1, sticky="w", pady=(4,0))
         r += 1
 
@@ -2189,17 +2189,17 @@ class CryptoBotApp:
         fixed_row2 = ttk.Frame(fixed_box); fixed_row2.pack(anchor="w", pady=(4,0))
         ttk.Label(fixed_row2, text="SL %").pack(side=tk.LEFT)
         self.mb_sl_pct = ttk.Spinbox(fixed_row2, from_=0, to=50, increment=0.1, width=6)
-        self.mb_sl_pct.delete(0, tk.END); self.mb_sl_pct.insert(0, "1.0")
+        self.mb_sl_pct.delete(0, tk.END); self.mb_sl_pct.insert(0, "5.0")
         self.mb_sl_pct.pack(side=tk.LEFT, padx=(2,8))
 
         ttk.Label(fixed_row2, text="TP %").pack(side=tk.LEFT)
         self.mb_tp_pct = ttk.Spinbox(fixed_row2, from_=0, to=50, increment=0.1, width=6)
-        self.mb_tp_pct.delete(0, tk.END); self.mb_tp_pct.insert(0, "2.0")
+        self.mb_tp_pct.delete(0, tk.END); self.mb_tp_pct.insert(0, "1.0")
         self.mb_tp_pct.pack(side=tk.LEFT, padx=(2,8))
 
         ttk.Label(fixed_row2, text="Trailing %").pack(side=tk.LEFT)
         self.mb_trail_pct = ttk.Spinbox(fixed_row2, from_=0, to=20, increment=0.1, width=6)
-        self.mb_trail_pct.delete(0, tk.END); self.mb_trail_pct.insert(0, "0.9")
+        self.mb_trail_pct.delete(0, tk.END); self.mb_trail_pct.insert(0, "0")
         self.mb_trail_pct.pack(side=tk.LEFT, padx=(2,0))
         r += 1
 
@@ -2228,7 +2228,7 @@ class CryptoBotApp:
         brk_box.grid(row=r, column=0, columnspan=2, sticky="we", pady=(8,0))
         brk_row1 = ttk.Frame(brk_box); brk_row1.pack(anchor="w")
 
-        self.mb_use_brk = tk.BooleanVar(value=True)
+        self.mb_use_brk = tk.BooleanVar(value=False)
         ttk.Checkbutton(brk_row1, text="Breakout használata", variable=self.mb_use_brk,
                         command=lambda: self._mb_toggle_brk_widgets()).pack(side=tk.LEFT)
 
@@ -2242,7 +2242,7 @@ class CryptoBotApp:
         self.mb_brk_buf.delete(0, tk.END); self.mb_brk_buf.insert(0, "0.10")
         self.mb_brk_buf.pack(side=tk.LEFT)
 
-        self.mb_brk_with_trend = tk.BooleanVar(value=True)
+        self.mb_brk_with_trend = tk.BooleanVar(value=False)
         ttk.Checkbutton(brk_row1, text="Csak HTF trend irányába", variable=self.mb_brk_with_trend).pack(side=tk.LEFT, padx=(10,0))
         r += 1
 
@@ -2279,7 +2279,7 @@ class CryptoBotApp:
         htf_box = ttk.Labelframe(form, text="HTF trend filter (EMA alapú)", padding=6)
         htf_box.grid(row=r, column=0, columnspan=2, sticky="we", pady=(8,0))
         htf_row = ttk.Frame(htf_box); htf_row.pack(anchor="w")
-        self.mb_use_htf = tk.BooleanVar(value=True)
+        self.mb_use_htf = tk.BooleanVar(value=False)
         ttk.Checkbutton(htf_row, text="HTF filter használata", variable=self.mb_use_htf).pack(side=tk.LEFT)
         ttk.Label(htf_row, text="  HTF TF:").pack(side=tk.LEFT, padx=(6,2))
         self.mb_htf_tf = ttk.Combobox(htf_row, state="readonly", width=6, values=["15m","30m","1h","4h","1d"])
