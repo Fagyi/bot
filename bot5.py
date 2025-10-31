@@ -1077,7 +1077,18 @@ class CryptoBotApp:
                         unique_currencies.add(quote_ccy)
 
                 # --- 2) Árfolyamok lekérése ---
-                prices: dict[str, float] = self.fetch_last_price(unique_currencies)
+                prices: dict[str, float] = {}
+                for ccy in unique_currencies:
+                    try:
+                        # pl. ha USDT, akkor az 1.0
+                        if ccy.upper() == "USDT":
+                            prices[ccy] = 1.0
+                        else:
+                            # USD-ben kifejezve ár
+                            sym = f"{ccy}-USDT"
+                            prices[ccy] = float(self.exchange.fetch_last_price(sym))
+                    except Exception:
+                        prices[ccy] = 0.0
 
                 # --- 3. Bevétel és PNL számítás, előbb rekordok (dict), utána rendezés és tuple-képzés ---
                 records = []  # ide gyűjtjük dict formában, hogy legyen min rendezni
@@ -1131,7 +1142,11 @@ class CryptoBotApp:
                     for rec in records
                 ]
 
-                self.root.after(0, lambda: self._update_funds_balance_table(final_rows))
+                self.root.after(0, lambda: (
+                    self._update_funds_balance_table(final_rows),
+                    # Margin Bot „Elérhető” felirat újratöltése ugyanazzal a logikával
+                    self._mb_refresh_available() if hasattr(self, "_mb_refresh_available") else None
+                ))
 
 
             except RuntimeError as e:
@@ -2118,18 +2133,22 @@ class CryptoBotApp:
         # mód választó
         self.mb_mode = tk.StringVar(value="isolated")
         mrow = ttk.Frame(form); mrow.grid(row=r, column=0, columnspan=2, sticky="w")
-        ttk.Radiobutton(mrow, text="Isolated", variable=self.mb_mode, value="isolated",
-                        command=self._mb_sync_lev_cap).pack(side=tk.LEFT, padx=(0,12))
-        ttk.Radiobutton(mrow, text="Cross",    variable=self.mb_mode, value="cross",
-                        command=self._mb_sync_lev_cap).pack(side=tk.LEFT)
+        ttk.Radiobutton(
+            mrow, text="Isolated", variable=self.mb_mode, value="isolated",
+            command=lambda: (self._mb_sync_lev_cap(), self._mb_refresh_available())
+        ).pack(side=tk.LEFT, padx=(0,12))
+        ttk.Radiobutton(
+            mrow, text="Cross", variable=self.mb_mode, value="cross",
+            command=lambda: (self._mb_sync_lev_cap(), self._mb_refresh_available())
+        ).pack(side=tk.LEFT)
         r += 1
 
         # --- Pár (az MT fül combóját használjuk, és létrehozunk alias-t a worker kedvéért) ---
         ttk.Label(form, text="Pár").grid(row=r, column=0, sticky="w")
         self.mt_symbol = ttk.Combobox(form, values=self.symbols, width=12, state='readonly')
         self.mt_symbol.set(DEFAULT_SYMBOL); self.mt_symbol.grid(row=r, column=1, sticky="w")
-        # alias, ha a worker 'mb_symbol'-t kérdezné
-        self.mb_symbol = self.mt_symbol
+        # párváltáskor frissítsük az elérhető egyenleget
+        self.mt_symbol.bind("<<ComboboxSelected>>", lambda _e: self._mb_refresh_available())
         r += 1
 
         # Idősík
@@ -2138,6 +2157,8 @@ class CryptoBotApp:
                                   values=["1m","3m","5m","15m","30m","1h","4h","1d"])
         self.mb_tf.set("1m")
         self.mb_tf.grid(row=r, column=1, sticky="w", pady=(4,0))
+        # fül felépítése után egyszer töltsük be az elérhető egyenleget
+        self.root.after(50, self._mb_refresh_available)
         r += 1
 
         # EMA (rövid/hosszú) – a worker mb_ma_fast/mb_ma_slow nevét használja
@@ -2173,8 +2194,14 @@ class CryptoBotApp:
         r += 1
 
         ttk.Label(form, text="Keret (QUOTE) – opcionális").grid(row=r, column=0, sticky="w", pady=(2,0))
-        self.mb_budget = ttk.Entry(form, width=12)  # ha üres: elérhető QUOTE-ot használ
-        self.mb_budget.grid(row=r, column=1, sticky="w", pady=(2,0))
+        # mező + elérhető egyenleg egysorban
+        _row_budget = ttk.Frame(form); _row_budget.grid(row=r, column=1, sticky="w", pady=(2,0))
+        self.mb_budget = ttk.Entry(_row_budget, width=12)  # ha üres: elérhető QUOTE-ot használ
+        self.mb_budget.pack(side=tk.LEFT)
+        ttk.Label(_row_budget, text="  Elérhető:").pack(side=tk.LEFT, padx=(8,2))
+        self.mb_avail_var = tk.StringVar(value="–")
+        self.mb_avail_lbl = ttk.Label(_row_budget, textvariable=self.mb_avail_var)
+        self.mb_avail_lbl.pack(side=tk.LEFT)
         r += 1
 
         # Fix SL / TP / Trailing – opcionális (ATR nélkül)
@@ -2372,6 +2399,23 @@ class CryptoBotApp:
 
         if not hasattr(self, "_mb_stopping"): 
             self._mb_stopping = False
+
+    # --- Elérhető egyenleg kijelzés frissítése (UI segédfüggvény) ---
+    def _mb_refresh_available(self):
+        """A Margin Bot „Elérhető” feliratát a Margin Trade fül egységes logikájával tölti."""
+        try:
+            # a Margin Bot fül a Margin Trade combóját (mt_symbol) használja
+            sym = self.mt_symbol.get().strip().upper().replace("/", "-")
+            base, quote = sym.split("-")
+            avail_base, avail_quote = (0.0, 0.0)
+            if hasattr(self, "_mt_available"):
+                avail_base, avail_quote = self._mt_available(base, quote)
+            self.mb_avail_var.set(f"{avail_quote:.2f} {quote}")
+        except Exception:
+            try:
+                self.mb_avail_var.set("–")
+            except Exception:
+                pass
 
     # --- Thread-safe logoló segéd ---
     def _safe_log(self, text: str):
@@ -2595,24 +2639,32 @@ class CryptoBotApp:
         # _pool_balance_quote: a "bot kerete" (USDT), ami PnL-lel nő/csökken
         # _pool_used_quote: nyitott pozikhoz lekötött USDT (rész-zárás csökkenti)
         if not hasattr(self, "_pool_balance_quote") or not hasattr(self, "_pool_used_quote"):
-            # induló keret = UI "mb_budget", ha nincs megadva, akkor az elérhető QUOTE
+            # induló keret = min(UI keret, VALÓS elérhető QUOTE); ha UI üres → elérhető QUOTE
             try:
                 symbol0 = self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)).strip().upper().replace('/', '-')
                 base0, quote0 = symbol0.split('-')
             except Exception:
-                quote0 = "USDT"
+                base0, quote0 = "","USDT"
+
             ui_budget = float(self._mb_get_float('mb_budget', 0.0) or 0.0)
             avail_quote = 0.0
             try:
                 if hasattr(self, "_mt_available"):
-                    _, avail_quote = self._mt_available(base0, quote0)  # gyors lekérés, ha van
+                    _, avail_quote = self._mt_available(base0, quote0)
             except Exception:
                 pass
-            init_pool = ui_budget if ui_budget > 0 else max(0.0, avail_quote)
+
+            # keret klippelése a valós elérhetőhöz
+            init_pref = ui_budget if ui_budget > 0 else max(0.0, avail_quote)
+            init_pool = min(init_pref, max(0.0, avail_quote))
+            if ui_budget > 0 and ui_budget > avail_quote:
+                self._safe_log(
+                    f"⚠️ Megadott keret {ui_budget:.2f} {quote0}, de elérhető {avail_quote:.2f} {quote0}. "
+                    f"Kezdő keret {init_pool:.2f} {quote0}-ra korlátozva.\n"
+                )
             with self._mb_lock:
                 self._pool_balance_quote = float(init_pool)
                 self._pool_used_quote = 0.0
-            # védő log
             self._safe_log(f"🏦 Pool init: balance={self._pool_balance_quote:.2f} {quote0}, used={self._pool_used_quote:.2f}\n")
 
         # --- belső helperek: lista oldalszerint, nyitás/zárás multi, menedzsment per-pozíció ---
