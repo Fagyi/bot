@@ -2924,12 +2924,9 @@ class CryptoBotApp:
                                 pass
                             if (not last_px_rt) or last_px_rt <= 0:
                                 try:
-                                    base, quote = symbol.split('-')
-                                    if hasattr(self, "fetch_last_price"):
-                                        d = self.fetch_last_price({base, quote})
-                                        if base in d:
-                                            # USDT≈1, így USD ár ≈ USDT ár
-                                            last_px_rt = float(d[base])
+                                    rt_tmp = float(self.exchange.fetch_last_price(symbol))
+                                    if rt_tmp > 0:
+                                        last_px_rt = rt_tmp
                                 except Exception:
                                     pass
 
