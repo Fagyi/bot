@@ -1712,19 +1712,32 @@ class CryptoBotApp:
         self._tick_busy = True
         self.log("🔄 Frissítés indul…")
 
-        # Belső worker thread
         def _work():
             import pandas as pd, time
 
             try:
+                # ha még nincs exchange (tiszta indulás), inicializáljuk public módban
+                if getattr(self, "exchange", None) is None:
+                    try:
+                        self.exchange = KucoinSDKWrapper(public_mode=True, log_fn=self.log)
+                        self.log("🔧 Exchange inicializálva (public mód) – csak adatlekérésre.")
+                    except Exception as ex:
+                        _msg = f"❌ Exchange init hiba: {ex}"
+                        self.root.after(0, lambda msg=_msg: (
+                            self.log(msg),
+                            setattr(self, "_tick_busy", False)
+                        ))
+                        return
+
                 # Paraméterek biztonságos olvasása
                 symbol = self.e_symbol.get().strip().upper().replace("/", "-")
                 tf     = self.cb_tf.get().strip()
                 short  = int(self.e_short.get())
                 long   = int(self.e_long.get())
             except Exception as e:
-                self.root.after(0, lambda: (
-                    self.log(f"⚠️ Paraméter hiba: {e}"),
+                _msg = f"⚠️ Paraméter hiba: {e}"
+                self.root.after(0, lambda msg=_msg: (
+                    self.log(msg),
                     setattr(self, "_tick_busy", False)
                 ))
                 return
@@ -1734,8 +1747,9 @@ class CryptoBotApp:
                 with getattr(self, "_ex_lock", threading.RLock()):
                     ohlcv = self.exchange.fetch_ohlcv(symbol, tf, limit=200)
             except Exception as e:
-                self.root.after(0, lambda: (
-                    self.log(f"❌ Adatlekérési hiba: {e}"),
+                _msg = f"❌ Adatlekérési hiba: {e}"
+                self.root.after(0, lambda msg=_msg: (
+                    self.log(msg),
                     setattr(self, "_tick_busy", False)
                 ))
                 return
@@ -1753,8 +1767,9 @@ class CryptoBotApp:
                 df['short'] = df['c'].rolling(short).mean()
                 df['long']  = df['c'].rolling(long).mean()
             except Exception as e:
-                self.root.after(0, lambda: (
-                    self.log(f"⚠️ Számítási hiba: {e}"),
+                _msg = f"⚠️ Számítási hiba: {e}"
+                self.root.after(0, lambda msg=_msg: (
+                    self.log(msg),
                     setattr(self, "_tick_busy", False)
                 ))
                 return
@@ -1774,7 +1789,6 @@ class CryptoBotApp:
 
             self.root.after(0, _update_ui)
 
-        # Szál indítása
         import threading
         threading.Thread(target=_work, daemon=True).start()
 
