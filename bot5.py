@@ -16,6 +16,7 @@ from __future__ import annotations
 import os, sys, time, json, uuid, hmac, base64, hashlib, threading
 from typing import List, Optional, Literal, Any, Dict
 from urllib.parse import urlencode
+import time as _time
 
 # -------- 3rd party --------
 import requests
@@ -2719,16 +2720,39 @@ class CryptoBotApp:
                         except Exception:
                             pass
 
+                        # === Fee + nettó PnL ===
                         entry = float(pos.get('entry', 0.0))
-                        pnl = (px - entry) * sz_send * (1 if side == 'buy' else -1)
+                        gross = (px - entry) * sz_send * (1 if side == 'buy' else -1)
+                        # próbáljuk a TÉNY close fee-t lekérni
+                        try:
+                            fee_close_act = self._mb_try_fetch_close_fee(str(oid))
+                            if fee_close_act > 0:
+                                pos['fee_close_actual'] = float(fee_close_act)
+                        except Exception:
+                            pass
+                        fee_rate = self._mb_get_taker_fee()
+                        f_open, f_close, f_total = self._mb_sum_fee_actual_or_est(pos, px, fee_rate)
+                        pnl = gross - f_total
                         self._safe_log(
                             f"🔚 LIVE MIRROR {side.upper()} | entry={entry:.6f} → exit={px:.6f} | "
-                            f"sz={sz_send:.6f} | PnL={pnl:+.2f} USDT\n"
+                            f"sz={sz_send:.6f} | GROSS={gross:+.4f} | fee_tot={f_total:.4f} | "
+                            f"PNL={pnl:+.4f} USDT\n"
                         )
                         with self._mb_lock:
                             self._sim_pnl_usdt += pnl
                             self._pool_balance_quote += pnl
-                            self._pool_used_quote = max(0.0, self._pool_used_quote - float(pos.get('commit_usdt', 0.0)))
+                            # felszabadítjuk a commit + open fee reservet
+                            self._pool_used_quote = max(
+                                0.0,
+                                self._pool_used_quote - (float(pos.get('commit_usdt',0.0)) + float(pos.get('fee_reserved',0.0)))
+                            )
+                        # History fee total (open+close) frissítése a fee oszlopban
+                        try:
+                            open_oid = str(pos.get('oid')) if pos.get('oid') else None
+                            if open_oid:
+                                self._mb_hist_update_exit(open_oid, px, fee=f_total)
+                        except Exception:
+                            pass
 
                         del lst[i]
                         continue
@@ -2817,6 +2841,8 @@ class CryptoBotApp:
             atr_pack: (mul_sl, mul_tp1, mul_tp2, trail_mul, atr_val) vagy None
             fixed_pack: (tpct, spct, trpct) vagy None
             """
+            fee_rate = self._mb_get_taker_fee()
+            fee_open_est = self._mb_est_fee_quote(entry_px, size_base, fee_rate)
             pos = {
                 'side': side,
                 'entry': float(entry_px),
@@ -2824,6 +2850,10 @@ class CryptoBotApp:
                 'peak': float(entry_px),
                 'pnl': 0.0,
                 'commit_usdt': float(commit_usdt),
+                'fee_open_est': float(fee_open_est),
+                'fee_open_actual': 0.0,
+                'fee_close_actual': 0.0,
+                'fee_reserved': float(fee_open_est),
                 'mgmt': 'none'
             }
             # opcionális mezők (pl. orderId)
@@ -2844,10 +2874,13 @@ class CryptoBotApp:
                 pos.update({'tp_pct': tpct, 'sl_pct': spct, 'trail_pct': trpct, 'mgmt': 'fixed'})
             with self._mb_lock:
                 _pos_list(side).append(pos)
-                self._pool_used_quote += float(commit_usdt)
+                # lockoljuk a keretet: commit + becsült open fee
+                self._pool_used_quote += float(commit_usdt) + float(fee_open_est)
 
             self._safe_log(
-                f"🧪 SIM OPEN {side.upper()} @ {entry_px:.6f} | sz={size_base:.6f} | commit={commit_usdt:.2f} USDT | pool used={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f}\n"
+                f"🧪 SIM OPEN {side.UPPER()} @ {entry_px:.6f} | sz={size_base:.6f} | "
+                f"commit={commit_usdt:.2f} | fee≈{fee_open_est:.4f} | "
+                f"pool used={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f}\n"
             )
 
         def _close_sim_by_index(side: str, idx: int, exit_px: float):
@@ -2856,13 +2889,17 @@ class CryptoBotApp:
             if idx < 0 or idx >= len(lst): return
             pos = lst[idx]
             entry = float(pos['entry']); sz = float(pos['size'])
-            pnl = (exit_px - entry) * sz * (1 if side=='buy' else -1)
+                f"🧪 SIM OPEN {side.UPPER()} @ {entry_px:.6f} | sz={size_base:.6f} | "
+                f"commit={commit_usdt:.2f} | fee≈{fee_open_est:.4f} | "
+                f"pool used={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f}\n"
 
             # pool frissítés
             with self._mb_lock:
                 self._sim_pnl_usdt += pnl
                 self._pool_balance_quote += pnl
-                self._pool_used_quote   -= float(pos['commit_usdt'])
+                # felszabadítjuk a lockolt commitot + open fee reservet
+                self._pool_used_quote   -= (float(pos.get('commit_usdt',0.0)) + float(pos.get('fee_reserved',0.0)))
+
                 self._pool_used_quote = max(0.0, self._pool_used_quote)
 
             # history
@@ -2887,7 +2924,9 @@ class CryptoBotApp:
 
             self._safe_log(
                 f"🔚 SIM CLOSE {side.upper()} | entry={entry:.6f} → exit={exit_px:.6f} | "
-                f"sz={sz:.6f} | PnL={pnl:+.2f} USDT | Total={self._sim_pnl_usdt:+.2f} | pool used={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f}\n"
+                f"sz={sz:.6f} | GROSS={gross:+.4f} | fee_tot≈{f_total:.4f} | "
+                f"PNL={pnl:+.4f} | Total={self._sim_pnl_usdt:+.2f} | "
+                f"pool used={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f}\n"
             )
 
             del lst[idx]
@@ -3072,6 +3111,15 @@ class CryptoBotApp:
                 try:
                     open_oid = str(pos.get('oid')) if pos.get('oid') else None
                     self._mb_hist_update_exit(open_oid, exit_px)
+                except Exception:
+                    pass
+                # próbáljuk lekérni a TÉNYLEGES CLOSE díjat és eltárolni
+                try:
+                    if oid:
+                        fee_close_act = self._mb_try_fetch_close_fee(str(oid))
+                        if fee_close_act > 0:
+                            pos['fee_close_actual'] = float(fee_close_act)
+                            self._safe_log(f"💸 LIVE close fee (actual) = {fee_close_act:.6f}\n")
                 except Exception:
                     pass
                 return True
@@ -3501,20 +3549,24 @@ class CryptoBotApp:
                                                 f"| size={size_to_send} funds={funds_to_send} commit={commit_usdt} | orderId={oid} clientOid={cid}\n"
                                             )
                                             # History + SIM csak siker esetén
+                                            _size_now = (size_to_send if size_to_send is not None else (float(funds_to_send)/max(last_px_rt,1e-12)))
+                                            _fee_rate = self._mb_get_taker_fee()
+                                            _fee_open_est = self._mb_est_fee_quote(last_px_rt, _size_now, _fee_rate)
+                                            # History sor – a fee oszlopba tegyük a NYITÁSI becsült díjat (záráskor felülírjuk total-lal)
                                             self._mb_hist_add_open(
                                                 order_id=str(order_key),
                                                 side=combined_sig, entry=last_px_rt,
-                                                size=(size_to_send if size_to_send is not None else (float(funds_to_send)/max(last_px_rt,1e-12))),
-                                                lev=lev, fee=None
+                                                size=_size_now,
+                                                lev=lev, fee=float(_fee_open_est)
                                             )
+                                            # SIM/STATE – fee reserving
                                             _open_sim(
                                                  combined_sig, last_px_rt,
-                                                 (size_to_send if size_to_send is not None else (float(funds_to_send)/max(last_px_rt,1e-12))),
-                                                 commit_usdt,
+                                                 _size_now, commit_usdt,
                                                  atr_pack=(mul_sl, mul_tp1, mul_tp2, mul_tr, atr_val) if (use_atr and atr_val is not None) else None,
                                                  fixed_pack=(tpct, spct, trpct) if use_fixed else None,
-                                                 oid=str(order_key)
-                                             )
+                                                 oid=str(order_key),
+                                            )
                                             opened = True
 
                                     except Exception as e:
@@ -4111,6 +4163,84 @@ class CryptoBotApp:
             self.root.destroy()
         except Exception:
             pass
+
+    # ===== Fee (taker) – auto API + cache (fallback 0.001) =====
+    def _mb_get_taker_fee(self) -> float:
+        """
+        KuCoin taker fee lekérdezése (cache-elve ~1 órára). Fallback: 0.001 (0.1%).
+        """
+        try:
+            now = _time.time()
+            if getattr(self, "_mb_fee_cache", None) and (now - self._mb_fee_cache.get("ts", 0) < 3600):
+                return float(self._mb_fee_cache["taker"])
+            fee = 0.001
+            ex = getattr(self, "exchange", None)
+            if ex:
+                # próbálkozások különböző wrapper nevekkel
+                if hasattr(ex, "get_base_fee"):
+                    fb = ex.get_base_fee() or {}
+                    fee = float(fb.get("takerFeeRate", fee) or fee)
+                elif hasattr(ex, "fetch_trading_fee"):
+                    tf = ex.fetch_trading_fee() or {}
+                    fee = float(tf.get("taker", fee) or fee)
+                elif hasattr(ex, "fetch_fee_rates"):
+                    fr = ex.fetch_fee_rates() or {}
+                    fee = float(fr.get("taker", fee) or fee)
+            self._mb_fee_cache = {"taker": float(fee), "ts": now}
+            return float(fee)
+        except Exception:
+            return 0.001
+
+    def _mb_est_fee_quote(self, price: float, size_base: float, fee_rate: float) -> float:
+        """Becsült díj QUOTE-ban (USDT), taker fee: price * size * fee."""
+        try:
+            return max(0.0, float(price) * float(size_base) * max(0.0, float(fee_rate)))
+        except Exception:
+            return 0.0
+
+    def _mb_sum_fee_actual_or_est(self, pos: dict, exit_px: float, fee_rate: float) -> tuple[float, float, float]:
+        """
+        (open_fee, close_fee, total) – 'actual' ha van, különben estimált.
+        """
+        sz = float(pos.get("size", 0.0))
+        entry = float(pos.get("entry", 0.0))
+        # open
+        f_open_act = float(pos.get("fee_open_actual", 0.0))
+        f_open_est = float(pos.get("fee_open_est", 0.0))
+        open_fee = f_open_act if f_open_act > 0 else (f_open_est if f_open_est > 0 else self._mb_est_fee_quote(entry, sz, fee_rate))
+        # close
+        f_close_act = float(pos.get("fee_close_actual", 0.0))
+        close_fee = f_close_act if f_close_act > 0 else self._mb_est_fee_quote(exit_px, sz, fee_rate)
+        return (open_fee, close_fee, open_fee + close_fee)
+
+    def _mb_try_fetch_close_fee(self, close_order_id: str) -> float:
+        """
+        Megpróbáljuk kinyerni a TÉNYLEGES díjat a close order-ből / fill-ekből.
+        Ha nincs API támogatás, 0.0-t ad vissza (ilyenkor marad az estimate).
+        """
+        try:
+            ex = getattr(self, "exchange", None)
+            if not ex or not close_order_id:
+                return 0.0
+            # próbálkozások wrapper függvényekkel
+            # 1) közvetlen trade-fills by order
+            if hasattr(ex, "get_margin_fills_by_order"):
+                fills = ex.get_margin_fills_by_order(close_order_id) or []
+            elif hasattr(ex, "get_order_fills"):
+                fills = ex.get_order_fills(close_order_id) or []
+            elif hasattr(ex, "fetch_order_trades"):
+                # egyes ccxt-s wrapper-ek
+                fills = ex.fetch_order_trades(close_order_id) or []
+            else:
+                fills = []
+            fee_sum = 0.0
+            for f in (fills or []):
+                # kucoin: feeCurrency, fee
+                val = f.get("fee") or f.get("feeCost") or 0
+                fee_sum += float(val)
+            return max(0.0, float(fee_sum))
+        except Exception:
+            return 0.0
 # ==================== BACKTEST TAB (ÚJ) ====================
 
 import math
