@@ -2389,14 +2389,20 @@ class CryptoBotApp:
         hist_box.grid_columnconfigure(0, weight=1)
         hist_box.grid_rowconfigure(0, weight=1)
 
-        cols = ("Időbélyeg","Irány","Belépő ár","Kilépő ár","méret","tőkeáttét","ktg","orderId")
+        cols = ("timestamp","side","entry","exit","size","lev","fee","orderId")
         self._mb_hist_tv = ttk.Treeview(hist_box, columns=cols, show="headings", height=8)
-        for c, w in (
-            ("Időbélyeg", 160), ("Irány", 70), ("Belépő ár", 110), ("Kilépő ár", 110),
-            ("méret", 110), ("tőkeáttét", 90), ("ktg", 90), ("orderId", 180)
+        for c, w, text in (
+            ("timestamp", 160, "Időbélyeg"),
+            ("side", 70, "Irány"),
+            ("entry", 110, "Belépő ár"),
+            ("exit", 110, "Kilépő ár"),
+            ("size", 110, "Méret"),
+            ("lev", 90, "Tőkeáttét"),
+            ("fee", 90, "Díj"),
+            ("orderId", 180, "Order ID")
         ):
-            self._mb_hist_tv.heading(c, text=c.upper())
-            self._mb_hist_tv.column(c, width=w, anchor="center", stretch=False)
+            self._mb_hist_tv.heading(c, text=text)
+            self._mb_hist_tv.column(c, width=w, anchor="center")
         self._mb_hist_tv.column("orderId", width=180, anchor="center", stretch=True)
         vsb = ttk.Scrollbar(hist_box, orient="vertical", command=self._mb_hist_tv.yview)
         self._mb_hist_tv.configure(yscrollcommand=vsb.set)
@@ -2878,7 +2884,7 @@ class CryptoBotApp:
                 self._pool_used_quote += float(commit_usdt) + float(fee_open_est)
 
             self._safe_log(
-                f"🧪 SIM OPEN {side.UPPER()} @ {entry_px:.6f} | sz={size_base:.6f} | "
+                f"🧪 SIM OPEN {side.upper()} @ {entry_px:.6f} | sz={size_base:.6f} | "
                 f"commit={commit_usdt:.2f} | fee≈{fee_open_est:.4f} | "
                 f"pool used={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f}\n"
             )
@@ -2889,9 +2895,10 @@ class CryptoBotApp:
             if idx < 0 or idx >= len(lst): return
             pos = lst[idx]
             entry = float(pos['entry']); sz = float(pos['size'])
-                f"🧪 SIM OPEN {side.UPPER()} @ {entry_px:.6f} | sz={size_base:.6f} | "
-                f"commit={commit_usdt:.2f} | fee≈{fee_open_est:.4f} | "
-                f"pool used={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f}\n"
+            gross = (exit_px - entry) * sz * (1 if side=='buy' else -1)
+            fee_rate = self._mb_get_taker_fee()
+            f_open, f_close, f_total = self._mb_sum_fee_actual_or_est(pos, exit_px, fee_rate)
+            pnl = gross - f_total
 
             # pool frissítés
             with self._mb_lock:
