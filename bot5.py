@@ -2172,6 +2172,15 @@ class CryptoBotApp:
         self.mb_ma_slow = ttk.Spinbox(ema_row, from_=3, to=1000, width=6)
         self.mb_ma_slow.delete(0, tk.END); self.mb_ma_slow.insert(0, "26")
         self.mb_ma_slow.pack(side=tk.LEFT)
+
+        # ÚJ: invert checkbox ugyanebben a sorban jobbra igazítva
+        ttk.Label(ema_row, text="   ").pack(side=tk.LEFT)  # kis elválasztó térköz
+        self.mb_invert_ema = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            ema_row,
+            text="Invert EMA jel-logika",
+            variable=self.mb_invert_ema
+        ).pack(side=tk.LEFT, padx=(4,0))
         r += 1
 
         # Tőkeáttét (worker: mb_leverage) + kompat alias a _mb_sync_lev_cap-hez
@@ -3723,15 +3732,22 @@ class CryptoBotApp:
         fast: int,
         slow: int,
         last_px_rt: float | None,  # élő ár (ha van)
-        atr_eps_mult: float = 0.15 # hiszterézis: ATR százalékának szorzója (0.15 ~ 15%)
+        atr_eps_mult: float = 0.15, # hiszterézis: ATR/ár arányának szorzója (0.15 ~ 15%)
+        invert: bool | None = None, # ÚJ: ha None, UI kapcsolóból olvassuk (mb_invert_ema)
     ) -> tuple[str, float, float]:
         """
         EMA keresztezés a HOSSZÚ (slow) oldaláról nézve + slope a HOSSZÚ-n.
-        BUY:  ha a slow alulról a fast fölé kerül (es_p < ef_p  és  es_l > ef_l) ÉS a slow emelkedik
-        SELL: ha a slow felülről a fast alá kerül (es_p > ef_p  és  es_l < ef_l) ÉS a slow esik
-        Live ár az utolsó close helyett (ha adott).
-        ATR-alapú puffer (hiszterézis) a zaj kiszűrésére.
-        Vissza: ('buy'|'sell'|'hold', ema_fast_last, ema_slow_last)
+
+        Eredeti (normál) logika:
+          BUY  ⇢ slow alulról a fast FÖLÉ kerül  (es_p < ef_p  és  es_l > ef_l)  ÉS a slow emelkedik
+          SELL ⇢ slow felülről a fast ALÁ kerül  (es_p > ef_p  és  es_l < ef_l)  ÉS a slow esik
+
+        Invert (kontrariánus) logika:
+          BUY  ⇢ slow a fast ALÁ kerül (bear cross)        ÉS a slow esik
+          SELL ⇢ slow a fast FÖLÉ kerül (bull cross)       ÉS a slow emelkedik
+
+        Hiszterézis: ATR-alapú puffer a false-pozitívok ellen.
+        Visszatérés: ('buy' | 'sell' | 'hold', ema_fast_last, ema_slow_last)
         """
         import pandas as pd
         s = pd.Series(series, dtype='float64').copy()
@@ -3748,36 +3764,51 @@ class CryptoBotApp:
         ef_l, es_l = float(ema_f.iloc[-1]), float(ema_s.iloc[-1])
         ef_p, es_p = float(ema_f.iloc[-2]), float(ema_s.iloc[-2])
 
-        # slope a HOSSZÚ-n (slow EMA) – ez a te korábbi megerősítésed
+        # slow EMA lejtése (slope)
         slope_up_s   = es_l > es_p
         slope_down_s = es_l < es_p
 
-        # ATR-alapú hiszterézis (puffer) a vissza-false-pozitívok ellen
+        # ATR-alapú hiszterézis puffer (relatív arány)
         eps = 0.0
         try:
             atr_last = float(getattr(self, "_mb_last_atr_val", 0.0))
             px_last  = float(s.iloc[-1])
             if atr_last > 0 and px_last > 0 and atr_eps_mult > 0:
-                eps = (atr_last / px_last) * atr_eps_mult  # arány (pl. 0.15 * ATR/ár)
+                eps = (atr_last / px_last) * atr_eps_mult
         except Exception:
             pass
 
-        # a puffer a slow-fast különbség relatív nagyságát vizsgálja
         def _strong_enough(a, b):
+            # |slow-fast| / ár >= eps
             try:
                 px_last = float(s.iloc[-1])
                 return abs(a - b) / max(px_last, 1e-12) >= eps
             except Exception:
                 return True
 
-        # --- HOSSZÚ keresztezés logika (mint a régi függvényedben) ---
-        # BUY: slow a fast fölé kerül ÉS a slow emelkedik
-        if es_p < ef_p and es_l > ef_l and slope_up_s and _strong_enough(es_l, ef_l):
-            return 'buy', ef_l, es_l
+        # invert flag UI-ból, ha nincs paraméterben átadva
+        if invert is None:
+            try:
+                invert = bool(getattr(self, "mb_invert_ema", None) and self.mb_invert_ema.get())
+            except Exception:
+                invert = False
 
-        # SELL: slow a fast alá kerül ÉS a slow esik
-        if es_p > ef_p and es_l < ef_l and slope_down_s and _strong_enough(es_l, ef_l):
-            return 'sell', ef_l, es_l
+        if not invert:
+            # === EREDeti (trendkövető) ===
+            # BUY: slow a fast fölé kerül ÉS a slow emelkedik
+            if es_p < ef_p and es_l > ef_l and slope_up_s and _strong_enough(es_l, ef_l):
+                return 'buy', ef_l, es_l
+            # SELL: slow a fast alá kerül ÉS a slow esik
+            if es_p > ef_p and es_l < ef_l and slope_down_s and _strong_enough(es_l, ef_l):
+                return 'sell', ef_l, es_l
+        else:
+            # === INVERT (kontrariánus) ===
+            # BUY: slow a fast ALÁ kerül ÉS a slow esik
+            if es_p > ef_p and es_l < ef_l and slope_down_s and _strong_enough(es_l, ef_l):
+                return 'buy', ef_l, es_l
+            # SELL: slow a fast FÖLÉ kerül ÉS a slow emelkedik
+            if es_p < ef_p and es_l > ef_l and slope_up_s and _strong_enough(es_l, ef_l):
+                return 'sell', ef_l, es_l
 
         return 'hold', ef_l, es_l
 
