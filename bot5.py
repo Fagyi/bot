@@ -2184,6 +2184,13 @@ class CryptoBotApp:
         ).pack(side=tk.LEFT, padx=(4,0))
         r += 1
 
+        # ÚJ: Hiszterézis – % (ATR szorzó százalékban)
+        ttk.Label(form, text="EMA hiszterézis (%)").grid(row=r, column=0, sticky="w", pady=(2,0))
+        self.mb_ema_hyst_pct = ttk.Spinbox(form, from_=0.0, to=100.0, increment=0.5, width=6)
+        self.mb_ema_hyst_pct.delete(0, tk.END); self.mb_ema_hyst_pct.insert(0, "1")  # default 1%
+        self.mb_ema_hyst_pct.grid(row=r, column=1, sticky="w", pady=(2,0))
+        r += 1
+
         # Tőkeáttét (worker: mb_leverage) + kompat alias a _mb_sync_lev_cap-hez
         ttk.Label(form, text="Tőkeáttét").grid(row=r, column=0, sticky="w", pady=(6,0))
         self.mb_leverage = ttk.Spinbox(form, from_=1, to=10, width=6)
@@ -3233,7 +3240,8 @@ class CryptoBotApp:
                     # --- EMA + HTF jel ---
                     closes_for_sig = df['c'].astype(float).tolist()
                     sig_raw, ef_l, es_l = self._mb_signal_from_ema_live(
-                        closes_for_sig, fa, slw, last_px_rt=last_px_rt, atr_eps_mult=0.15
+                        closes_for_sig, fa, slw, last_px_rt=last_px_rt,
+                        atr_eps_mult=None  # UI-ból olvassa a %-ot és átszámolja
                     )
                     trend_htf = 0
                     if use_htf:
@@ -3791,43 +3799,47 @@ class CryptoBotApp:
         fast: int,
         slow: int,
         last_px_rt: float | None,  # élő ár (ha van)
-        atr_eps_mult: float = 0.15, # hiszterézis: ATR/ár arányának szorzója (0.15 ~ 15%)
-        invert: bool | None = None, # ÚJ: ha None, UI kapcsolóból olvassuk (mb_invert_ema)
+        atr_eps_mult: float | None = None,  # None esetén UI-ból jön (%-ban tárolt), itt osztjuk 100-zal
+        invert: bool | None = None,         # None → UI kapcsoló (mb_invert_ema)
     ) -> tuple[str, float, float]:
         """
         EMA keresztezés a HOSSZÚ (slow) oldaláról nézve + slope a HOSSZÚ-n.
 
-        Eredeti (normál) logika:
-          BUY  ⇢ slow alulról a fast FÖLÉ kerül  (es_p < ef_p  és  es_l > ef_l)  ÉS a slow emelkedik
-          SELL ⇢ slow felülről a fast ALÁ kerül  (es_p > ef_p  és  es_l < ef_l)  ÉS a slow esik
+        Normál:
+          BUY  ⇢ es_p < ef_p  és  es_l > ef_l  és slow emelkedik
+          SELL ⇢ es_p > ef_p  és  es_l < ef_l  és slow esik
 
-        Invert (kontrariánus) logika:
-          BUY  ⇢ slow a fast ALÁ kerül (bear cross)        ÉS a slow esik
-          SELL ⇢ slow a fast FÖLÉ kerül (bull cross)       ÉS a slow emelkedik
+        Invert:
+          BUY  ⇢ es_p > ef_p  és  es_l < ef_l  és slow esik
+          SELL ⇢ es_p < ef_p  és  es_l > ef_l  és slow emelkedik
 
-        Hiszterézis: ATR-alapú puffer a false-pozitívok ellen.
-        Visszatérés: ('buy' | 'sell' | 'hold', ema_fast_last, ema_slow_last)
+        Hiszterézis: ATR/ár * (UI %-érték / 100).
         """
         import pandas as pd
         s = pd.Series(series, dtype='float64').copy()
         if len(s) < max(fast, slow) + 2:
             return 'hold', float('nan'), float('nan')
 
-        # utolsó érték kiváltása live árral (ha van)
         if last_px_rt is not None and last_px_rt > 0:
             s.iloc[-1] = float(last_px_rt)
 
         ema_f = s.ewm(span=fast, adjust=False).mean()
         ema_s = s.ewm(span=slow, adjust=False).mean()
 
-        ef_l, es_l = float(ema_f.iloc[-1]), float(ema_s.iloc[-1])
-        ef_p, es_p = float(ema_f.iloc[-2]), float(ema_s.iloc[-2])
+        ef_l, ef_p = float(ema_f.iloc[-1]), float(ema_f.iloc[-2])
+        es_l, es_p = float(ema_s.iloc[-1]), float(ema_s.iloc[-2])
 
-        # slow EMA lejtése (slope)
         slope_up_s   = es_l > es_p
         slope_down_s = es_l < es_p
 
-        # ATR-alapú hiszterézis puffer (relatív arány)
+        # UI → atr_eps_mult (százalék -> arány)
+        if atr_eps_mult is None:
+            try:
+                ui_pct = float(self.mb_ema_hyst_pct.get())
+                atr_eps_mult = max(0.0, ui_pct) / 100.0
+            except Exception:
+                atr_eps_mult = 0.15  # fallback: 15%
+
         eps = 0.0
         try:
             atr_last = float(getattr(self, "_mb_last_atr_val", 0.0))
@@ -3838,34 +3850,26 @@ class CryptoBotApp:
             pass
 
         def _strong_enough(a, b):
-            # |slow-fast| / ár >= eps
             try:
                 px_last = float(s.iloc[-1])
                 return abs(a - b) / max(px_last, 1e-12) >= eps
             except Exception:
                 return True
 
-        # invert flag UI-ból, ha nincs paraméterben átadva
         if invert is None:
             try:
-                invert = bool(getattr(self, "mb_invert_ema", None) and self.mb_invert_ema.get())
+                invert = bool(self.mb_invert_ema.get())
             except Exception:
                 invert = False
 
         if not invert:
-            # === EREDeti (trendkövető) ===
-            # BUY: slow a fast fölé kerül ÉS a slow emelkedik
             if es_p < ef_p and es_l > ef_l and slope_up_s and _strong_enough(es_l, ef_l):
                 return 'buy', ef_l, es_l
-            # SELL: slow a fast alá kerül ÉS a slow esik
             if es_p > ef_p and es_l < ef_l and slope_down_s and _strong_enough(es_l, ef_l):
                 return 'sell', ef_l, es_l
         else:
-            # === INVERT (kontrariánus) ===
-            # BUY: slow a fast ALÁ kerül ÉS a slow esik
             if es_p > ef_p and es_l < ef_l and slope_down_s and _strong_enough(es_l, ef_l):
                 return 'buy', ef_l, es_l
-            # SELL: slow a fast FÖLÉ kerül ÉS a slow emelkedik
             if es_p < ef_p and es_l > ef_l and slope_up_s and _strong_enough(es_l, ef_l):
                 return 'sell', ef_l, es_l
 
