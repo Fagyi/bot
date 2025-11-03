@@ -2396,7 +2396,7 @@ class CryptoBotApp:
         hist_box.grid_columnconfigure(0, weight=1)
         hist_box.grid_rowconfigure(0, weight=1)
 
-        cols = ("timestamp","side","entry","exit","size","lev","fee","orderId")
+        cols = ("timestamp","side","entry","exit","size","lev","fee", "pnl", "orderId")
         self._mb_hist_tv = ttk.Treeview(hist_box, columns=cols, show="headings", height=8)
         for c, w, text in (
             ("timestamp", 160, "Időbélyeg"),
@@ -2406,10 +2406,12 @@ class CryptoBotApp:
             ("size", 110, "Méret"),
             ("lev", 90, "Tőkeáttét"),
             ("fee", 90, "Díj"),
+            ("pnl", 90, "PNL"),
             ("orderId", 180, "Order ID")
         ):
             self._mb_hist_tv.heading(c, text=text)
             self._mb_hist_tv.column(c, width=w, anchor="center")
+        self._mb_hist_col_index = {name: i for i, name in enumerate(cols)}
         self._mb_hist_tv.column("orderId", width=180, anchor="center", stretch=True)
         vsb = ttk.Scrollbar(hist_box, orient="vertical", command=self._mb_hist_tv.yview)
         self._mb_hist_tv.configure(yscrollcommand=vsb.set)
@@ -2451,6 +2453,9 @@ class CryptoBotApp:
         self._mb_toggle_atr_widgets()
         self._mb_toggle_brk_widgets()
 
+        # a history táblázat létrehozása UTÁN:
+        self._mb_hist_start_pnl_loop()
+
         if not hasattr(self, "_mb_stopping"): 
             self._mb_stopping = False
 
@@ -2480,14 +2485,29 @@ class CryptoBotApp:
 
     # --- LIVE Trade History helper-ek ---
     def _mb_hist_add_open(self, *, order_id: str | None, side: str, entry: float,
-                          size: float, lev: float, fee: float | None, ts: float | None = None):
+                          size: float, lev: float, fee: float | None,
+                          ts: float | None = None, pnl_est: float | None = None):
+        """
+        Új sor felvétele OPEN-nél.
+        - fee: nyitási becsült fee (QUOTE-ban)
+        - pnl_est: becsült PnL nyitás után (rt ár alapján), ha None, üresen marad
+        """
         try:
             import time
             ts = float(ts or time.time())
             ts_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
             oid = order_id or "-"
-            row = (ts_str, side.upper(), f"{entry:.6f}", "", f"{size:.6f}", f"{lev:g}",
-                   ("" if fee is None else f"{fee:.6f}"), oid)
+            row = (
+                ts_str,                 # Timestamp
+                side.upper(),           # Side
+                f"{entry:.6f}",         # Entry
+                "",                     # Exit (még üres)
+                f"{size:.6f}",          # Size
+                f"{lev:g}",             # Leverage
+                ("" if fee is None else f"{float(fee):.6f}"),    # Fee (open est)
+                ("" if pnl_est is None else f"{float(pnl_est):.6f}"),  # PnL (est)
+                oid                     # orderId
+            )
             def _ins():
                 iid = self._mb_hist_tv.insert("", "end", values=row)
                 if oid != "-":
@@ -2496,19 +2516,96 @@ class CryptoBotApp:
         except Exception:
             pass
 
-    def _mb_hist_update_exit(self, order_id: str | None, exit_px: float, fee: float | None = None):
+    def _mb_hist_update_exit(self, order_id: str | None, exit_px: float,
+                             fee_total: float | None = None, pnl_final: float | None = None):
+        """
+        EXIT frissítése:
+        - exit_px kitöltése
+        - (opcionális) fee_total → 'Fee' oszlop felülírása a véglegessel
+        - (opcionális) pnl_final → 'PnL' oszlop végleges értékre írása
+        """
         try:
-            if not order_id: return
+            if not order_id:
+                return
             iid = self._mb_hist_rows_by_oid.get(order_id)
-            if not iid: return
+            if not iid:
+                return
+
             vals = list(self._mb_hist_tv.item(iid, "values"))
-            vals[3] = f"{float(exit_px):.6f}"           # EXIT
-            if fee is not None:
-                vals[6] = f"{float(fee):.6f}"          # FEE
-            def _upd(): self._mb_hist_tv.item(iid, values=tuple(vals))
+            col = getattr(self, "_mb_hist_col_index", None)
+            if not col:
+                # Fallback: klasszikus indexek (Timestamp,Side,Entry,Exit,Size,Leverage,Fee,PnL,orderId)
+                EXIT_IDX, FEE_IDX, PNL_IDX = 3, 6, 7
+            else:
+                EXIT_IDX = col.get("exit", 3); FEE_IDX = col.get("fee", 6); PNL_IDX = col.get("pnl", 7)
+
+            vals[EXIT_IDX] = f"{float(exit_px):.6f}"
+            if fee_total is not None:
+                vals[FEE_IDX] = f"{float(fee_total):.6f}"
+            if pnl_final is not None:
+                vals[PNL_IDX] = f"{float(pnl_final):.6f}"
+
+            def _upd():
+                self._mb_hist_tv.item(iid, values=tuple(vals))
             self.root.after(0, _upd)
         except Exception:
             pass
+
+    def _mb_hist_start_pnl_loop(self):
+        """Egyszer indítandó ciklus, ami 5 mp-enként frissíti az OPEN ügyletek becsült PnL-jét."""
+        if getattr(self, "_mb_hist_pnl_job", None):
+            return  # már fut
+        self._mb_hist_pnl_tick()
+
+    def _mb_hist_pnl_tick(self):
+        try:
+            # szükséges oszlop indexek
+            col = getattr(self, "_mb_hist_col_index", {})
+            ENTRY_IDX = col.get("entry", 2); EXIT_IDX = col.get("exit", 3)
+            SIZE_IDX  = col.get("size", 4);  SIDE_IDX = col.get("side", 1)
+            FEE_IDX   = col.get("fee", 6);   PNL_IDX  = col.get("pnl", 7)
+
+            # aktuális rt ár a jelenlegi szimbólumhoz
+            try:
+                symbol = self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)).replace('/', '-')
+            except Exception:
+                symbol = None
+
+            rt = None
+            if symbol:
+                try:
+                    rt = float(self.exchange.fetch_last_price(symbol))
+                except Exception:
+                    rt = None
+
+            if rt and rt > 0:
+                # végigmegyünk azokon a sorokon, ahol Exit üres → OPEN státusz
+                for iid in self._mb_hist_tv.get_children(""):
+                    vals = list(self._mb_hist_tv.item(iid, "values"))
+                    try:
+                        if vals[EXIT_IDX]:  # már zárt
+                            continue
+                        entry = float(vals[ENTRY_IDX] or "0")
+                        size  = float(vals[SIZE_IDX]  or "0")
+                        side  = str(vals[SIDE_IDX]).strip().upper()
+                        fee_s = vals[FEE_IDX].strip()
+                        fee_est = float(fee_s) if fee_s not in ("", None) else 0.0
+
+                        gross = (rt - entry) * size * (1 if side == "BUY" else -1)
+                        pnl_est = gross - fee_est
+                        vals[PNL_IDX] = f"{pnl_est:.6f}"
+
+                        self._mb_hist_tv.item(iid, values=tuple(vals))
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        finally:
+            # 5 mp múlva újra
+            try:
+                self._mb_hist_pnl_job = self.root.after(5000, self._mb_hist_pnl_tick)
+            except Exception:
+                pass
 
     def mb_start(self):
         """Margin bot indítás (dry-runban is futhat)."""
@@ -2763,7 +2860,7 @@ class CryptoBotApp:
                         try:
                             open_oid = str(pos.get('oid')) if pos.get('oid') else None
                             if open_oid:
-                                self._mb_hist_update_exit(open_oid, px, fee=f_total)
+                                self._mb_hist_update_exit(open_oid, px, fee_total=f_total)
                         except Exception:
                             pass
 
@@ -2897,26 +2994,34 @@ class CryptoBotApp:
             )
 
         def _close_sim_by_index(side: str, idx: int, exit_px: float):
-            """Teljes zárás adott indexű pozícióra; PnL visszaír a pool-ba, commit felszabadul."""
-            lst = _pos_list(side)
-            if idx < 0 or idx >= len(lst): return
-            pos = lst[idx]
-            entry = float(pos['entry']); sz = float(pos['size'])
-            gross = (exit_px - entry) * sz * (1 if side=='buy' else -1)
+            """Teljes zárás adott indexű pozícióra; PnL visszaír a pool-ba, commit + fee lock felszabadul.
+               History: Exit + Fee + PnL oszlopok frissítése (SIM becsléssel / eltárolt értékekkel).
+            """
+            lst = self._sim_pos_long if side == 'buy' else self._sim_pos_short
+            if idx < 0 or idx >= len(lst):
+                return
+
+            pos   = lst[idx]
+            entry = float(pos.get('entry', 0.0))
+            sz    = float(pos.get('size', 0.0))
+
+            # Bruttó PnL (fee nélkül)
+            gross = (exit_px - entry) * sz * (1 if side == 'buy' else -1)
+
+            # Fee-k: open (actual ha van, különben est), close (est – SIM), total
             fee_rate = self._mb_get_taker_fee()
             f_open, f_close, f_total = self._mb_sum_fee_actual_or_est(pos, exit_px, fee_rate)
+
             pnl = gross - f_total
 
-            # pool frissítés
+            # Pool frissítés + lockok felszabadítása
             with self._mb_lock:
-                self._sim_pnl_usdt += pnl
+                self._sim_pnl_usdt   += pnl
                 self._pool_balance_quote += pnl
-                # felszabadítjuk a lockolt commitot + open fee reservet
-                self._pool_used_quote   -= (float(pos.get('commit_usdt',0.0)) + float(pos.get('fee_reserved',0.0)))
+                self._pool_used_quote -= (float(pos.get('commit_usdt', 0.0)) + float(pos.get('fee_reserved', 0.0)))
+                self._pool_used_quote  = max(0.0, self._pool_used_quote)
 
-                self._pool_used_quote = max(0.0, self._pool_used_quote)
-
-            # history
+            # SIM history (belső lista)
             try:
                 symbol_safe = self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)).replace('/', '-')
             except Exception:
@@ -2936,13 +3041,23 @@ class CryptoBotApp:
             except Exception:
                 pass
 
+            # Log
             self._safe_log(
                 f"🔚 SIM CLOSE {side.upper()} | entry={entry:.6f} → exit={exit_px:.6f} | "
-                f"sz={sz:.6f} | GROSS={gross:+.4f} | fee_tot≈{f_total:.4f} | "
-                f"PNL={pnl:+.4f} | Total={self._sim_pnl_usdt:+.2f} | "
+                f"sz={sz:.6f} | GROSS={gross:+.6f} | fee_tot≈{f_total:.6f} | "
+                f"PNL={pnl:+.6f} | Total={self._sim_pnl_usdt:+.2f} | "
                 f"pool used={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f}\n"
             )
 
+            # Trade History UI frissítése (Exit/Fee/PnL)
+            try:
+                open_oid = str(pos.get('oid')) if pos.get('oid') else None
+                if open_oid:
+                    self._mb_hist_update_exit(open_oid, exit_px, fee_total=f_total, pnl_final=pnl)
+            except Exception:
+                pass
+
+            # Pozíció törlése a listából
             del lst[idx]
 
         def _partial_close_50(pos: dict, side: str, px: float):
@@ -3063,7 +3178,7 @@ class CryptoBotApp:
             return False
 
         def _live_close_pos(side: str, pos: dict, exit_px: float, *, symbol: str, mode: str, lev: int) -> bool:
-            """ÉLES (LIVE) teljes zárás markettel + History EXIT frissítés. True= siker, False= bukás."""
+            """ÉLES (LIVE) teljes zárás markettel + History EXIT/PNL/fee frissítés. True= siker, False= bukás."""
             try:
                 close_side = "sell" if side == "buy" else "buy"
                 sz_raw = float(pos.get("size", 0.0))
@@ -3071,24 +3186,24 @@ class CryptoBotApp:
                     self._safe_log("ℹ️ Nulla méret – nincs LIVE zárás szükség.\n")
                     return False
 
-                # lépésköz/minimum lekérése és méret padlózása
+                # lépésköz/minimum + padlózás
                 lot_step, price_step, min_base, _ = self._mb_get_market_steps(symbol)
                 sz = self._mb_floor_to_step_dec(sz_raw, lot_step)
                 if sz <= 0:
                     self._safe_log(f"ℹ️ Zárási méret a lot step alatt (raw={sz_raw:.6f}, step={lot_step:g}). Kimarad.\n")
                     return False
-                # minimum ellenőrzés – ha alatta van, próbáld meg ennyivel is (KuCoin néha engedi),
-                # de ha biztosan tilt, inkább ne küldjük ki:
                 if min_base and sz < float(min_base):
                     self._safe_log(f"ℹ️ Zárási méret a minimum alatt (size={sz:.6f}, minBase={float(min_base):g}). Kimarad.\n")
                     return False
 
+                # Küldés
                 _payload_dbg = {
                     "mode": mode, "symbol": symbol, "side": close_side,
                     "size_base": sz, "funds_quote": None, "leverage": lev,
                     "auto_borrow": False, "auto_repay": True
                 }
                 self._safe_log(f"🐞 SEND CLOSE: {self._mb_pp(_payload_dbg)}\n")
+
                 resp = self.exchange.place_margin_market_order(
                     mode, symbol, close_side,
                     size_base=sz,
@@ -3121,22 +3236,42 @@ class CryptoBotApp:
                     return False
 
                 self._safe_log(f"✅ LIVE CLOSE {close_side.upper()} elküldve – orderId={oid} clientOid={cid}\n")
-                # History EXIT frissítés
+
+                # History EXIT frissítés (először csak az ár)
                 try:
                     open_oid = str(pos.get('oid')) if pos.get('oid') else None
-                    self._mb_hist_update_exit(open_oid, exit_px)
+                    if open_oid:
+                        self._mb_hist_update_exit(open_oid, exit_px)
                 except Exception:
                     pass
-                # próbáljuk lekérni a TÉNYLEGES CLOSE díjat és eltárolni
+
+                # Close fee tényleges lekérése (ha tudjuk)
                 try:
                     if oid:
                         fee_close_act = self._mb_try_fetch_close_fee(str(oid))
-                        if fee_close_act > 0:
+                        if fee_close_act and fee_close_act > 0:
                             pos['fee_close_actual'] = float(fee_close_act)
                             self._safe_log(f"💸 LIVE close fee (actual) = {fee_close_act:.6f}\n")
                 except Exception:
                     pass
+
+                # Végleges PnL kiszámítása és felírása a History sorba
+                try:
+                    entry = float(pos.get("entry", 0.0))
+                    sz_now = float(pos.get("size", 0.0))  # teljes zárás
+                    gross = (exit_px - entry) * sz_now * (1 if side == 'buy' else -1)
+
+                    fee_rate = self._mb_get_taker_fee()
+                    f_open, f_close, f_total = self._mb_sum_fee_actual_or_est(pos, exit_px, fee_rate)
+                    pnl_final = gross - f_total
+
+                    if open_oid:
+                        self._mb_hist_update_exit(open_oid, exit_px, fee_total=f_total, pnl_final=pnl_final)
+                except Exception:
+                    pass
+
                 return True
+
             except Exception as e:
                 self._safe_log(f"❌ LIVE zárási hiba: {e}\n")
                 return False
@@ -3567,12 +3702,26 @@ class CryptoBotApp:
                                             _size_now = (size_to_send if size_to_send is not None else (float(funds_to_send)/max(last_px_rt,1e-12)))
                                             _fee_rate = self._mb_get_taker_fee()
                                             _fee_open_est = self._mb_est_fee_quote(last_px_rt, _size_now, _fee_rate)
-                                            # History sor – a fee oszlopba tegyük a NYITÁSI becsült díjat (záráskor felülírjuk total-lal)
+                                            # --- ÚJ: nyitáskori becsült PnL (rt árhoz képest), fee-vel csökkentve
+                                            try:
+                                                symbol_for_rt = self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)).replace('/', '-')
+                                            except Exception:
+                                                symbol_for_rt = None
+                                            pnl_est = None
+                                            try:
+                                                rt_now = float(self.exchange.fetch_last_price(symbol_for_rt)) if symbol_for_rt else last_px_rt
+                                                if rt_now > 0:
+                                                    gross = (rt_now - last_px_rt) * _size_now * (1 if combined_sig == 'buy' else -1)
+                                                    pnl_est = gross - float(_fee_open_est)  # csak nyitási becsült díjjal csökkentjük
+                                            except Exception:
+                                                pass
+
                                             self._mb_hist_add_open(
                                                 order_id=str(order_key),
                                                 side=combined_sig, entry=last_px_rt,
                                                 size=_size_now,
-                                                lev=lev, fee=float(_fee_open_est)
+                                                lev=lev, fee=float(_fee_open_est),
+                                                pnl_est=pnl_est
                                             )
                                             # SIM/STATE – fee reserving
                                             _open_sim(
