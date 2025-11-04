@@ -3474,22 +3474,80 @@ class CryptoBotApp:
                     # --- Kombinált jel (breakout elsőbbség) ---
                     combined_sig = brk_sig if brk_sig in ('buy', 'sell') else sig
 
-                    # --- LOG: állapot + jel ---
-                    log_line = (
+                    # --- LOG + DIAG: részletes okok, ha nincs jel/nyitás ---
+                    used = float(self._pool_used_quote)
+                    bal  = float(self._pool_balance_quote)
+                    rsi_txt = f"{rsi_val:.2f}" if (use_rsi and rsi_val is not None) else ("n/a" if use_rsi else "")
+
+                    # EMA irány
+                    ema_up = (ef_l > es_l)
+                    ema_dn = (ef_l < es_l)
+
+                    # RSI kapuk
+                    rsi_ok_buy = True
+                    rsi_ok_sell = True
+                    if use_rsi and rsi_val is not None:
+                        rsi_ok_buy  = (rsi_bmin <= rsi_val <= rsi_bmax)
+                        rsi_ok_sell = (rsi_smin <= rsi_val <= rsi_smax)
+
+                    # Drift limit (opcionális UI: mb_drift_max_pct; ha 0/None → kikapcsolva)
+                    drift_ok = True
+                    drift_over_txt = None
+                    try:
+                        drift_max_ui = float(self._mb_get_float('mb_drift_max_pct', 0.0) or 0.0)
+                        if drift_max_ui > 0 and drift_pct == drift_pct:  # not NaN
+                            drift_ok = (abs(drift_pct) <= drift_max_ui)
+                            if not drift_ok:
+                                drift_over_txt = f"drift>{drift_max_ui:.2f}%"
+                    except Exception:
+                        pass
+
+                    # Cooldown
+                    cd_ok = True
+                    try:
+                        now_ts = int(time.time())
+                        cd_ok = (now_ts - self._mb_last_cross_ts) >= cd_s
+                    except Exception:
+                        pass
+
+                    # HTF blokkolás felismerése (ha a nyers EMA jel irányos volt, de HTF miatt hold lett)
+                    htf_block = (use_htf and sig_raw in ('buy','sell') and (sig == 'hold'))
+
+                    # okok gyűjtése
+                    reasons = []
+                    if not (ema_up or ema_dn):
+                        reasons.append("no_ema_trend")
+                    if not cd_ok:
+                        reasons.append("cooldown")
+                    if drift_over_txt and not drift_ok:
+                        reasons.append(drift_over_txt)
+                    if ema_up and not rsi_ok_buy:
+                        reasons.append("rsi_block_buy")
+                    if ema_dn and not rsi_ok_sell:
+                        reasons.append("rsi_block_sell")
+                    if htf_block:
+                        reasons.append("htf_block")
+
+                    # státusz sor összeállítása
+                    base_status = (
                         f"[{symbol} {tf}] Élő ár={last_px_rt:.6f} Gyertya ár={last_px:.6f} "
                         f"EMA({fa})={ef_l:.4f}/EMA({slw})={es_l:.4f}"
                     )
-                    if use_htf: log_line += f" HTF={trend_htf:+d}"
-                    if use_rsi and rsi_val is not None: log_line += f" RSI({rsi_len})={rsi_val:.2f}"
+                    if use_htf:
+                        base_status += f" HTF={trend_htf:+d}"
+                    if use_rsi:
+                        base_status += f" RSI({rsi_len})={rsi_txt}"
                     if use_brk and not (math.isnan(hh) or math.isnan(ll)):
-                        log_line += f" BRK[{brk_n}] HH={hh:.4f} LL={ll:.4f} ↑{up_lvl:.4f} ↓{dn_lvl:.4f}"
+                        base_status += f" BRK[{brk_n}] HH={hh:.4f} LL={ll:.4f} ↑{up_lvl:.4f} ↓{dn_lvl:.4f}"
                     if drift_pct == drift_pct:  # not NaN
-                        log_line += f" drift={drift_pct:.2f}%"
-                    log_line += (
-                        f" | POOL used/bal={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f} "
-                        f" → {combined_sig}\n"
-                    )
-                    self._safe_log(log_line)
+                        base_status += f" drift={drift_pct:.2f}%"
+                    pool_txt = f" | POOL used/bal={used:.2f}/{bal:.2f}"
+
+                    if combined_sig in (None, "", "hold"):
+                        reason_txt = (" (" + ",".join(reasons) + ")") if reasons else ""
+                        self._safe_log(base_status + pool_txt + f"  → hold{reason_txt}\n")
+                    else:
+                        self._safe_log(base_status + pool_txt + f"  → {combined_sig}\n")
 
                     # BUY-ok kezelése
                     i = 0
