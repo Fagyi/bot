@@ -2459,6 +2459,24 @@ class CryptoBotApp:
         if not hasattr(self, "_mb_stopping"): 
             self._mb_stopping = False
 
+    # --- Safe helpers: NaN/0 guard minden osztáshoz ---
+    def _is_pos_num(self, x) -> bool:
+        try:
+            xx = float(x)
+            return xx > 0 and xx == xx  # not NaN
+        except Exception:
+            return False
+
+    def _sdiv(self, num: float, den: float, fallback: float = 0.0) -> float:
+        """Safe division: ha den <= 0 vagy NaN → fallback."""
+        try:
+            d = float(den)
+            if d <= 0 or d != d:
+                return float(fallback)
+            return float(num) / d
+        except Exception:
+            return float(fallback)
+
     # --- Elérhető egyenleg kijelzés frissítése (UI segédfüggvény) ---
     def _mb_refresh_available(self):
         """A Margin Bot „Elérhető” feliratát a Margin Trade fül egységes logikájával tölti."""
@@ -2608,60 +2626,79 @@ class CryptoBotApp:
                 pass
 
     # === ORDER SANITIZER: lot_step/price_step/minBase/minFunds + padlózás ===
-    def _mb_sanitize_order(self, *, symbol: str, side: str,
-                           price: float | None,
-                           size_base: float | None,
-                           funds_quote: float | None):
+    def _mb_sanitize_order(
+        self, *,
+        symbol: str,
+        side: str,
+        price: float | None,
+        size_base: float | None,
+        funds_quote: float | None
+    ):
         """
         Visszaadja a (size_base, funds_quote) tisztított értékeket, vagy (None, None)-t, ha nem küldhető.
         - size_base: lot_step-re padlózva, és minBase felett
-        - funds_quote: 0.01-re és minFunds-re padlózva
+        - funds_quote: quote_step-re padlózva, és minFunds felett
+        - BUY-nál, ha price rendelkezésre áll: funds→méret becslés lot_step-re padlózva; ha az < minBase → eldob.
+        - Nem emelünk felfelé minimum fölé – ha alatta van, eldobjuk.
         """
+        # --- Market lépésközök / min értékek beolvasása ---
         try:
-            lot_step, price_step, min_base, min_funds = self._mb_get_market_steps(symbol)
+            lot_step, price_step, min_base, min_funds, quote_step = self._mb_get_market_steps(symbol)
         except Exception:
             lot_step = price_step = None
             min_base = min_funds = None
+            quote_step = 0.01
 
-        # price padlózás csak akkor, ha ténylegesen használnád; itt méretet/fundot tisztítunk
+        # --- Locale-safe Decimal padlózás helper ---
+        def _floor_dec(x: float, step: float) -> float:
+            if not step or step <= 0:
+                return float(x)
+            from decimal import Decimal
+            q = Decimal(str(step))
+            return float((Decimal(str(x)) // q) * q)
+
         sb = size_base
         fq = funds_quote
 
-        # BASE (méret) tisztítás
+        # --- BASE (méret) tisztítás (SELL oldali küldéshez) ---
         if sb is not None:
             try:
                 if lot_step:
-                    sb = self._mb_floor_to_step_dec(float(sb), float(lot_step))
+                    sb = _floor_dec(float(sb), float(lot_step))
                 sb = float(sb)
             except Exception:
                 sb = None
 
-            # minBase guard
+            # minBase guard – nem emelünk fel, ha alatta van → eldob
             try:
                 if sb is None or sb <= 0:
                     sb = None
                 elif min_base and float(sb) < float(min_base):
-                    # túl kicsi – nem küldjük
                     sb = None
             except Exception:
-                pass
+                sb = None
 
-        # FUNDS (quote) tisztítás
+        # --- FUNDS (QUOTE) tisztítás (BUY oldali küldéshez) ---
         if fq is not None:
             try:
                 fq = float(fq)
-                # általános 0.01 padlózás (sok tőzsde így várja → kerekítési hibák ellen)
-                fq = self._mb_floor_to_step_dec(fq, 0.01)
-                if min_funds:
-                    fq = max(fq, float(min_funds))
                 if fq <= 0:
                     fq = None
+                else:
+                    # exchange szerinti quote_step-re padlózás (nem fix 0.01!)
+                    fq = _floor_dec(fq, float(quote_step))
+                    # minFunds guard – ha alatta, eldob
+                    if min_funds and fq < float(min_funds):
+                        fq = None
+                    # minBase guard a funds→méret becslésével (ha van ár)
+                    if fq is not None and price and price > 0 and lot_step:
+                        est_size = _floor_dec(fq / float(price), float(lot_step))
+                        if min_base and est_size < float(min_base):
+                            fq = None
             except Exception:
                 fq = None
 
-        # Ha BUY, jellemzően funds_quote-ot küldünk. Ha SELL, size_base-t.
-        # De úgy is visszaadjuk, ahogy kapjuk – a hívó dönti el, mit használ.
-        # Ha mindkettő None → nem küldhető.
+        # Ha mindkettő None → nem küldhető
         if sb is None and fq is None:
             return None, None
         return sb, fq
@@ -2815,9 +2852,9 @@ class CryptoBotApp:
                         import json
                         # lépésközök lekérése
                         try:
-                            lot_step, price_step, min_base, min_funds = self._mb_get_market_steps(sym)
+                            lot_step, price_step, min_base, min_funds, quote_step = self._mb_get_market_steps(sym)
                         except Exception:
-                            lot_step, price_step, min_base, min_funds = (0.0001, 0.01, 0.0, 0.0)
+                            lot_step, price_step, min_base, min_funds, quote_step = (0.0001, 0.01, 0.0, 0.0, 0.01)
 
                         sz_raw = float(pos.get("size", 0.0))
                         try:
@@ -2976,6 +3013,7 @@ class CryptoBotApp:
                 base0, quote0 = "","USDT"
 
             ui_budget = float(self._mb_get_float('mb_budget', 0.0) or 0.0)
+            dry = bool(self._mb_get_bool('mb_dry', True))
             avail_quote = 0.0
             try:
                 if hasattr(self, "_mt_available"):
@@ -2983,14 +3021,19 @@ class CryptoBotApp:
             except Exception:
                 pass
 
-            # keret klippelése a valós elérhetőhöz
-            init_pref = ui_budget if ui_budget > 0 else max(0.0, avail_quote)
-            init_pool = min(init_pref, max(0.0, avail_quote))
-            if ui_budget > 0 and ui_budget > avail_quote:
-                self._safe_log(
-                    f"⚠️ Megadott keret {ui_budget:.2f} {quote0}, de elérhető {avail_quote:.2f} {quote0}. "
-                    f"Kezdő keret {init_pool:.2f} {quote0}-ra korlátozva.\n"
-                )
+            # --- Pool init logika: DRY vs LIVE ---
+            if dry:
+                # DRY: pontosan a megadott költségvetést használjuk, nincs clamp az elérhetőre
+                init_pool = max(0.0, ui_budget)
+            else:
+                # LIVE: továbbra is clampeljük a valós elérhetőre, és jelezzük ha vágás történt
+                init_pref = ui_budget if ui_budget > 0 else max(0.0, avail_quote)
+                init_pool = min(init_pref, max(0.0, avail_quote))
+                if ui_budget > 0 and ui_budget > avail_quote:
+                    self._safe_log(
+                        f"⚠️ Megadott keret {ui_budget:.2f} {quote0}, de elérhető {avail_quote:.2f} {quote0}. "
+                        f"Kezdő keret {init_pool:.2f} {quote0}-ra korlátozva.\n"
+                    )
             with self._mb_lock:
                 self._pool_balance_quote = float(init_pool)
                 self._pool_used_quote = 0.0
@@ -3125,23 +3168,40 @@ class CryptoBotApp:
                 return
 
             entry = float(pos['entry']); sz = float(pos['size'])
-            close_sz = sz * 0.5
+            # --- Lépcsőzés valósághűen: lot_step-re padlózva ---
+            try:
+                symbol_safe = self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)).replace('/', '-')
+            except Exception:
+                symbol_safe = None
+            try:
+                lot_step, _price_step, _min_base, _min_funds, _quote_step = self._mb_get_market_steps(symbol_safe or "BTC-USDT")
+            except Exception:
+                lot_step = 0.0
+            raw_half = sz * 0.5
+            close_sz = self._mb_floor_to_step_dec(raw_half, float(lot_step or 0.0))
+            if close_sz <= 0:
+                # padlózás lenullázta → ne csináljunk semmit
+                return
+            if sz <= 0:
+                return
             pnl = (px - entry) * close_sz * (1 if side == 'buy' else -1)
 
-            # commit_usdt fele szabadul fel
+            # valósághűbb: arányos felszabadítás a ténylegesen zárt méret alapján
             commit_before = float(pos.get('commit_usdt', 0.0))
-            release = commit_before * 0.5
+            try:
+                rel_ratio = close_sz / max(sz, 1e-12)
+            except Exception:
+                rel_ratio = 0.5
+            release = commit_before * rel_ratio
 
             # Kritikus szakasz: PnL / pool / pos mezők
             with self._mb_lock:
                 self._sim_pnl_usdt += pnl
                 self._pool_balance_quote += pnl
-                # pos írások egyben
-                pos.update({
-                    'size': sz - close_sz,
-                    'commit_usdt': commit_before - release,
-                    'half_closed': True
-                })
+                # pos írások egyben (maradék méret lehet nem lépcsőzött – következő zárásnál úgyis padlózzuk)
+                pos.update({'size': sz - close_sz,
+                            'commit_usdt': max(0.0, commit_before - release),
+                            'half_closed': True})
                 self._pool_used_quote = max(0.0, self._pool_used_quote - release)
 
             # (Opcionális) history bejegyzés a rész-zárásról
@@ -3317,7 +3377,7 @@ class CryptoBotApp:
                 # PnL véglegesítése + history frissítés
                 try:
                     entry = float(pos.get("entry", 0.0))
-                    sz_now = float(pos.get("size", 0.0))  # teljes zárás
+                    sz_now = float(size_to_send)
                     gross = (exit_px - entry) * sz_now * (1 if side == 'buy' else -1)
 
                     fee_rate = self._mb_get_taker_fee()
@@ -3346,7 +3406,7 @@ class CryptoBotApp:
                     sizep  = self._mb_get_float('mb_size_pct', 50.0)
                     inpm   = self._mb_get_str('mb_input_mode', 'quote')
                     mode   = self._mb_get_str('mb_mode', 'isolated')
-                    lev    = self._mb_get_int('mb_leverage', 10)
+                    lev    = max(1, self._mb_get_int('mb_leverage', 10))
                     tpct   = self._mb_get_float('mb_tp_pct', 2.0)
                     spct   = self._mb_get_float('mb_sl_pct', 1.0)
                     trpct  = self._mb_get_float('mb_trail_pct', 0.5)
@@ -3409,6 +3469,11 @@ class CryptoBotApp:
 
                     # valós idejű (ticker) ár – default a candle close
                     last_px_rt = last_px
+                    # --- ár érvényesség guard ---
+                    if not self._is_pos_num(last_px) or not self._is_pos_num(last_px_rt):
+                        self._safe_log("⚠️ Érvénytelen ár (0/NaN) – ciklus kihagyva.\n")
+                        time.sleep(2)
+                        continue
                     try:
                         rt = float(self.exchange.fetch_last_price(symbol))
                         if rt > 0:
@@ -3726,7 +3791,7 @@ class CryptoBotApp:
                         else:
                             if inpm == "quote":
                                 # valós lépésközök a piactól
-                                _lot_step, _price_step, _, _ = self._mb_get_market_steps(symbol)
+                                _lot_step, _price_step, _, _, _ = self._mb_get_market_steps(symbol)
                                 ord = self._mb_calc_order_qty(
                                     side=combined_sig,
                                     price=last_px_rt,
@@ -3760,7 +3825,7 @@ class CryptoBotApp:
                                     open_size = 0.0; commit_usdt = 0.0; nominal_q = 0.0
 
                             # --- size/funds kerekítés + minimum ellenőrzés a küldés ELŐTT ---
-                            lot_step, price_step, min_base, min_funds = self._mb_get_market_steps(symbol)
+                            lot_step, price_step, min_base, min_funds, quote_step = self._mb_get_market_steps(symbol)
                             open_size = self._mb_floor_to_step_dec(open_size, lot_step)
 
                             # log
@@ -3772,19 +3837,63 @@ class CryptoBotApp:
 
                             # nyitás feltétele
                             opened = False
-                            if commit_usdt > free_pool + 1e-9:
+                            if commit_usdt <= 0 or (combined_sig == 'sell' and open_size <= 0):
                                 self._safe_log("ℹ️ Nulla méret / nincs keret – nincs nyitás.\n")
                             else:
                                 if dry:
-                                    if use_atr and atr_val is not None:
-                                        atr_pack = (mul_sl, mul_tp1, mul_tp2, mul_tr, atr_val)
-                                        _open_sim(combined_sig, last_px_rt, open_size, commit_usdt, atr_pack=atr_pack)
-                                    elif use_fixed:
-                                        fixed_pack = (tpct, spct, trpct)
-                                        _open_sim(combined_sig, last_px_rt, open_size, commit_usdt, fixed_pack=fixed_pack)
-                                    else:
-                                        _open_sim(combined_sig, last_px_rt, open_size, commit_usdt)
-                                    opened = True
+                                    # === SIM: ugyanaz a szigor, mint LIVE ===
+                                    lot_step, price_step, min_base, min_funds, quote_step = self._mb_get_market_steps(symbol)
+                                    size_to_send = None
+                                    funds_to_send = None
+                                    if combined_sig == 'buy':
+                                        # LIVE-ban is a nominális (lev*commit) megy 'funds'-ként → ugyanígy SIM-ben:
+                                        pre_funds_nominal = float(nominal_q)
+                                        _sb, _fq = self._mb_sanitize_order(
+                                            symbol=symbol, side='buy',
+                                            price=last_px_rt,
+                                            size_base=None,
+                                            funds_quote=pre_funds_nominal
+                                        )
+                                        funds_to_send = _fq
+                                        if not funds_to_send:
+                                            self._safe_log("ℹ️ SIM BUY eldobva (sanitizer funds/minFunds/quote_step miatt).\n")
+                                        else:
+                                            # végrehajtott méret = funds / ár, lot_step-re padlózva
+                                            size_to_send = self._mb_floor_to_step_dec(
+                                                float(funds_to_send) / max(last_px_rt, 1e-12), float(lot_step or 0.0)
+                                            )
+                                            if min_base and size_to_send < float(min_base):
+                                                self._safe_log("ℹ️ SIM BUY eldobva (méret < minBase a padlózás után).\n")
+                                                size_to_send = None
+                                    else:  # 'sell'
+                                        _sb, _fq = self._mb_sanitize_order(
+                                            symbol=symbol, side='sell',
+                                            price=last_px_rt,
+                                            size_base=float(open_size),
+                                            funds_quote=None
+                                        )
+                                        size_to_send = _sb
+                                        if not size_to_send:
+                                            self._safe_log("ℹ️ SIM SELL eldobva (sanitizer size/minBase/lot_step miatt).\n")
+
+                                    if (combined_sig == 'buy' and funds_to_send) or (combined_sig == 'sell' and size_to_send):
+                                        # SIM commit: BUY-nál nominális/lev, SELL-nél size*price/lev
+                                        if combined_sig == 'buy':
+                                            commit_sim = float(funds_to_send) / max(lev, 1)
+                                            sz_sim = float(size_to_send)
+                                        else:
+                                            sz_sim = float(size_to_send)
+                                            commit_sim = (sz_sim * float(last_px_rt)) / max(lev, 1)
+
+                                        if use_atr and atr_val is not None:
+                                            atr_pack = (mul_sl, mul_tp1, mul_tp2, mul_tr, atr_val)
+                                            _open_sim(combined_sig, last_px_rt, sz_sim, commit_sim, atr_pack=atr_pack)
+                                        elif use_fixed:
+                                            fixed_pack = (tpct, spct, trpct)
+                                            _open_sim(combined_sig, last_px_rt, sz_sim, commit_sim, fixed_pack=fixed_pack)
+                                        else:
+                                            _open_sim(combined_sig, last_px_rt, sz_sim, commit_sim)
+                                        opened = True
                                 else:
                                     # --- NYITÁS: LIVE ág (BUY → funds, SELL → size) ---
                                     try:
@@ -3815,9 +3924,11 @@ class CryptoBotApp:
                                             )
                                             size_to_send, funds_to_send = _sb, _fq
 
+                                        # --- ha a sanitizer eldobta → log + ugorjunk tovább
                                         if (combined_sig == 'buy' and not funds_to_send) or (combined_sig == 'sell' and not size_to_send):
-                                            self._safe_log("ℹ️ Sanitizer eldobta a nyitást (min/step). Kimarad.\n")
+                                            self._safe_log("ℹ️ Sanitizer eldobta a nyitást (min/step) – kihagyva.\n")
                                             opened = False
+                                            continue
                                         else:
                                             _payload_dbg = {
                                                 "mode": mode, "symbol": symbol, "side": combined_sig,
@@ -3862,10 +3973,28 @@ class CryptoBotApp:
                                                 f"✅ LIVE {combined_sig.upper()} elküldve | mode={mode} lev={lev} "
                                                 f"| size={size_to_send} funds={funds_to_send} commit={commit_usdt} | orderId={oid} clientOid={cid}\n"
                                             )
+
+                                            # --- KIEGÉSZÍTÉS: tényleges commit + size a sanitizer utáni értékekből ---
+                                            try:
+                                                lot_step_now, _price_step_now, _mb_min_base_now, _mb_min_funds_now, _quote_step_now = self._mb_get_market_steps(symbol)
+                                            except Exception:
+                                                lot_step_now = 0.0
+
+                                            if funds_to_send is not None:
+                                                # BUY: valós margin = funds / lev
+                                                commit_real = float(funds_to_send) / max(lev, 1)
+                                                size_now = self._sdiv(float(funds_to_send), last_px_rt, 0.0)
+                                                # csak diag/konzisztencia kedvéért padlózzuk a size-ot is
+                                                size_now = self._mb_floor_to_step_dec(size_now, float(lot_step_now or 0.0))
+                                            else:
+                                                # SELL: valós margin = (size * ár) / lev
+                                                size_now = float(size_to_send)
+                                                commit_real = self._sdiv(size_now * float(last_px_rt), lev, 0.0)
                                             # History + SIM csak siker esetén
                                             _size_now = (size_to_send if size_to_send is not None else (float(funds_to_send)/max(last_px_rt,1e-12)))
                                             _fee_rate = self._mb_get_taker_fee()
-                                            _fee_open_est = self._mb_est_fee_quote(last_px_rt, _size_now, _fee_rate)
+                                            _fee_open_est = self._mb_est_fee_quote(last_px_rt, size_now, _fee_rate)
+
                                             # --- ÚJ: nyitáskori becsült PnL (rt árhoz képest), fee-vel csökkentve
                                             try:
                                                 symbol_for_rt = self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)).replace('/', '-')
@@ -3875,25 +4004,25 @@ class CryptoBotApp:
                                             try:
                                                 rt_now = float(self.exchange.fetch_last_price(symbol_for_rt)) if symbol_for_rt else last_px_rt
                                                 if rt_now > 0:
-                                                    gross = (rt_now - last_px_rt) * _size_now * (1 if combined_sig == 'buy' else -1)
-                                                    pnl_est = gross - float(_fee_open_est)  # csak nyitási becsült díjjal csökkentjük
+                                                    gross = (rt_now - last_px_rt) * size_now * (1 if combined_sig == 'buy' else -1)
+                                                    pnl_est = gross - float(_fee_open_est)
                                             except Exception:
                                                 pass
 
                                             self._mb_hist_add_open(
                                                 order_id=str(order_key),
                                                 side=combined_sig, entry=last_px_rt,
-                                                size=_size_now,
+                                                size=size_now,
                                                 lev=lev, fee=float(_fee_open_est),
                                                 pnl_est=pnl_est
                                             )
-                                            # SIM/STATE – fee reserving
+                                            # SIM/STATE – fee reserving a tényleges commit alapján
                                             _open_sim(
-                                                 combined_sig, last_px_rt,
-                                                 _size_now, commit_usdt,
-                                                 atr_pack=(mul_sl, mul_tp1, mul_tp2, mul_tr, atr_val) if (use_atr and atr_val is not None) else None,
-                                                 fixed_pack=(tpct, spct, trpct) if use_fixed else None,
-                                                 oid=str(order_key),
+                                                combined_sig, last_px_rt,
+                                                size_now, commit_real,
+                                                atr_pack=(mul_sl, mul_tp1, mul_tp2, mul_tr, atr_val) if (use_atr and atr_val is not None) else None,
+                                                fixed_pack=(tpct, spct, trpct) if use_fixed else None,
+                                                oid=str(order_key),
                                             )
                                             opened = True
 
@@ -4304,35 +4433,42 @@ class CryptoBotApp:
 
     def _mb_get_market_steps(self, symbol: str):
         """
-        KuCoin market meta: lot step (baseIncrement), price step, minBase, minFunds.
-        Visszaad: (lot_step, price_step, min_base, min_funds)
+        Visszaadja: (lot_step, price_step, min_base, min_funds, quote_step)
+
+        + ÚJ: ha elérhető → quote_step is (pl. KuCoin: "quoteIncrement")
+        + Ha nincs, quote_step = 0.01 fallback
         """
-        lot_step = 0.001     # biztonságos default
-        price_step = 0.01
-        min_base = 0.0
-        min_funds = 0.0
         try:
             info = None
-            # ha a wrappered tud market infót:
             if hasattr(self.exchange, "market"):
                 info = self.exchange.market(symbol)
             if not info and hasattr(self.exchange, "get_symbol_info"):
                 info = self.exchange.get_symbol_info(symbol)
 
             if isinstance(info, dict):
-                lot_step   = float(info.get("baseIncrement") or info.get("lotSize") or lot_step)
-                price_step = float(info.get("priceIncrement") or info.get("tickSize") or price_step)
-                min_base   = float(info.get("baseMinSize") or info.get("minBaseSize") or 0.0)
-                # KuCoin: quoteMinSize / minFunds
-                min_funds  = float(info.get("quoteMinSize") or info.get("minFunds") or 0.0)
+                lot_step   = float(info.get("baseIncrement")  or info.get("lotSize")      or 0.0)
+                price_step = float(info.get("priceIncrement") or info.get("tickSize")     or 0.0)
+                min_base   = float(info.get("minBaseSize")    or 0.0)
+                min_funds  = float(info.get("minFunds")       or 0.0)
+
+                # --- ÚJ: quote step (pl. KuCoin: "quoteIncrement") ---
+                quote_step = float(info.get("quoteIncrement") or 0.0)
+                if quote_step <= 0:
+                    quote_step = 0.01   # fallback (legtöbb USDT páron oké)
+
+                return lot_step, price_step, min_base, min_funds, quote_step
+
         except Exception:
             pass
-        return (max(lot_step, 1e-12), max(price_step, 1e-12), max(min_base, 0.0), max(min_funds, 0.0))
+
+        # hiba vagy hiány esetén minden 0, de quote_step kap fallbacket
+        return 0.0, 0.0, 0.0, 0.0, 0.01
 
     def _mb_floor_to_step_dec(self, x: float, step: float) -> float:
         """Decimal-al padlózzuk a mennyiséget a lépésközre (float hibák nélkül)."""
         if step <= 0: 
             return float(x)
+        from decimal import Decimal
         q = Decimal(str(step))
         return float((Decimal(str(x)) // q) * q)
 
@@ -4376,6 +4512,21 @@ class CryptoBotApp:
         lev_cap = 10.0 if margin_mode == "isolated" else 5.0
         lev = max(1.0, min(float(leverage), lev_cap))
 
+        # --- ár-guard: ha az ár nem pozitív/NaN → üres mennyiséget adunk vissza
+        try:
+            p_ok = float(price) > 0 and float(price) == float(price)  # not NaN
+        except Exception:
+            p_ok = False
+        if not p_ok:
+            return {
+                "side": side,
+                "qty_base": 0.0,
+                "commit_quote": 0.0,
+                "nominal_quote": 0.0,
+                "lev": lev,
+                "price": 0.0
+            }
+
         if mode == "quote":
             commit_quote = pool_free * pct                 # saját tőke (margin)
             nominal_quote = commit_quote * lev             # tényleges pozíció érték
@@ -4386,14 +4537,22 @@ class CryptoBotApp:
             nominal_quote = commit_quote * lev
             qty_base = base_free * pct * lev
 
-        qty_base = max(self._mb_floor_to_step(qty_base, lot_step), 0.0)
+        qty_base = max(self._mb_floor_to_step_dec(qty_base, float(lot_step or 0.0)), 0.0)
+        # price rounding: ha price_step == 0 vagy hibás, ne osszunk vele
+        px_rounded = price
+        try:
+            step = float(price_step or 0.0)
+            if step > 0:
+                px_rounded = round(price / step) * step
+        except Exception:
+            pass
         return {
             "side": side,
             "qty_base": qty_base,
             "commit_quote": commit_quote,
             "nominal_quote": nominal_quote,
             "lev": lev,
-            "price": round(price / price_step) * price_step
+            "price": px_rounded
         }
 
     # --- MarginBot: biztonságos getterek (változatlanok) ---
