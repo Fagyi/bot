@@ -4002,23 +4002,23 @@ class CryptoBotApp:
     # ---------- Jel-generátor: EMA keresztezés (HOSSZÚ metszés) + slope ----------
     def _mb_signal_from_ema_live(
         self,
-        series,                    # pd.Series vagy iterálható close-ok
+        series,
         fast: int,
         slow: int,
-        last_px_rt: float | None,  # élő ár (ha van)
-        atr_eps_mult: float | None = None,  # None esetén UI-ból jön (%-ban tárolt), itt osztjuk 100-zal
-        invert: bool | None = None,         # None → UI kapcsoló (mb_invert_ema)
+        last_px_rt: float | None,
+        atr_eps_mult: float | None = None,
+        invert: bool | None = None,
     ) -> tuple[str, float, float]:
         """
         EMA keresztezés a HOSSZÚ (slow) oldaláról nézve + slope a HOSSZÚ-n.
 
         Normál:
-          BUY  ⇢ es_p < ef_p  és  es_l > ef_l  és slow emelkedik
-          SELL ⇢ es_p > ef_p  és  es_l < ef_l  és slow esik
+          BUY  ⇢ es_p <= ef_p  és  es_l >  ef_l  és slow emelkedik
+          SELL ⇢ es_p >= ef_p  és  es_l <  ef_l  és slow esik
 
         Invert:
-          BUY  ⇢ es_p > ef_p  és  es_l < ef_l  és slow esik
-          SELL ⇢ es_p < ef_p  és  es_l > ef_l  és slow emelkedik
+          BUY  ⇢ es_p >= ef_p  és  es_l <  ef_l  és slow esik
+          SELL ⇢ es_p <= ef_p  és  es_l >  ef_l  és slow emelkedik
 
         Hiszterézis: ATR/ár * (UI %-érték / 100).
         """
@@ -4036,6 +4036,12 @@ class CryptoBotApp:
         ef_l, ef_p = float(ema_f.iloc[-1]), float(ema_f.iloc[-2])
         es_l, es_p = float(ema_s.iloc[-1]), float(ema_s.iloc[-2])
 
+        # „ragadós” keresztek: az előző gyertyán engedjük az egyenlőséget
+        cross_up_now    = es_l >  ef_l
+        cross_up_prev   = es_p <= ef_p
+        cross_down_now  = es_l <  ef_l
+        cross_down_prev = es_p >= ef_p
+
         slope_up_s   = es_l > es_p
         slope_down_s = es_l < es_p
 
@@ -4049,7 +4055,7 @@ class CryptoBotApp:
 
         eps = 0.0
         try:
-            atr_last = float(getattr(self, "_mb_last_atr_val", 0.0))
+            atr_last = float(getattr(self, '_mb_last_atr_val', 0.0))
             px_last  = float(s.iloc[-1])
             if atr_last > 0 and px_last > 0 and atr_eps_mult > 0:
                 eps = (atr_last / px_last) * atr_eps_mult
@@ -4070,14 +4076,14 @@ class CryptoBotApp:
                 invert = False
 
         if not invert:
-            if es_p < ef_p and es_l > ef_l and slope_up_s and _strong_enough(es_l, ef_l):
+            if cross_up_now and cross_up_prev and slope_up_s and _strong_enough(es_l, ef_l):
                 return 'buy', ef_l, es_l
-            if es_p > ef_p and es_l < ef_l and slope_down_s and _strong_enough(es_l, ef_l):
+            if cross_down_now and cross_down_prev and slope_down_s and _strong_enough(es_l, ef_l):
                 return 'sell', ef_l, es_l
         else:
-            if es_p > ef_p and es_l < ef_l and slope_down_s and _strong_enough(es_l, ef_l):
+            if cross_down_now and cross_down_prev and slope_down_s and _strong_enough(es_l, ef_l):
                 return 'buy', ef_l, es_l
-            if es_p < ef_p and es_l > ef_l and slope_up_s and _strong_enough(es_l, ef_l):
+            if cross_up_now and cross_up_prev and slope_up_s and _strong_enough(es_l, ef_l):
                 return 'sell', ef_l, es_l
 
         return 'hold', ef_l, es_l
