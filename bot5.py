@@ -2607,6 +2607,65 @@ class CryptoBotApp:
             except Exception:
                 pass
 
+    # === ORDER SANITIZER: lot_step/price_step/minBase/minFunds + padlózás ===
+    def _mb_sanitize_order(self, *, symbol: str, side: str,
+                           price: float | None,
+                           size_base: float | None,
+                           funds_quote: float | None):
+        """
+        Visszaadja a (size_base, funds_quote) tisztított értékeket, vagy (None, None)-t, ha nem küldhető.
+        - size_base: lot_step-re padlózva, és minBase felett
+        - funds_quote: 0.01-re és minFunds-re padlózva
+        """
+        try:
+            lot_step, price_step, min_base, min_funds = self._mb_get_market_steps(symbol)
+        except Exception:
+            lot_step = price_step = None
+            min_base = min_funds = None
+
+        # price padlózás csak akkor, ha ténylegesen használnád; itt méretet/fundot tisztítunk
+        sb = size_base
+        fq = funds_quote
+
+        # BASE (méret) tisztítás
+        if sb is not None:
+            try:
+                if lot_step:
+                    sb = self._mb_floor_to_step_dec(float(sb), float(lot_step))
+                sb = float(sb)
+            except Exception:
+                sb = None
+
+            # minBase guard
+            try:
+                if sb is None or sb <= 0:
+                    sb = None
+                elif min_base and float(sb) < float(min_base):
+                    # túl kicsi – nem küldjük
+                    sb = None
+            except Exception:
+                pass
+
+        # FUNDS (quote) tisztítás
+        if fq is not None:
+            try:
+                fq = float(fq)
+                # általános 0.01 padlózás (sok tőzsde így várja → kerekítési hibák ellen)
+                fq = self._mb_floor_to_step_dec(fq, 0.01)
+                if min_funds:
+                    fq = max(fq, float(min_funds))
+                if fq <= 0:
+                    fq = None
+            except Exception:
+                fq = None
+
+        # Ha BUY, jellemzően funds_quote-ot küldünk. Ha SELL, size_base-t.
+        # De úgy is visszaadjuk, ahogy kapjuk – a hívó dönti el, mit használ.
+        # Ha mindkettő None → nem küldhető.
+        if sb is None and fq is None:
+            return None, None
+        return sb, fq
+
     def mb_start(self):
         """Margin bot indítás (dry-runban is futhat)."""
         self._mb_stopping = False   # biztos ami biztos
@@ -3186,27 +3245,27 @@ class CryptoBotApp:
                     self._safe_log("ℹ️ Nulla méret – nincs LIVE zárás szükség.\n")
                     return False
 
-                # lépésköz/minimum + padlózás
-                lot_step, price_step, min_base, _ = self._mb_get_market_steps(symbol)
-                sz = self._mb_floor_to_step_dec(sz_raw, lot_step)
-                if sz <= 0:
-                    self._safe_log(f"ℹ️ Zárási méret a lot step alatt (raw={sz_raw:.6f}, step={lot_step:g}). Kimarad.\n")
-                    return False
-                if min_base and sz < float(min_base):
-                    self._safe_log(f"ℹ️ Zárási méret a minimum alatt (size={sz:.6f}, minBase={float(min_base):g}). Kimarad.\n")
+                # sanitizer: lot_step/minBase guard
+                size_to_send, _ = self._mb_sanitize_order(
+                    symbol=symbol, side=close_side,
+                    price=exit_px,
+                    size_base=sz_raw,
+                    funds_quote=None
+                )
+                if size_to_send is None:
+                    self._safe_log(f"ℹ️ Zárási méret a lépésköz/minimum alatt (raw={sz_raw:.6f}). Kimarad.\n")
                     return False
 
-                # Küldés
                 _payload_dbg = {
                     "mode": mode, "symbol": symbol, "side": close_side,
-                    "size_base": sz, "funds_quote": None, "leverage": lev,
+                    "size_base": size_to_send, "funds_quote": None, "leverage": lev,
                     "auto_borrow": False, "auto_repay": True
                 }
                 self._safe_log(f"🐞 SEND CLOSE: {self._mb_pp(_payload_dbg)}\n")
 
                 resp = self.exchange.place_margin_market_order(
                     mode, symbol, close_side,
-                    size_base=sz,
+                    size_base=size_to_send,
                     leverage=lev,
                     auto_borrow=False,
                     auto_repay=True
@@ -3237,7 +3296,7 @@ class CryptoBotApp:
 
                 self._safe_log(f"✅ LIVE CLOSE {close_side.upper()} elküldve – orderId={oid} clientOid={cid}\n")
 
-                # History EXIT frissítés (először csak az ár)
+                # History EXIT (ár → majd fee/PNL)
                 try:
                     open_oid = str(pos.get('oid')) if pos.get('oid') else None
                     if open_oid:
@@ -3245,7 +3304,7 @@ class CryptoBotApp:
                 except Exception:
                     pass
 
-                # Close fee tényleges lekérése (ha tudjuk)
+                # Close fee tényleges lekérése
                 try:
                     if oid:
                         fee_close_act = self._mb_try_fetch_close_fee(str(oid))
@@ -3255,7 +3314,7 @@ class CryptoBotApp:
                 except Exception:
                     pass
 
-                # Végleges PnL kiszámítása és felírása a History sorba
+                # PnL véglegesítése + history frissítés
                 try:
                     entry = float(pos.get("entry", 0.0))
                     sz_now = float(pos.get("size", 0.0))  # teljes zárás
@@ -3375,7 +3434,7 @@ class CryptoBotApp:
                     # --- EMA + HTF jel ---
                     closes_for_sig = df['c'].astype(float).tolist()
                     sig_raw, ef_l, es_l = self._mb_signal_from_ema_live(
-                        closes_for_sig, fa, slw, last_px_rt=last_px_rt,
+                        closes_for_sig, fa, slw, last_px_rt=None,
                         atr_eps_mult=None  # UI-ból olvassa a %-ot és átszámolja
                     )
                     trend_htf = 0
@@ -3474,6 +3533,43 @@ class CryptoBotApp:
                     # --- Kombinált jel (breakout elsőbbség) ---
                     combined_sig = brk_sig if brk_sig in ('buy', 'sell') else sig
 
+                    # --- EXTRA DIAG SNAPSHOT: mindig logoljuk, hogy mi fogja meg a jelet ---
+                    try:
+                        now_ts = int(time.time())
+                    except Exception:
+                        now_ts = 0
+                    cd_left = 0
+                    try:
+                        cd_left = max(0, cd_s - (now_ts - self._mb_last_cross_ts))
+                    except Exception:
+                        pass
+
+                    filters_line = (
+                        f"filters: rsi={'ON' if use_rsi else 'OFF'}"
+                        + (f"[buy:{rsi_bmin:.1f}-{rsi_bmax:.1f} sell:{rsi_smin:.1f}-{rsi_smax:.1f}]" if use_rsi else "")
+                        + f", htf={'ON' if use_htf else 'OFF'}({trend_htf:+d})"
+                        + f", brk={'ON' if use_brk else 'OFF'}"
+                        + f", live_px={'ON' if self._mb_get_bool('mb_use_live', True) else 'OFF'}"
+                        + f", cd_left={cd_left}s"
+                    )
+
+                    # építsünk 'reasons' listát, akkor is, ha csak EMA miatt hold
+                    reasons = []
+                    ema_up = (ef_l > es_l)
+                    ema_dn = (ef_l < es_l)
+                    if not (ema_up or ema_dn):
+                        reasons.append("no_ema_cross_or_trend")
+                    if use_htf and ((combined_sig == 'buy' and trend_htf < 0) or (combined_sig == 'sell' and trend_htf > 0)):
+                        reasons.append("htf_block")
+                    if use_rsi and rsi_val is not None:
+                        # akkor is jelöljük, ha combined_sig épp 'hold'
+                        if (combined_sig in ('buy', 'hold')) and not (rsi_bmin <= rsi_val <= rsi_bmax):
+                            reasons.append("rsi_block_buy")
+                        if (combined_sig in ('sell', 'hold')) and not (rsi_smin <= rsi_val <= rsi_smax):
+                            reasons.append("rsi_block_sell")
+                    if cd_left > 0:
+                        reasons.append("cooldown")
+
                     # --- LOG + DIAG: részletes okok, ha nincs jel/nyitás ---
                     used = float(self._pool_used_quote)
                     bal  = float(self._pool_balance_quote)
@@ -3528,26 +3624,27 @@ class CryptoBotApp:
                     if htf_block:
                         reasons.append("htf_block")
 
-                    # státusz sor összeállítása
-                    base_status = (
+                    # --- LOG: állapot + jel + filter snapshot ---
+                    log_line = (
                         f"[{symbol} {tf}] Élő ár={last_px_rt:.6f} Gyertya ár={last_px:.6f} "
                         f"EMA({fa})={ef_l:.4f}/EMA({slw})={es_l:.4f}"
                     )
                     if use_htf:
-                        base_status += f" HTF={trend_htf:+d}"
-                    if use_rsi:
-                        base_status += f" RSI({rsi_len})={rsi_txt}"
+                        log_line += f" HTF={trend_htf:+d}"
+                    if use_rsi and rsi_val is not None:
+                        log_line += f" RSI({rsi_len})={rsi_val:.2f}"
                     if use_brk and not (math.isnan(hh) or math.isnan(ll)):
-                        base_status += f" BRK[{brk_n}] HH={hh:.4f} LL={ll:.4f} ↑{up_lvl:.4f} ↓{dn_lvl:.4f}"
+                        log_line += f" BRK[{brk_n}] HH={hh:.4f} LL={ll:.4f} ↑{up_lvl:.4f} ↓{dn_lvl:.4f}"
                     if drift_pct == drift_pct:  # not NaN
-                        base_status += f" drift={drift_pct:.2f}%"
-                    pool_txt = f" | POOL used/bal={used:.2f}/{bal:.2f}"
+                        log_line += f" drift={drift_pct:.2f}%"
+                    log_line += f" | POOL used/bal={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f}"
 
-                    if combined_sig in (None, "", "hold"):
-                        reason_txt = (" (" + ",".join(reasons) + ")") if reasons else ""
-                        self._safe_log(base_status + pool_txt + f"  → hold{reason_txt}\n")
-                    else:
-                        self._safe_log(base_status + pool_txt + f"  → {combined_sig}\n")
+                    # egy sorban: jel + filter snapshot
+                    self._safe_log(log_line.rstrip() + f"  → {combined_sig} | {filters_line}\n")
+
+                    # ha hold, írjuk ki a konkrét okokat is (ha vannak)
+                    if combined_sig in (None, "", "hold") and reasons:
+                        self._safe_log("  ↳ hold reasons: " + ",".join(reasons) + "\n")
 
                     # BUY-ok kezelése
                     i = 0
@@ -3665,14 +3762,6 @@ class CryptoBotApp:
                             # --- size/funds kerekítés + minimum ellenőrzés a küldés ELŐTT ---
                             lot_step, price_step, min_base, min_funds = self._mb_get_market_steps(symbol)
                             open_size = self._mb_floor_to_step_dec(open_size, lot_step)
-                            # MINIMUM csak SELL-nél blokkol
-                            if combined_sig == 'sell':
-                                if open_size <= 0 or (min_base > 0 and open_size < min_base):
-                                    self._safe_log(
-                                        f"ℹ️ Méret a minimum alatt (size={open_size:.6f}, minBase={min_base:g}) – nincs nyitás.\n"
-                                    )
-                                    opened = False
-                                    continue
 
                             # log
                             self._safe_log(
@@ -3683,7 +3772,7 @@ class CryptoBotApp:
 
                             # nyitás feltétele
                             opened = False
-                            if commit_usdt > free_pool + 1e-9 or open_size <= 0:
+                            if commit_usdt > free_pool + 1e-9:
                                 self._safe_log("ℹ️ Nulla méret / nincs keret – nincs nyitás.\n")
                             else:
                                 if dry:
@@ -3702,31 +3791,48 @@ class CryptoBotApp:
                                         auto_b = getattr(self, "mb_autob", None)
                                         auto_borrow = bool(auto_b.get()) if auto_b else False
 
-                                        # BUY: funds_quote (nominal), SELL: size_base
+                                        # BUY: funds_quote, SELL: size_base (sanitizer-rel)
                                         size_to_send = None
                                         funds_to_send = None
+
                                         if combined_sig == 'buy':
-                                            # funds = teljes nominális érték (lev * commit) → 2 tizedesre padlózva
-                                            funds_to_send = max(self._mb_floor_to_step_dec(nominal_q, 0.01), float(min_funds or 0.0))
+                                            # funds = teljes nominális (lev*commit), majd sanitizer
+                                            _pre_funds = nominal_q
+                                            _sb, _fq = self._mb_sanitize_order(
+                                                symbol=symbol, side='buy',
+                                                price=last_px_rt,
+                                                size_base=None,
+                                                funds_quote=_pre_funds
+                                            )
+                                            size_to_send, funds_to_send = _sb, _fq
                                         else:
-                                            # sell: BASE mennyiség lot step-re padlózva, minBase fölött
-                                            size_to_send = max(self._mb_floor_to_step_dec(open_size, lot_step), float(min_base or 0.0))
+                                            _pre_size = open_size
+                                            _sb, _fq = self._mb_sanitize_order(
+                                                symbol=symbol, side='sell',
+                                                price=last_px_rt,
+                                                size_base=_pre_size,
+                                                funds_quote=None
+                                            )
+                                            size_to_send, funds_to_send = _sb, _fq
 
-                                        # --- TEMP DEBUG: mit fogunk kiküldeni nyitásra? ---
-                                        _payload_dbg = {
-                                            "mode": mode, "symbol": symbol, "side": combined_sig,
-                                            "size_base": size_to_send, "funds_quote": funds_to_send,
-                                            "leverage": lev, "auto_borrow": auto_borrow
-                                        }
-                                        self._safe_log(f"🐞 SEND OPEN: {self._mb_pp(_payload_dbg)}\n")
+                                        if (combined_sig == 'buy' and not funds_to_send) or (combined_sig == 'sell' and not size_to_send):
+                                            self._safe_log("ℹ️ Sanitizer eldobta a nyitást (min/step). Kimarad.\n")
+                                            opened = False
+                                        else:
+                                            _payload_dbg = {
+                                                "mode": mode, "symbol": symbol, "side": combined_sig,
+                                                "size_base": size_to_send, "funds_quote": funds_to_send,
+                                                "leverage": lev, "auto_borrow": auto_borrow
+                                            }
+                                            self._safe_log(f"🐞 SEND OPEN: {self._mb_pp(_payload_dbg)}\n")
+                                            resp = self.exchange.place_margin_market_order(
+                                                mode, symbol, combined_sig,
+                                                size_base=size_to_send,
+                                                funds_quote=funds_to_send,
+                                                leverage=lev,
+                                                auto_borrow=auto_borrow
+                                            )
 
-                                        resp = self.exchange.place_margin_market_order(
-                                            mode, symbol, combined_sig,
-                                            size_base=size_to_send,
-                                            funds_quote=funds_to_send,
-                                            leverage=lev,
-                                            auto_borrow=auto_borrow
-                                        )
                                         # --- TEMP DEBUG: pontosan mit kaptunk vissza? ---
                                         self._safe_log(f"🐞 RECV OPEN: {self._mb_pp(resp)}\n")
                                         # --- Válasz értékelése (KuCoin: success '200000') ---
