@@ -25,7 +25,7 @@ import pandas as pd
 # Tkinter
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, getcontext
 
 # Matplotlib
 import matplotlib
@@ -43,6 +43,21 @@ try:
     import websocket  # websocket-client
 except Exception:
     SDK_AVAILABLE = False
+
+# -------- Pénzügyi számolások precízió --------
+# (Egységesen Decimal-t használunk; ez a precízió bőven elég.)
+getcontext().prec = 28
+
+# -------- Hasznos Decimal helper --------
+def D(x) -> Decimal:
+    return x if isinstance(x, Decimal) else Decimal(str(x))
+
+# -------- Lépésköz kerekítések --------
+def _floor_to_step(x: Decimal, step: Decimal) -> Decimal:
+    if not step:
+        return x
+    # Mindig lefelé kerekítünk, hogy a tőzsde ne kerekítsen felfelé rajtunk.
+    return (x // step) * step
 
 # -------- .env / key.env betöltés --------
 try:
@@ -128,6 +143,9 @@ class KucoinSDKWrapper:
         self._cross_api = None
         self._margin_order_api = None
 
+        # Symbols meta cache (baseInc/quoteInc/priceInc/baseMin/minFunds) per symbol
+        self._symbols_meta: Dict[str, Dict[str, Decimal]] = {}
+
         # Try init SDK and discover services (non-fatal)
         try:
             if SDK_AVAILABLE:
@@ -162,6 +180,133 @@ class KucoinSDKWrapper:
         # Price cache
         self._price_cache = {}
         self._price_ttl = 3.0
+
+    # ----- Symbols meta -----
+    def _fetch_symbols_meta(self) -> Dict[str, Dict[str, Decimal]]:
+        """
+        Betölti a KuCoin /api/v2/symbols listát és előkészíti a lépésköz/min adatokat.
+        """
+        try:
+            r = self._rest_get("/api/v2/symbols", {})
+            data = r.get("data", []) or []
+        except Exception as e:
+            self._log(f"/api/v2/symbols hiba: {e}")
+            data = []
+        out: Dict[str, Dict[str, Decimal]] = {}
+        for row in data:
+            sym = (row.get("symbol") or "").upper()
+            if not sym:
+                continue
+            # mezők elnevezése a KuCoin v2 szerint
+            baseInc = D(row.get("baseIncrement") or "0.00000001")
+            quoteInc = D(row.get("quoteIncrement") or "0.00000001")
+            priceInc = D(row.get("priceIncrement") or "0.00000001")
+            baseMin = D(row.get("baseMinSize") or "0")
+            # minFunds a v2-ben "minFunds" lehet; ha nincs, használjuk 0-t
+            minFunds = D(row.get("minFunds") or "0")
+            out[sym] = {
+                "baseInc": baseInc,
+                "quoteInc": quoteInc,
+                "priceInc": priceInc,
+                "baseMin": baseMin,
+                "minFunds": minFunds,
+            }
+        return out
+
+    def get_symbol_meta(self, symbol: str) -> Dict[str, Decimal]:
+        """
+        Visszaadja a szimbólum lépésköz/min adatait cache-ből, hiány esetén letölti.
+        """
+        s = symbol.upper()
+        meta = self._symbols_meta.get(s)
+        if meta:
+            return meta
+        loaded = self._fetch_symbols_meta()
+        # merge cache
+        self._symbols_meta.update(loaded)
+        meta = self._symbols_meta.get(s)
+        if not meta:
+            # végső fallback – nagyon kis lépések, hogy legalább ne kerekítsen fel a tőzsde
+            meta = {
+                "baseInc": D("0.00000001"),
+                "quoteInc": D("0.00000001"),
+                "priceInc": D("0.00000001"),
+                "baseMin": D("0"),
+                "minFunds": D("0"),
+            }
+            self._symbols_meta[s] = meta
+        return meta
+
+    # ----- Sanitize -----
+    def sanitize_order(
+        self,
+        symbol: str,
+        side: Literal["buy","sell"],
+        typ: Literal["market","limit"],
+        *,
+        price: Optional[str] = None,
+        size_base: Optional[str] = None,
+        funds_quote: Optional[str] = None,
+    ) -> Dict[str, Optional[str]]:
+        """
+        Lépésközös kerekítés és min ellenőrzés. Csak a szükséges mezőket hagyja meg.
+        - Market BUY: funds_quote kötelező
+        - Market SELL: size_base kötelező
+        - Limit: price kötelező; a size funds-ból is képezhető
+        """
+        m = self.get_symbol_meta(symbol)
+        bi, qi, pi = m["baseInc"], m["quoteInc"], m["priceInc"]
+        baseMin, minFunds = m["baseMin"], m["minFunds"]
+
+        s = D(size_base) if size_base is not None else None
+        f = D(funds_quote) if funds_quote is not None else None
+        p = D(price) if price is not None else None
+
+        side = side.lower()
+        typ  = typ.lower()
+
+        if typ == "market":
+            if side == "buy":
+                if f is None:
+                    raise ValueError("Market BUY-hoz funds_quote kötelező.")
+                f = _floor_to_step(f, qi)
+                # minFunds (notional) kényszerítés
+                if minFunds and f < minFunds:
+                    f = _floor_to_step(minFunds, qi)
+                s = None
+                p = None
+            else:
+                if s is None:
+                    raise ValueError("Market SELL-hez size_base kötelező.")
+                s = _floor_to_step(s, bi)
+                # baseMin kényszerítés
+                if baseMin and s < baseMin:
+                    s = _floor_to_step(baseMin, bi)
+                f = None
+                p = None
+        else:
+            if p is None:
+                raise ValueError("Limit orderhez ár kötelező.")
+            p = _floor_to_step(p, pi)
+            if s is not None:
+                s = _floor_to_step(s, bi)
+                if baseMin and s < baseMin:
+                    s = _floor_to_step(baseMin, bi)
+            elif f is not None:
+                f = _floor_to_step(f, qi)
+                if minFunds and f < minFunds:
+                    f = _floor_to_step(minFunds, qi)
+                # funds -> size
+                s = _floor_to_step(f / p, bi)
+                f = None
+            else:
+                raise ValueError("Limit orderhez size_base vagy funds_quote szükséges.")
+
+        return {
+            "price": (str(p) if p is not None else None),
+            "size_base": (str(s) if s is not None else None),
+            "funds_quote": (str(f) if f is not None else None),
+        }
 
     def get_margin_order_api(self):
         """Return margin OrderAPIImpl if available, else None."""
@@ -477,8 +622,13 @@ class KucoinSDKWrapper:
     def place_market_order(self, symbol: str, side: str, size_base: Optional[str] = None, funds_quote: Optional[str] = None) -> Any:
         if self.public_mode: raise RuntimeError("Publikus módban nem küldhető order.")
         body = {"clientOid": uuid.uuid4().hex, "symbol": symbol, "side": side, "type": "market"}
-        if size_base: body["size"] = str(size_base)
-        if funds_quote: body["funds"] = str(funds_quote)
+        # --- sanitize ---
+        san = self.sanitize_order(symbol, side, "market", size_base=size_base, funds_quote=funds_quote)
+        body = {"clientOid": uuid.uuid4().hex, "symbol": symbol, "side": side, "type": "market"}
+        if san["size_base"]:
+            body["size"] = san["size_base"]
+        if san["funds_quote"]:
+            body["funds"] = san["funds_quote"]
         return self._rest_post("/api/v1/orders", body)
 
     # ----- Margin order (HF margin endpoint) -----
@@ -493,12 +643,17 @@ class KucoinSDKWrapper:
         if leverage is not None:
             if mode == "cross": leverage = min(int(leverage), 5)
             else: leverage = min(int(leverage), 10)
+        # --- sanitize ---
+        san = self.sanitize_order(symbol, side, "market", size_base=size_base, funds_quote=funds_quote)
+
         body = {
             "clientOid": uuid.uuid4().hex, "symbol": symbol, "side": side, "type": "market",
             "isIsolated": (mode == "isolated"), "autoBorrow": bool(auto_borrow), "autoRepay": bool(auto_repay),
         }
-        if size_base:  body["size"]  = str(size_base)
-        if funds_quote: body["funds"] = str(funds_quote)
+        if san["size_base"]:
+            body["size"] = san["size_base"]
+        if san["funds_quote"]:
+            body["funds"] = san["funds_quote"]
         if leverage is not None: body["leverage"] = leverage
         return self._rest_post("/api/v3/hf/margin/order", body)
 
