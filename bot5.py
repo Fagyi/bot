@@ -103,10 +103,35 @@ def compute_signal_from_ohlcv(ohlcv: List[List[float]], short_period: int, long_
         return 'error'
 
 def _pair_group_key(row: dict) -> str:
-    sym = (row.get("symbol") or "").upper()
+    sym = normalize_symbol(row.get("symbol") or "")
     if sym:
         return f"0-{sym}"           # valódi pár előre
     return f"1-{(row.get('ccy') or '').upper()}"  # „magányos” deviza később
+
+# -------- Szimbólum normalizálás --------
+def normalize_symbol(s: str) -> str:
+    """
+    Egységes pár formátum: 'BASE-QUOTE' nagybetűvel (pl. 'SOL-USDT').
+    Elfogad: 'sol/usdt', 'sol-usdt', 'SOL_USDT', 'sol usdt' stb.
+    """
+    s = (s or "").strip().upper()
+    if not s:
+        return s
+    # gyakori elválasztók egységesítése '-'-re
+    for sep in ("/", ":", "_", " "):
+        if sep in s:
+            s = s.replace(sep, "-")
+    return s
+
+def split_symbol(s: str) -> tuple[str, str]:
+    """
+    Biztonságos BASE, QUOTE bontás a normalizálás után.
+    """
+    s = normalize_symbol(s)
+    if "-" not in s:
+        raise ValueError(f"Érvénytelen symbol: '{s}' (várt forma: BASE-QUOTE)")
+    base, quote = s.split("-", 1)
+    return base, quote
 
 # ========= KuCoin Wrapper =========
 class KucoinSDKWrapper:
@@ -194,7 +219,7 @@ class KucoinSDKWrapper:
             data = []
         out: Dict[str, Dict[str, Decimal]] = {}
         for row in data:
-            sym = (row.get("symbol") or "").upper()
+            sym = normalize_symbol(row.get("symbol") or "")
             if not sym:
                 continue
             # mezők elnevezése a KuCoin v2 szerint
@@ -217,7 +242,7 @@ class KucoinSDKWrapper:
         """
         Visszaadja a szimbólum lépésköz/min adatait cache-ből, hiány esetén letölti.
         """
-        s = symbol.upper()
+        s = normalize_symbol(symbol)
         meta = self._symbols_meta.get(s)
         if meta:
             return meta
@@ -417,11 +442,11 @@ class KucoinSDKWrapper:
         if from_type in ("ISOLATED", "ISOLATED_V2"):
             if not symbol:
                 raise ValueError("Isolated transferhez meg kell adni a symbol-t (pl. 'SOL-USDT').")
-            body["fromAccountTag"] = symbol.upper().replace("/", "-")
+            body["fromAccountTag"] = normalize_symbol(symbol)
         if to_type in ("ISOLATED", "ISOLATED_V2"):
             if not symbol:
                 raise ValueError("Isolated transferhez meg kell adni a symbol-t (pl. 'SOL-USDT').")
-            body["toAccountTag"] = symbol.upper().replace("/", "-")
+            body["toAccountTag"] = normalize_symbol(symbol)
 
         # POST /api/v3/accounts/universal-transfer
         return self._rest_post("/api/v3/accounts/universal-transfer", body)
@@ -452,7 +477,7 @@ class KucoinSDKWrapper:
         if direction not in ("in", "out"):
             raise ValueError("direction csak 'in' vagy 'out' lehet")
 
-        symbol = symbol.upper().replace("/", "-")
+        symbol = normalize_symbol(symbol)
 
         def _do(from_t: str, to_t: str):
             return self.universal_transfer(currency, amount, from_t, to_t, symbol=symbol)
@@ -477,7 +502,7 @@ class KucoinSDKWrapper:
         try:
             r = self._rest_get("/api/v1/symbols")
             arr = r.get("data", [])
-            syms = [str(it.get("symbol")).upper() for it in arr if it.get("symbol")]
+            syms = [normalize_symbol(str(it.get("symbol"))) for it in arr if it.get("symbol")]
             return sorted(set(syms))
         except Exception as e:
             self._log(f"Symbols hiba: {e}")
@@ -563,7 +588,7 @@ class KucoinSDKWrapper:
             resp = self._spot_market.get_all_tickers({})
             data = getattr(resp, 'data', {}) or {}
             for it in data.get('ticker', []) or []:
-                if (it.get('symbol') or '').upper() == symbol.upper():
+                if normalize_symbol(it.get('symbol') or '') == normalize_symbol(symbol):
                     last = it.get('last') or it.get('price')
                     if last: return float(last)
         except Exception:
@@ -586,7 +611,7 @@ class KucoinSDKWrapper:
                 data = json.loads(r.read().decode('utf-8'))
                 arr = (((data or {}).get('data') or {}).get('ticker') or [])
                 for it in arr:
-                    if (it.get('symbol') or '').upper() == symbol.upper():
+                    if normalize_symbol(it.get('symbol') or '') == normalize_symbol(symbol):
                         p = it.get('last') or it.get('price')
                         p = float(p or 0.0)
                         if p > 0: return p
@@ -993,21 +1018,8 @@ class CryptoBotApp:
         style.map("Sell.TButton", background=[("active", "#b93b3b")])
 
     def _pair_group_key(self, rec: dict) -> str:
-        """
-        Egy 'pár-csoport' kulcsot ad vissza a rendezéshez.
-        - Ha van 'symbol' (pl. 'SOL-USDT'), azt használjuk.
-        - Ha nincs, devizából szintetikus párt készítünk: 'CCY-USDT' (USDT kivétel kezelve).
-        Így az adott párok (vagy ugyanahhoz a devizához tartozó sorok) egymás után maradnak.
-        """
-        sym = (rec.get("symbol") or "").upper()
-        if sym:
-            return sym
-        ccy = (rec.get("ccy") or "").upper()
-        if ccy and ccy != "USDT":
-            return f"{ccy}-USDT"
-        # tegyük a végére azokat, ahol nincs értelmes kulcs
-        return f"ZZZ-{ccy or 'USDT'}"
-
+        """Egységes rendező kulcs – delegál a modul szintű _pair_group_key-re."""
+        return _pair_group_key(rec)
 
     def _get_balance_row(self, ccy: str, acc_type: str, avail: float, holds: float, liability: float, value: float, pnl: float, symbol: str = "") -> tuple:
         """
@@ -1340,7 +1352,9 @@ class CryptoBotApp:
             ex = self.exchange or KucoinSDKWrapper(public_mode=True, log_fn=self.log)
             syms = ex.fetch_symbols()
             if syms:
-                self.symbols = syms
+                # normalizálás + egyediség + rendezés (UI barát)
+                syms_norm = sorted({normalize_symbol(s) for s in syms if s})
+                self.symbols = syms_norm
                 self.root.after(0, self._apply_symbols_to_widgets)
         except Exception as e:
             self.log(f"Symbols betöltési hiba: {e}")
@@ -1349,8 +1363,9 @@ class CryptoBotApp:
         for cb in (self.e_symbol, self.trade_symbol, self.cross_symbol, self.mt_symbol, self.f_iso_sym):
             try:
                 cb.configure(values=self.symbols)
-                if cb.get() not in self.symbols:
-                    cb.set(DEFAULT_SYMBOL)
+                # ha a jelenlegi érték nem normalizált, próbáljuk megmenteni
+                cur = normalize_symbol(cb.get() or "")
+                cb.set(cur if cur in self.symbols else DEFAULT_SYMBOL)
             except Exception:
                 pass
 
@@ -1551,7 +1566,7 @@ class CryptoBotApp:
                 if self.nb.tab(self.nb.select(), "text") != "Margin Trade":
                     pass
                 else:
-                    sym = self.mt_symbol.get().strip().upper().replace('/', '-')
+                    sym = normalize_symbol(self.mt_symbol.get())
                     px = 0.0
 
                     # 1) SDK/bulk próbálkozás
@@ -1580,7 +1595,7 @@ class CryptoBotApp:
         self._mt_price_job = self.root.after(50, _tick)
 
     def _mt_update_estimate(self, last_price: float):
-        sym = self.mt_symbol.get().strip().upper().replace('/', '-')
+        sym = normalize_symbol(self.mt_symbol.get())
         quote = sym.split('-')[1] if '-' in sym else 'QUOTE'
         try:
             if self.mt_input_mode.get() == 'base':
@@ -1637,8 +1652,8 @@ class CryptoBotApp:
             self.root.config(cursor="watch")
             
             # 1. Adatgyűjtés (ez a lassú rész)
-            sym = self.mt_symbol.get().strip().upper().replace('/', '-')
-            base, quote = sym.split('-')
+            sym = normalize_symbol(self.mt_symbol.get())
+            base, quote = split_symbol(sym)
             px = 0.0
             if self.exchange:
                 try:
@@ -1776,7 +1791,7 @@ class CryptoBotApp:
         if self.public_mode.get():
             messagebox.showwarning("Privát mód szükséges", "Kapcsold ki a publikus módot és állítsd be az API kulcsokat.")
             return
-        sym = self.mt_symbol.get().strip().upper().replace('/', '-')
+        sym = normalize_symbol(self.mt_symbol.get())
         typ = self.mt_type.get()
         price = self.mt_price.get().strip()
         size = self.mt_size.get().strip() or None
@@ -1902,7 +1917,7 @@ class CryptoBotApp:
                         return
 
                 # Paraméterek biztonságos olvasása
-                symbol = self.e_symbol.get().strip().upper().replace("/", "-")
+                symbol = normalize_symbol(self.e_symbol.get())
                 tf     = self.cb_tf.get().strip()
                 short  = int(self.e_short.get())
                 long   = int(self.e_long.get())
@@ -1988,7 +2003,7 @@ class CryptoBotApp:
 
         def worker():
             try:
-                symbol = self.trade_symbol.get().strip().upper().replace('/', '-')
+                symbol = normalize_symbol(self.trade_symbol.get())
                 size = self.trade_size.get().strip() or None
                 funds = self.trade_funds.get().strip() or None
                 if not (size or funds):
@@ -2063,8 +2078,8 @@ class CryptoBotApp:
         self.txt_positions.delete("1.0", tk.END)
         self.txt_positions.insert(tk.END, "Töltés…\n")
 
-        csym = (self.cross_symbol.get() or DEFAULT_SYMBOL).upper().replace("/", "-")
-        dq = csym.split("-")[1] if "-" in csym else "USDT"
+        csym = normalize_symbol(self.cross_symbol.get() or DEFAULT_SYMBOL)
+        _, dq = split_symbol(csym)
 
         def worker():
             try:
@@ -2092,7 +2107,7 @@ class CryptoBotApp:
         if self.public_mode.get():
             messagebox.showwarning("Privát mód szükséges", "Kapcsold ki a publikus módot és állítsd be az API kulcsokat.")
             return
-        symbol = (self.cross_symbol.get() or "").strip().upper().replace("/", "-")
+        symbol = normalize_symbol(self.cross_symbol.get() or "")
         if not symbol or "-" not in symbol:
             messagebox.showerror("Hiba", "Adj meg érvényes szimbólumot (pl. SOL-USDT).")
             return
@@ -2170,7 +2185,7 @@ class CryptoBotApp:
         if self.public_mode.get():
             messagebox.showwarning("Privát mód szükséges", "Kapcsold ki a publikus módot és állítsd be az API kulcsokat.")
             return
-        symbol = (self.cross_symbol.get() or "").strip().upper().replace("/", "-")
+        symbol = normalize_symbol(self.cross_symbol.get() or "")
         if not symbol or "-" not in symbol:
             messagebox.showerror("Hiba", "Adj meg érvényes szimbólumot (pl. SOL-USDT).")
             return
@@ -2246,7 +2261,7 @@ class CryptoBotApp:
         if self.public_mode.get():
             messagebox.showwarning("Privát mód szükséges", "Kapcsold ki a publikus módot és állítsd be az API kulcsokat.")
             return
-        sym = self.f_iso_sym.get().strip().upper().replace("/", "-")
+        sym = normalize_symbol(self.f_iso_sym.get())
         ccy = self.f_iso_ccy.get().strip().upper()
         try:
             amt = float(self.f_iso_amt.get()); assert amt > 0
@@ -2637,8 +2652,8 @@ class CryptoBotApp:
         """A Margin Bot „Elérhető” feliratát a Margin Trade fül egységes logikájával tölti."""
         try:
             # a Margin Bot fül a Margin Trade combóját (mt_symbol) használja
-            sym = self.mt_symbol.get().strip().upper().replace("/", "-")
-            base, quote = sym.split("-")
+            sym = normalize_symbol(self.mt_symbol.get())
+            base, quote = split_symbol(sym)
             avail_base, avail_quote = (0.0, 0.0)
             if hasattr(self, "_mt_available"):
                 avail_base, avail_quote = self._mt_available(base, quote)
@@ -2740,7 +2755,7 @@ class CryptoBotApp:
 
             # aktuális rt ár a jelenlegi szimbólumhoz
             try:
-                symbol = self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)).replace('/', '-')
+                symbol = normalize_symbol(self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)))
             except Exception:
                 symbol = None
 
@@ -2947,7 +2962,7 @@ class CryptoBotApp:
         self._safe_log("⏹️ Bot leállítása folyamatban...\n")
 
         try:
-            sym = self._mb_get_str("mb_symbol", self._mb_get_str("mt_symbol", DEFAULT_SYMBOL)).replace("/", "-")
+            sym = normalize_symbol(self._mb_get_str("mb_symbol", self._mb_get_str("mt_symbol", DEFAULT_SYMBOL)))
             dry = self._mb_get_bool("mb_dry", True)
             lev = self._mb_get_int("mb_leverage", 10)
             mode = self.mb_mode.get() if hasattr(self, "mb_mode") else "isolated"
@@ -3162,8 +3177,8 @@ class CryptoBotApp:
         if not hasattr(self, "_pool_balance_quote") or not hasattr(self, "_pool_used_quote"):
             # induló keret = min(UI keret, VALÓS elérhető QUOTE); ha UI üres → elérhető QUOTE
             try:
-                symbol0 = self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)).strip().upper().replace('/', '-')
-                base0, quote0 = symbol0.split('-')
+                symbol0 = normalize_symbol(self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)))
+                base0, quote0 = split_symbol(symbol0)
             except Exception:
                 base0, quote0 = "","USDT"
 
@@ -3280,7 +3295,7 @@ class CryptoBotApp:
 
             # SIM history (belső lista)
             try:
-                symbol_safe = self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)).replace('/', '-')
+                symbol_safe = normalize_symbol(self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)))
             except Exception:
                 symbol_safe = "UNKNOWN"
             try:
@@ -3325,7 +3340,7 @@ class CryptoBotApp:
             entry = float(pos['entry']); sz = float(pos['size'])
             # --- Lépcsőzés valósághűen: lot_step-re padlózva ---
             try:
-                symbol_safe = self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)).replace('/', '-')
+                symbol_safe = normalize_symbol(self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)))
             except Exception:
                 symbol_safe = None
             try:
@@ -3363,7 +3378,7 @@ class CryptoBotApp:
             try:
                 import time as _t
                 try:
-                    symbol_safe = self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)).replace('/', '-')
+                    symbol_safe = normalize_symbol(self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)))
                 except Exception:
                     symbol_safe = "UNKNOWN"
 
@@ -3554,7 +3569,7 @@ class CryptoBotApp:
             while self._mb_running:
                 try:
                     # --- UI beállítások kiolvasása ---
-                    symbol = self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)).strip().upper().replace('/', '-')
+                    symbol = normalize_symbol(self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)))
                     tf     = self._mb_get_str('mb_tf', '1m')
                     fa     = self._mb_get_int('mb_ma_fast', 9)
                     slw    = self._mb_get_int('mb_ma_slow', 21)
@@ -4152,7 +4167,7 @@ class CryptoBotApp:
 
                                             # --- ÚJ: nyitáskori becsült PnL (rt árhoz képest), fee-vel csökkentve
                                             try:
-                                                symbol_for_rt = self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)).replace('/', '-')
+                                                symbol_for_rt = normalize_symbol(self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)))
                                             except Exception:
                                                 symbol_for_rt = None
                                             pnl_est = None
@@ -4550,7 +4565,7 @@ class CryptoBotApp:
         """
         try:
             leverage = max(1, min(leverage, 10 if mode == 'isolated' else 5))
-            base, quote = symbol.split('-')
+            base, quote = split_symbol(symbol)
 
             # gyors készlet-lekérés (ha van helper)
             avail_base, avail_quote = (0.0, 0.0)
@@ -5060,7 +5075,7 @@ class BacktestTab:
     # ---------- UI helpers ----------
     def _get_params(self) -> BacktestParams:
         return BacktestParams(
-            symbol = self.e_symbol.get().strip().upper().replace('/', '-'),
+            symbol = normalize_symbol(self.e_symbol.get()),
             timeframe = self.cb_tf.get().strip(),
             limit = int(self.sp_limit.get()),
             short_ma = int(self.sp_short.get()),
