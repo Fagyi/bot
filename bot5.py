@@ -2315,10 +2315,20 @@ class CryptoBotApp:
         ).pack(side=tk.LEFT)
         r += 1
 
-        # --- Pár (az MT fül combóját használjuk, és létrehozunk alias-t a worker kedvéért) ---
-        ttk.Label(form, text="Pár").grid(row=r, column=0, sticky="w")
-        self.mt_symbol = ttk.Combobox(form, values=self.symbols, width=12, state='readonly')
-        self.mt_symbol.set(DEFAULT_SYMBOL); self.mt_symbol.grid(row=r, column=1, sticky="w")
+        ttk.Label(form, text="Pár").grid(row=r, column=0, sticky="w", padx=4, pady=2)
+        # Egy soron belüli konténer, hogy a Pár combó és a Max pozíció egymás mellett legyen
+        row_pair = ttk.Frame(form)
+        row_pair.grid(row=r, column=1, columnspan=3, sticky="w")
+        # Pár combó
+        self.mt_symbol = ttk.Combobox(row_pair, values=self.symbols, width=12, state='readonly')
+        self.mt_symbol.set(DEFAULT_SYMBOL)
+        self.mt_symbol.pack(side="left")
+        # Max pozíció (0 = korlátlan) – KÖZVETLENÜL a Pár mellett
+        ttk.Label(row_pair, text="  Max pozíció:").pack(side="left")
+        self.mb_max_open = ttk.Spinbox(row_pair, from_=0, to=999, width=6)
+        self.mb_max_open.pack(side="left", padx=(4,0))
+        # alapértelmezett érték
+        self.mb_max_open.delete(0, "end"); self.mb_max_open.insert(0, "0")
         # párváltáskor frissítsük az elérhető egyenleget
         self.mt_symbol.bind("<<ComboboxSelected>>", lambda _e: self._mb_refresh_available())
         r += 1
@@ -3660,6 +3670,14 @@ class CryptoBotApp:
                     except Exception:
                         drift_pct = float("nan")
 
+                    # --- Max nyitott pozíció limit (0 = korlátlan) ---
+                    try:
+                        max_open = int(self.mb_max_open.get() or "0")
+                    except Exception:
+                        max_open = 0
+                    # jelenlegi nyitottak száma (SIM listák, live-ban is tükröződnek)
+                    open_now = len(self._sim_pos_long) + len(self._sim_pos_short)
+
                     atr_val = None
                     if use_atr:
                         atr_series = self._mb_atr(df, n=atr_n)
@@ -3873,7 +3891,7 @@ class CryptoBotApp:
                     if drift_pct == drift_pct:  # not NaN
                         log_line += f" drift={drift_pct:.2f}%"
                     log_line += f" | POOL used/bal={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f}"
-
+                    log_line += f" | OPEN={open_now}/{('∞' if max_open==0 else max_open)}"
                     # egy sorban: jel + filter snapshot
                     self._safe_log(log_line.rstrip() + f"  → {combined_sig} | {filters_line}\n")
 
@@ -3931,6 +3949,16 @@ class CryptoBotApp:
                     # --- ÚJ NYITÁS (cooldown + pool limit) ---
                     now = int(time.time())
                     if combined_sig in ('buy','sell') and (now - self._mb_last_cross_ts >= cd_s):
+                        # Max pozíció guard
+                        if max_open > 0 and open_now >= max_open:
+                            self._safe_log(
+                                f"⏸ Max pozíció elérve ({open_now}/{max_open}) – új nyitás átugorva.\n"
+                            )
+                            opened = False
+                            # kis szusszanás, aztán folytatja a ciklust – zárások/menedzsment ettől független
+                            time.sleep(1)
+                            continue
+
                         # friss ticker csak nyitás előtt / vagy LIVE módban
                         try:
                             if (not dry) or True:  # ha minden nyitásnál szeretnéd
