@@ -81,20 +81,6 @@ TF_MAP = {
 def timeframe_to_sdk_type(tf: str) -> str:
     return TF_MAP.get(tf.lower().strip(), '5min')
 
-def compute_signal_from_ohlcv(ohlcv: List[List[float]], short_period: int, long_period: int) -> Signal:
-    try:
-        df = pd.DataFrame(ohlcv, columns=['ts','o','h','l','c','v'])
-        if len(df) < max(short_period, long_period) + 2: return 'hold'
-        df['short'] = df['c'].rolling(short_period).mean()
-        df['long']  = df['c'].rolling(long_period).mean()
-        prev, last = df.iloc[-2], df.iloc[-1]
-        if pd.isna(prev['short']) or pd.isna(prev['long']) or pd.isna(last['short']) or pd.isna(last['long']): return 'hold'
-        if prev['short'] < prev['long'] and last['short'] > last['long']: return 'buy'
-        if prev['short'] > prev['long'] and last['short'] < last['long']: return 'sell'
-        return 'hold'
-    except Exception:
-        return 'error'
-
 def _pair_group_key(row: dict) -> str:
     sym = normalize_symbol(row.get("symbol") or "")
     if sym:
