@@ -595,24 +595,6 @@ class KucoinSDKWrapper:
         return self._rest_post("/api/v3/hf/margin/order", body)
 
     # ----- Pozíció zárás helpers -----
-    def close_isolated_position(self, symbol: str) -> dict:
-        acc = self.fetch_isolated_accounts()
-        data = acc.get("data", acc)
-        assets = (data or {}).get("assets", []) or []
-        row = next((a for a in assets if a.get("symbol") == symbol), None)
-        if not row: raise RuntimeError(f"Nincs isolated adat a(z) {symbol} párra.")
-        base = row.get("baseAsset", {}) or {}
-        quote = row.get("quoteAsset", {}) or {}
-        base_tot = float(base.get("total", 0) or 0)
-        base_li  = float(base.get("liability", 0) or 0)
-        quote_li = float(quote.get("liability", 0) or 0)
-        if base_li > 0: side, size = "buy",  base_li
-        elif base_tot > 0: side, size = "sell", base_tot
-        elif quote_li > 0 and base_tot > 0: side, size = "sell", base_tot
-        else: raise RuntimeError("Nincs zárható isolated pozíció.")
-        resp = self.place_margin_market_order("isolated", symbol, side, size_base=str(size), auto_borrow=True, auto_repay=True)
-        return resp if isinstance(resp, dict) else {"data": resp}
-
     def close_cross_position(self, symbol: str) -> dict:
         acc = self.fetch_cross_accounts()
         data = acc.get("data", acc) or {}
@@ -2056,6 +2038,93 @@ class CryptoBotApp:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    # ----- Pozíció zárás (isolated) – szaniterrel egységesítve -----
+    def close_isolated_position(self, symbol: str) -> dict:
+        """
+        Manuális isolated pozíciózárás markettel.
+        - Long zárás → SELL (BASE mennyiség küldése)
+        - Short zárás → BUY (funds küldése, szaniter végzi a size→funds becslést és ellenőrzést)
+        """
+        # 1) Isolated számla lekérése és a kiválasztott pár sora
+        acc = self.exchange.fetch_isolated_accounts()
+        data = acc.get("data", acc)
+        assets = (data or {}).get("assets", []) or []
+        row = next((a for a in assets if (a.get("symbol") or "").upper() == symbol.upper()), None)
+        if not row:
+            raise RuntimeError(f"Nincs isolated adat a(z) {symbol} párra.")
+
+        base  = row.get("baseAsset", {}) or {}
+        quote = row.get("quoteAsset", {}) or {}
+
+        base_tot = float(base.get("total", 0) or 0)          # long méret
+        base_li  = float(base.get("liability", 0) or 0)      # short méret (visszavásárolandó)
+        quote_li = float(quote.get("liability", 0) or 0)
+
+        # 2) Irány és nyers mennyiség (szaniter előtt)
+        if base_li > 0:
+            side, raw_size = "buy", base_li      # short zárás → BUY
+        elif base_tot > 0:
+            side, raw_size = "sell", base_tot    # long zárás → SELL
+        elif quote_li > 0 and base_tot > 0:
+            side, raw_size = "sell", base_tot
+        else:
+            raise RuntimeError("Nincs zárható isolated pozíció.")
+
+        # 3) Utolsó ár BUY funds-becsléshez (ha nem sikerül, None maradhat – a szaniter kezelni fogja)
+        try:
+            last_px = float(self.exchange.fetch_last_price(symbol)) or None
+        except Exception:
+            last_px = None
+
+        # 4) Szaniter hívása – egységes minimumok/lépésközök
+        sb = fq = None
+        try:
+            sb, fq = self._mb_sanitize_order(
+                symbol=symbol,
+                side=side,
+                price=last_px,
+                size_base=float(raw_size),
+                funds_quote=None
+            )
+        except Exception as e:
+            raise RuntimeError(f"Szaniter hiba zárás közben: {e}")
+
+        # 5) Kötelező mezők ellenőrzése oldalanként
+        if side == "sell":
+            if not sb or sb <= 0:
+                raise RuntimeError("Zárási méret a lépésköz/minimum alatt – SELL close eldobva.")
+            size_arg, funds_arg = float(sb), None
+        else:
+            if not fq or fq <= 0:
+                raise RuntimeError("BUY close eldobva (minFunds/quote_step/minBase ellenőrzés után).")
+            size_arg, funds_arg = None, float(fq)
+
+        # 6) Leverage az UI-ból (ha nincs, 10)
+        try:
+            lev = max(1, int(self._mb_get_int('mb_leverage', 10)))
+        except Exception:
+            lev = 10
+
+        # 7) Market close küldése; auto_repay=True, auto_borrow=False
+        payload_dbg = {
+            "mode": "isolated", "symbol": symbol, "side": side,
+            "size_base": size_arg, "funds_quote": funds_arg,
+            "leverage": lev, "auto_borrow": False, "auto_repay": True
+        }
+        self._safe_log(f"🐞 SEND MANUAL CLOSE: {self._mb_pp(payload_dbg)}\n")
+
+        resp = self.exchange.place_margin_market_order(
+            "isolated", symbol, side,
+            size_base=size_arg,
+            funds_quote=funds_arg,
+            leverage=lev,
+            auto_borrow=False,
+            auto_repay=True
+        )
+
+        self._safe_log(f"🐞 RECV MANUAL CLOSE: {self._mb_pp(resp)}\n")
+        return resp if isinstance(resp, dict) else {"data": resp}
+
     def close_selected_isolated(self):
         if self.public_mode.get():
             messagebox.showwarning("Privát mód szükséges", "Kapcsold ki a publikus módot és állítsd be az API kulcsokat.")
@@ -2068,19 +2137,26 @@ class CryptoBotApp:
         mode = getattr(self, "_last_positions_mode", "isolated")
 
         btn = self.btn_close_selected
-        btn.config(state=tk.DISABLED); self.root.config(cursor="watch")
+        btn.config(state=tk.DISABLED)
+        self.root.config(cursor="watch")
 
         def worker():
             try:
                 if mode == "cross":
+                    # marad a wrapperes cross close, ha van
                     resp = self.exchange.close_cross_position(symbol)  # type: ignore[union-attr]
                     refreshed = self.view_cross_accounts
                     ok_title = "Close cross"
                 else:
-                    resp = self.exchange.close_isolated_position(symbol)  # type: ignore[union-attr]
+                    # MOSTANTÓL a saját (CryptoBotApp) isolated close-t hívjuk,
+                    # hogy a szaniter biztosan ugyanaz legyen, mint a workerben
+                    resp = self.close_isolated_position(symbol)
                     refreshed = self.view_isolated_accounts
                     ok_title = "Close isolated"
-                oid = (resp.get("data", {}) or {}).get("orderId")
+
+                data = (resp.get("data", {}) or {}) if isinstance(resp, dict) else {}
+                oid = data.get("orderId") or data.get("id") or data.get("orderid") or data.get("clientOid")
+
                 self.root.after(0, lambda oid=oid, s=symbol, ok_title=ok_title: [
                     self.log(f"✅ {ok_title} – {s} – orderId={oid}"),
                     messagebox.showinfo(ok_title, f"Sikeres zárás: {s}\nOrderId: {oid}"),
