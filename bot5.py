@@ -4607,7 +4607,7 @@ class CryptoBotApp:
         except Exception:
             pass
 
-    # ---------- Jel-generátor: EMA keresztezés + gyors-EMA slope (refaktorált) ----------
+    # ---------- Jel-generátor: KIZÁRÓLAG EMA KERESZTEZÉS (Refaktorált) ----------
     def _mb_signal_from_ema_live(
         self,
         series,
@@ -4618,11 +4618,9 @@ class CryptoBotApp:
         invert: bool | None = None,
     ) -> tuple[str, float, float]:
         """
-        EMA jel live módban, zajcsökkentéssel:
-          - Elsődlegesen KERESZTEZÉS alapján jelez (edge-trigger).
-          - Ha nincs friss keresztezés, csak akkor jelez meredekség alapján, ha
-            a diff jóval a sávon kívül van és a gyors EMA meredeksége
-            meghalad egy ATR-alapú minimumot.
+        Optimalizált EMA jel: Kizárólag KERESZTEZÉS alapján (edge-trigger),
+        a hiszterézis sáv (zajszűrő) tiszteletben tartásával.
+        Eltávolítva a "meredekség" (slope) alapú jelzés a zaj csökkentése érdekében.
 
         Visszaad: (sig, ema_fast_last, ema_slow_last)
         """
@@ -4632,7 +4630,7 @@ class CryptoBotApp:
         if len(s) < max(fast, slow) + 2:
             return "hold", float("nan"), float("nan")
 
-        # élő (intrabar) ár beégetése
+        # élő (intrabar) ár beégetése (opcionális, de a jelenlegi logikában benne volt)
         if last_px_rt is not None and last_px_rt > 0:
             s.iloc[-1] = float(last_px_rt)
 
@@ -4644,60 +4642,38 @@ class CryptoBotApp:
 
         diff_prev = ef_p - es_p                 # előző diff (EF-ES)
         diff_now  = ef_l - es_l                 # aktuális diff
-        slope_fast = ef_l - ef_p                # gyors EMA meredeksége (ár egység)
 
-        # ---- Hysteresis és küszöbök (ATR-arányosan) ----
-        # hysteresis UI%: eps = (ATR/Price) * (UI%/100)
+        # ---- Hysteresis (Zajszűrő sáv) ----
         if atr_eps_mult is None:
             try:
+                # Az "EMA filter Hyst %" értéket olvassuk a GUI-ból
                 ui_pct = float(self.mb_ema_hyst_pct.get())
                 atr_eps_mult = max(0.0, ui_pct) / 100.0
             except Exception:
-                atr_eps_mult = 0.0
+                atr_eps_mult = 0.0 # Alapértelmezett 0, ha nincs UI
 
-        # min. slope és "strong" szorzó (UI-ból, ha van)
-        try:
-            slope_pct = float(self.mb_ema_slope_pct.get()) / 100.0  # pl. 0.05 → 0.0005
-        except Exception:
-            slope_pct = 0.0005  # ~0.05% ATR – konzervatív alap
-
-        try:
-            strong_mult = max(1.0, float(self.mb_ema_strong_mult.get()))
-        except Exception:
-            strong_mult = 1.5
-
-        px_last  = float(s.iloc[-1])
         atr_last = float(getattr(self, "_mb_last_atr_val", 0.0))
+        px_last  = float(s.iloc[-1])
 
-        # hysteresis sáv diff-hez (ár egységben): ATR * ui%
+        # Hysteresis sáv diff-hez (ár egységben): ATR * ui%
         band = (atr_last * atr_eps_mult) if (atr_last > 0 and atr_eps_mult > 0 and px_last > 0) else 0.0
         up_th =  +band
         dn_th =  -band
 
-        # meredekség minimum (ár egységben): ATR * slope_pct
-        slope_th = (atr_last * slope_pct) if (atr_last > 0 and slope_pct > 0) else 0.0
+        # Keresztezés detektálás (edge-trigger)
+        # Szigorúbb keresztezés: az előző értéknek a sáv TÚLOLDALÁN kellett lennie.
+        crossed_up   = (diff_prev <= dn_th) and (diff_now > up_th)
+        crossed_down = (diff_prev >= up_th) and (diff_now < dn_th)
 
-        # keresztezés detektálás (edge-trigger)
-        crossed_up   = (diff_prev <= 0.0) and (diff_now > 0.0)
-        crossed_down = (diff_prev >= 0.0) and (diff_now < 0.0)
-
-        # döntés – először keresztezés, majd erős slope eset
+        # Döntés: Kizárólag keresztezés alapján
         sig = "hold"
-        # 1) KERESZTEZÉS + diff a sávon túl
-        if crossed_up and diff_now > up_th:
+        if crossed_up:
             sig = "buy"
-        elif crossed_down and diff_now < dn_th:
+        elif crossed_down:
             sig = "sell"
-        else:
-            # 2) SLOPE-ALAPÚ: csak erős elkülönülésnél és kellően nagy meredekségnél
-            if (diff_now > up_th * strong_mult) and (slope_fast > max(0.0, slope_th)):
-                sig = "buy"
-            elif (diff_now < dn_th * strong_mult) and (slope_fast < -max(0.0, slope_th)):
-                sig = "sell"
-            else:
-                sig = "hold"
-
-        # opcionális invert
+        # Ha nincs keresztezés, a 'sig' marad "hold"
+        
+        # Opcionális invertálás
         if invert is None:
             try:
                 invert = bool(self.mb_invert_ema.get())
