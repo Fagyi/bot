@@ -2552,6 +2552,8 @@ class CryptoBotApp:
         ttk.Checkbutton(ch, text="Auto-borrow/repay", variable=self.mb_autob).pack(side=tk.LEFT, padx=(0,12))
         self.mb_allow_short = tk.BooleanVar(value=True)
         ttk.Checkbutton(ch, text="Short engedélyezése", variable=self.mb_allow_short).pack(side=tk.LEFT, padx=(0,12))
+        self.mb_pause_new = tk.BooleanVar(value=False)
+        ttk.Checkbutton(ch, text="Új nyitás szünetel", variable=self.mb_pause_new).pack(side=tk.LEFT, padx=(12,0))
         self.mb_dry = tk.BooleanVar(value=True)
         ttk.Checkbutton(ch, text="Dry-run (nem küld ordert)", variable=self.mb_dry).pack(side=tk.LEFT)
         r += 1
@@ -4121,7 +4123,13 @@ class CryptoBotApp:
 
                     # --- ÚJ NYITÁS (cooldown + pool limit) ---
                     now = int(time.time())
+                    pause_new = self._mb_get_bool("mb_pause_new", False)
                     if combined_sig in ('buy','sell') and (now - self._mb_last_cross_ts >= cd_s):
+                        if pause_new:
+                            self._safe_log(f"⏸️ Új nyitás szüneteltetve (Checkbox). Jel ({combined_sig}) átugorva.\n")
+                            opened = False
+                            time.sleep(1)
+                            continue
                         # Max pozíció guard
                         if max_open > 0 and open_now >= max_open:
                             self._safe_log(
