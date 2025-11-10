@@ -2303,10 +2303,10 @@ class CryptoBotApp:
         ).pack(side=tk.LEFT)
         r += 1
 
-        ttk.Label(form, text="Pár").grid(row=r, column=0, sticky="w", padx=4, pady=2)
+        ttk.Label(form, text="Pár").grid(row=r, column=0, sticky="w", pady=(4,0))
         # Egy soron belüli konténer, hogy a Pár combó és a Max pozíció egymás mellett legyen
         row_pair = ttk.Frame(form)
-        row_pair.grid(row=r, column=1, columnspan=3, sticky="w")
+        row_pair.grid(row=r, column=1, pady=(4,0), sticky="w")
         # Pár combó
         self.mt_symbol = ttk.Combobox(row_pair, values=self.symbols, width=12, state='readonly')
         self.mt_symbol.set(DEFAULT_SYMBOL)
@@ -2350,26 +2350,13 @@ class CryptoBotApp:
         r += 1  # <-- csak egyszer léptetünk itt
 
         # EMA jel-szűrő paraméterek – KÖVETKEZŐ SOR (nincs extra r+=1 előtte!)
-        ttk.Label(form, text="EMA filter").grid(row=r, column=0, sticky="w", pady=(2,0))
+        ttk.Label(form, text="EMA Hysteresis (Zajszűrés):").grid(row=r, column=0, sticky="w", pady=(6,0))
         ema_f_row = ttk.Frame(form)
-        ema_f_row.grid(row=r, column=1, sticky="w", pady=(2,0))
-
-        ttk.Label(ema_f_row, text="Hyst %:").pack(side=tk.LEFT, padx=(0,2))
-        self.mb_ema_hyst_pct = ttk.Spinbox(ema_f_row, from_=0.0, to=100.0, increment=0.5, width=5)
+        ema_f_row.grid(row=r, column=1, sticky="w", pady=(6,0))
+        self.mb_ema_hyst_pct = ttk.Spinbox(ema_f_row, from_=0.0, to=100, width=6)
         self.mb_ema_hyst_pct.delete(0, tk.END); self.mb_ema_hyst_pct.insert(0, "1.00")
-        self.mb_ema_hyst_pct.pack(side=tk.LEFT, padx=(0,8))
-
-        ttk.Label(ema_f_row, text="Slope %ATR:").pack(side=tk.LEFT, padx=(0,2))
-        self.mb_ema_slope_pct = ttk.Spinbox(ema_f_row, from_=0.0, to=5.0, increment=0.01, width=5)
-        self.mb_ema_slope_pct.delete(0, tk.END); self.mb_ema_slope_pct.insert(0, "0.05")
-        self.mb_ema_slope_pct.pack(side=tk.LEFT, padx=(0,8))
-
-        ttk.Label(ema_f_row, text="×").pack(side=tk.LEFT, padx=(0,2))
-        self.mb_ema_strong_mult = ttk.Spinbox(ema_f_row, from_=1.0, to=5.0, increment=0.1, width=4)
-        self.mb_ema_strong_mult.delete(0, tk.END); self.mb_ema_strong_mult.insert(0, "1.5")
-        self.mb_ema_strong_mult.pack(side=tk.LEFT)
-
-        r += 1  # <-- most lépünk a Tőkeáttét sorra
+        self.mb_ema_hyst_pct.pack(side=tk.LEFT)
+        r += 1
 
         # Tőkeáttét (worker: mb_leverage) + kompat alias a _mb_sync_lev_cap-hez
         ttk.Label(form, text="Tőkeáttét").grid(row=r, column=0, sticky="w", pady=(6,0))
@@ -2549,13 +2536,13 @@ class CryptoBotApp:
         # checkboxok
         ch = ttk.Frame(form); ch.grid(row=r, column=0, columnspan=2, sticky="w", pady=(8,0))
         self.mb_autob = tk.BooleanVar(value=True)
-        ttk.Checkbutton(ch, text="Auto-borrow/repay", variable=self.mb_autob).pack(side=tk.LEFT, padx=(0,12))
+        ttk.Checkbutton(ch, text="Auto-borrow/repay", variable=self.mb_autob).pack(side=tk.LEFT, padx=(0.08))
         self.mb_allow_short = tk.BooleanVar(value=True)
-        ttk.Checkbutton(ch, text="Short engedélyezése", variable=self.mb_allow_short).pack(side=tk.LEFT, padx=(0,12))
+        ttk.Checkbutton(ch, text="Short engedélyezése", variable=self.mb_allow_short).pack(side=tk.LEFT, padx=(0.08))
         self.mb_pause_new = tk.BooleanVar(value=False)
-        ttk.Checkbutton(ch, text="Új nyitás szünetel", variable=self.mb_pause_new).pack(side=tk.LEFT, padx=(12,0))
+        ttk.Checkbutton(ch, text="Új nyitás szünetel", variable=self.mb_pause_new).pack(side=tk.LEFT, padx=(0.08))
         self.mb_dry = tk.BooleanVar(value=True)
-        ttk.Checkbutton(ch, text="Dry-run (nem küld ordert)", variable=self.mb_dry).pack(side=tk.LEFT)
+        ttk.Checkbutton(ch, text="Dry-run (nem küld ordert)", variable=self.mb_dry).pack(side=tk.LEFT, padx=(0.08))
         r += 1
 
         # Start / Stop
