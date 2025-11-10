@@ -4118,42 +4118,6 @@ class CryptoBotApp:
                             lot_step, price_step, min_base, min_funds, quote_step = self._mb_get_market_steps(symbol)
                             open_size = self._mb_floor_to_step_dec(open_size, lot_step)
 
-                            # --- BUY elő-szanitizálás: funds padding a zárhatóság biztosítására ---
-                            # Cél: BUY nyitásnál már most szűrjük/igazítsuk a funds-ot úgy,
-                            # hogy a kapott végrehajtott méret (funds/ár, lot_step-re padlózva)
-                            # biztosan >= min_base legyen, és a quote_step-hez igazodjon.
-                            if combined_sig == 'buy':
-                                _sb_pre, _fq_pre = self._mb_sanitize_order(
-                                    symbol=symbol,
-                                    side='buy',
-                                    price=last_px_rt,
-                                    size_base=None,
-                                    funds_quote=float(nominal_q)
-                                )
-
-                                if not _fq_pre:
-                                    # Ha a szanitiszálás eldobta (minBase/minFunds/quote_step miatt),
-                                    # akkor ezt a nyitást inkább átugorjuk – így nem lesz később zárási gond.
-                                    self._safe_log("ℹ️ BUY elő-szanitizálás eldobta a nyitást (minBase/minFunds/quote_step).\n")
-                                    opened = False
-                                    continue
-
-                                # A további számolásokhoz a szanitiszált funds-ot használjuk
-                                nominal_q = float(_fq_pre)
-                                commit_usdt = nominal_q / max(1, lev)
-
-                                # Ebből becsült végrehajtott méret (lot_step-re padlózva)
-                                open_size = self._mb_floor_to_step_dec(
-                                    nominal_q / max(last_px_rt, 1e-12),
-                                    float(lot_step or 0.0)
-                                )
-
-                                # Biztonsági guard: ha így is a min_base alatt lenne, inkább kihagyjuk a nyitást
-                                if min_base and open_size < float(min_base):
-                                    self._safe_log("ℹ️ BUY elő-szanitizálás után méret < minBase – nyitás kihagyva.\n")
-                                    opened = False
-                                    continue
-
                             # log
                             self._safe_log(
                                 f"📈 Jel: {combined_sig.upper()} | px={last_px_rt:.6f} | size%={sizep_to_use:.2f} | "
