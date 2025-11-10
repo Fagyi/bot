@@ -3538,30 +3538,34 @@ class CryptoBotApp:
                 funds_to_send = None
 
                 if close_side == "sell":
-                    # long zárás: BASE-ből adunk el → méretet kell küldeni; limit: elérhető BASE
-                    base_av = None
+                    # long zárás: a valós poziméretből indulunk, NEM clampelünk available-re
+                    # (auto_repay=True mellett a tőzsde rendezi a kölcsönt/fee-t)
                     try:
                         if mode == "isolated":
                             acc = self.exchange.fetch_isolated_accounts() or {}
                             row = next((a for a in (acc.get("data", acc) or {}).get("assets", []) if a.get("symbol")==symbol), None)
                             if row:
                                 base = row.get("baseAsset", {}) or {}
-                                base_av = float(base.get("available", base.get("availableBalance", base.get("free", 0))) or 0)
+                                # ha van explicit "total" vagy "positionSize", azt preferáld
+                                base_tot = float(base.get("total", base.get("position", base.get("positionSize", 0))) or 0)
+                                if base_tot <= 0:
+                                    self._safe_log("ℹ️ Nincs zárható BASE a pozícióban (total/position=0).\n")
+                                    return False
+                                # csak lefelé vágjuk, ha a SIM túlbecsülte
+                                sz_raw = min(sz_raw, base_tot)
                         else:
+                            # cross esetén is próbálj 'total' jellegű értéket használni, ha elérhető
                             acc = self.exchange.fetch_cross_accounts() or {}
-                            accounts = (acc.get("data", acc) or {}).get("accounts", []) or (acc.get("data", acc) or {}).get("accountList", [])
-                            base_ccy = symbol.split("-")[0]
-                            r = next((x for x in accounts if (x.get("currency") or x.get("currencyName","")).upper()==base_ccy.upper()), None)
-                            if r:
-                                base_av = float(r.get("available", r.get("availableBalance", r.get("free", 0))) or 0)
+                            # ha nincs megbízható 'total', inkább ne vágd 'available'-re
+                            pass
                     except Exception:
-                        base_av = None
+                        pass
 
-                    if base_av is not None:
-                        sz_raw = min(sz_raw, float(base_av))
-                        if sz_raw <= 0:
-                            self._safe_log("ℹ️ Nincs elérhető BASE a záró SELL-hez.\n")
-                            return False
+                    # (opcionális) diag a szaniter előtt:
+                    self._safe_log(
+                        f"🔎 CLOSE SELL diag | pos.size={pos.get('size')} | sz_raw(before)={sz_raw} | "
+                        f"lot_step/minBase={self._mb_get_market_steps(symbol)[:3]}\n"
+                    )
 
                     # sanitizer (SELL: size_base ellenőrzés lépésköz/minimum szerint)
                     size_to_send, _ = self._mb_sanitize_order(
