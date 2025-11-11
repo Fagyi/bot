@@ -1769,93 +1769,57 @@ class CryptoBotApp:
         self.log("A bot ciklusa befejeződött.")
 
     def tick_once(self):
-        """Azonnali manuális frissítés – most már nem blokkolja a GUI-t."""
         if getattr(self, "_tick_busy", False):
             self.log("⏳ Frissítés már folyamatban…\n")
             return
-
         self._tick_busy = True
         self.log("🔄 Frissítés indul…")
 
-        def _work():
-            import pandas as pd, time
+        try:
+            symbol = normalize_symbol(self.e_symbol.get())
+            tf     = self.cb_tf.get().strip()
+            short  = int(self.e_short.get())
+            long   = int(self.e_long.get())
+        except Exception as e:
+            self.log(f"⚠ Paraméter hiba: {e}\n")
+            self._tick_busy = False
+            return
 
+        def _work(p_symbol, p_tf, p_short, p_long):
+            import pandas as pd
             try:
-                # ha még nincs exchange (tiszta indulás), inicializáljuk public módban
+                # exchange init (public), ha nincs
                 if getattr(self, "exchange", None) is None:
-                    try:
-                        self.exchange = KucoinSDKWrapper(public_mode=True, log_fn=self.log)
-                        self.log("🔧 Exchange inicializálva (public mód) – csak adatlekérésre.")
-                    except Exception as ex:
-                        _msg = f"❌ Exchange init hiba: {ex}"
-                        self.root.after(0, lambda msg=_msg: (
-                            self.log(msg),
-                            setattr(self, "_tick_busy", False)
-                        ))
-                        return
+                    self.exchange = KucoinSDKWrapper(public_mode=True, log_fn=self.log)
 
-                # Paraméterek biztonságos olvasása
-                symbol = normalize_symbol(self.e_symbol.get())
-                tf     = self.cb_tf.get().strip()
-                short  = int(self.e_short.get())
-                long   = int(self.e_long.get())
-            except Exception as e:
-                _msg = f"⚠️ Paraméter hiba: {e}"
-                self.root.after(0, lambda msg=_msg: (
-                    self.log(msg),
-                    setattr(self, "_tick_busy", False)
-                ))
-                return
-
-            # --- OHLCV lekérés ---
-            try:
                 with getattr(self, "_ex_lock", threading.RLock()):
-                    ohlcv = self.exchange.fetch_ohlcv(symbol, tf, limit=200)
-            except Exception as e:
-                _msg = f"❌ Adatlekérési hiba: {e}"
-                self.root.after(0, lambda msg=_msg: (
-                    self.log(msg),
-                    setattr(self, "_tick_busy", False)
-                ))
-                return
+                    ohlcv = self.exchange.fetch_ohlcv(p_symbol, p_tf, limit=200)
 
-            if not ohlcv:
-                self.root.after(0, lambda: (
-                    self.log("⚠️ Nincs adat a szervertől."),
-                    setattr(self, "_tick_busy", False)
-                ))
-                return
+                if not ohlcv:
+                    def _no_data():
+                        self.log("⚠ Nincs adat a szervertől.\n")
+                        self._tick_busy = False
+                    self.root.after(0, _no_data)
+                    return
 
-            # --- Számítások ---
-            try:
                 df = pd.DataFrame(ohlcv, columns=['ts','o','h','l','c','v'])
-                df['short'] = df['c'].rolling(short).mean()
-                df['long']  = df['c'].rolling(long).mean()
+                df['short'] = df['c'].rolling(p_short, min_periods=1).mean()
+                df['long']  = df['c'].rolling(p_long,  min_periods=1).mean()
+
+                def _update_ui():
+                    try:
+                        last = df.iloc[-1]
+                        self.log(f"[{p_symbol} {p_tf}] close={last['c']:.6f}, short={last['short']:.6f}, long={last['long']:.6f}\n")
+                        self.draw_chart(df, p_symbol, p_tf)
+                    finally:
+                        self._tick_busy = False
+                self.root.after(0, _update_ui)
+
             except Exception as e:
-                _msg = f"⚠️ Számítási hiba: {e}"
-                self.root.after(0, lambda msg=_msg: (
-                    self.log(msg),
-                    setattr(self, "_tick_busy", False)
-                ))
-                return
-
-            # --- GUI frissítés a főszálon ---
-            def _update_ui():
-                try:
-                    last = df.iloc[-1]
-                    self.log(
-                        f"[{symbol} {tf}] close={last['c']:.6f}, short={last['short']:.6f}, long={last['long']:.6f}"
-                    )
-                    self.draw_chart(df, symbol, tf)
-                except Exception as e:
-                    self.log(f"⚠️ GUI frissítés hiba: {e}")
-                finally:
-                    self._tick_busy = False
-
-            self.root.after(0, _update_ui)
+                self.root.after(0, lambda: (self.log(f"❌ tick_once hiba: {e}\n"), setattr(self, "_tick_busy", False)))
 
         import threading
-        threading.Thread(target=_work, daemon=True).start()
+        threading.Thread(target=_work, args=(symbol, tf, short, long), daemon=True).start()
 
     # ---- diagram ----
     def draw_chart(self, df: pd.DataFrame, symbol: str, tf: str):
