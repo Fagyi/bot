@@ -289,38 +289,22 @@ class KucoinSDKWrapper:
 
     def _rest_post(self, path: str, body: dict) -> dict:
         """
-        Aláírt KuCoin REST POST (v2). A `path` pl. '/api/v1/isolated/transfer-in'.
+        Aláírt KuCoin REST POST (v2) – az osztály-szintű session-t használva.
         """
-        import time, base64, hmac, hashlib, json, requests
+        import json
+        self._ensure_keys()  # Biztosítjuk, hogy vannak kulcsok
+
         base_url = "https://api.kucoin.com"
         url = base_url + path
-
-        key        = os.getenv("KUCOIN_KEY", "")
-        secret     = os.getenv("KUCOIN_SECRET", "")
-        passphrase = os.getenv("KUCOIN_PASSPHRASE", "")
-        if not (key and secret and passphrase):
-            raise RuntimeError("Hiányzó API kulcsok (KUCOIN_KEY/SECRET/PASSPHRASE).")
-
-        now = str(int(time.time() * 1000))
+        
+        # A test-et JSON stringgé alakítjuk
         payload_json = json.dumps(body, separators=(",", ":"))
-        str_to_sign = now + "POST" + path + payload_json
-        signature = base64.b64encode(
-            hmac.new(secret.encode("utf-8"), str_to_sign.encode("utf-8"), hashlib.sha256).digest()
-        ).decode()
-        passphrase_sig = base64.b64encode(
-            hmac.new(secret.encode("utf-8"), passphrase.encode("utf-8"), hashlib.sha256).digest()
-        ).decode()
+        
+        # A meglévő aláíró logikát hívjuk, body-val
+        headers = self._rest_sign_headers("POST", path, "", payload_json)
 
-        headers = {
-            "Content-Type": "application/json",
-            "KC-API-KEY": key,
-            "KC-API-SIGN": signature,
-            "KC-API-TIMESTAMP": now,
-            "KC-API-PASSPHRASE": passphrase_sig,
-            "KC-API-KEY-VERSION": "2",
-        }
-
-        r = requests.post(url, headers=headers, data=payload_json, timeout=12)
+        # Az osztály meglévő session-jét használjuk
+        r = self._http.post(url, data=payload_json, headers=headers, timeout=self._timeout)
         r.raise_for_status()
         return r.json() if r.text else {}
 
