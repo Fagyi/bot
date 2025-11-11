@@ -2933,12 +2933,12 @@ class CryptoBotApp:
         self._mb_thread.start()
 
     def mb_stop(self):
-        """Margin bot leállítása + biztonságos pozíciózárás (SIM/LIVE – C opcióval)."""
+        """Margin bot leállítása + biztonságos pozíciózárás (SIM/LIVE – egységesen, központi close használatával)."""
         if not getattr(self, "_mb_running", False):
             self._safe_log("ℹ️ A bot nem fut.\n")
             return
 
-        # manuális leállítás jelző
+        # manuális leállítás jelző + futás megállítása
         self._mb_stopping = True
         try:
             import time as _t
@@ -2950,269 +2950,61 @@ class CryptoBotApp:
         self._safe_log("⏹️ Bot leállítása folyamatban...\n")
 
         try:
-            sym = normalize_symbol(self._mb_get_str("mb_symbol", self._mb_get_str("mt_symbol", DEFAULT_SYMBOL)))
-            dry = self._mb_get_bool("mb_dry", True)
-            lev = self._mb_get_int("mb_leverage", 10)
-            mode = self._mb_get_str("mb_mode", "isolated")
+            import threading
+            sym   = normalize_symbol(self._mb_get_str("mb_symbol", self._mb_get_str("mt_symbol", DEFAULT_SYMBOL)))
+            dry   = self._mb_get_bool("mb_dry", True)
+            lev   = self._mb_get_int("mb_leverage", 10)
+            mode  = self._mb_get_str("mb_mode", "isolated")
 
+            # Utolsó ismert élő ár – _ex_lock alatt kérjük le
+            last_px = None
             try:
-                last_px = float(self.exchange.fetch_last_price(sym))
+                with getattr(self, "_ex_lock", threading.RLock()):
+                    last_px = float(self.exchange.fetch_last_price(sym))
             except Exception:
                 last_px = None
-                self._safe_log("⚠️ Ár lekérés nem sikerült, utolsó ismert ár kerül felhasználásra.\n")
+                self._safe_log("⚠️ Ár lekérés nem sikerült, fallback az entry/peak alapján.\n")
 
-            # --- összes pozíció zárása (long + short) ---
+            # Mindkét oldal zárása egységesen
             for side in ("buy", "sell"):
-                lst = getattr(self, "_sim_pos_long", []) if side == "buy" else getattr(self, "_sim_pos_short", [])
+                # lokális lista snapshot (nyitott SIM pozik)
+                lst = self._sim_pos_long if side == "buy" else self._sim_pos_short
                 i = 0
                 while i < len(lst):
                     pos = lst[i]
-                    px = float(last_px if last_px is not None else pos.get("peak", pos.get("entry", 0.0)))
+                    # ár fallback: last_px -> peak -> entry
+                    px = float(
+                        last_px
+                        if last_px is not None and last_px > 0
+                        else pos.get("peak", pos.get("entry", 0.0))
+                    )
                     close_side = "sell" if side == "buy" else "buy"
-
                     self._safe_log(f"🔻 Pozíció zárása ({close_side.upper()}) @ {px:.6f} | dry={dry}\n")
 
                     if dry:
-                        # --- SIMULÁLT zárás ---
-                        entry = float(pos['entry'])
-                        sz = float(pos['size'])
-                        pnl = (px - entry) * sz * (1 if side == 'buy' else -1)
-
-                        with self._mb_lock:
-                            self._sim_pnl_usdt += pnl
-                            self._pool_balance_quote += pnl
-                            self._pool_used_quote = max(0.0, self._pool_used_quote - float(pos.get('commit_usdt', 0.0)))
-
+                        # SIM: központi záró helperrel (history/pool/fee konzisztensek)
+                        _close_sim_by_index(side, i, px)
+                        continue  # lista rövidült
+                    else:
+                        # LIVE: KIZÁRÓLAG a központi _live_close_pos → siker esetén tükrözés SIM-ben
+                        ok = False
                         try:
-                            import time as _t
-                            self._sim_history.append({
-                                "partial": False,
-                                "symbol": sym,
-                                "side": side,
-                                "entry": float(entry),
-                                "exit": float(px),
-                                "size_closed": float(sz),
-                                "pnl": float(pnl),
-                                "ts": _t.time()
-                            })
-                        except Exception:
-                            pass
+                            with getattr(self, "_ex_lock", threading.RLock()):
+                                ok = self._live_close_pos(side, pos, px, symbol=sym, mode=mode, lev=lev)
+                        except Exception as e:
+                            self._safe_log(f"❌ LIVE zárási hiba (stop): {e}\n")
+                            ok = False
 
-                        self._safe_log(
-                            f"🔚 SIM CLOSE {side.upper()} | entry={entry:.6f} → exit={px:.6f} | "
-                            f"sz={sz:.6f} | PnL={pnl:+.2f} USDT | Total={self._sim_pnl_usdt:+.2f}\n"
-                        )
-                        del lst[i]
-                        continue
-
-                    # --- ÉLES ZÁRÁS (LIVE) ---
-                    try:
-                        import json
-
-                        # lépésközök lekérése
-                        try:
-                            lot_step, price_step, min_base, min_funds, quote_step = self._mb_get_market_steps(sym)
-                        except Exception:
-                            lot_step, price_step, min_base, min_funds, quote_step = (0.0001, 0.01, 0.0, 0.0, 0.01)
-
-                        # elérhető egyenlegek (isolated vagy cross)
-                        base_avail = 0.0
-                        quote_avail = 0.0
-                        try:
-                            if mode == "isolated":
-                                acc = self.exchange.fetch_isolated_accounts() or {}
-                                data = acc.get("data", acc) or {}
-                                assets = data.get("assets") or []
-                                row = next((a for a in assets if (a.get("symbol") or "").upper()==sym.upper()), None)
-                                if row:
-                                    b = (row.get("baseAsset") or {})
-                                    q = (row.get("quoteAsset") or {})
-                                    base_avail  = float(b.get("available", b.get("availableBalance", b.get("free", 0))) or 0.0)
-                                    quote_avail = float(q.get("available", q.get("availableBalance", q.get("free", 0))) or 0.0)
-                            else:
-                                acc = self.exchange.fetch_cross_accounts() or {}
-                                data = acc.get("data", acc) or {}
-                                accounts = data.get("accounts", []) or data.get("accountList", []) or []
-                                base_ccy = sym.split("-")[0].upper()
-                                quote_ccy = sym.split("-")[1].upper()
-                                rb = next((x for x in accounts if (x.get("currency") or x.get("currencyName","")).upper()==base_ccy), None)
-                                rq = next((x for x in accounts if (x.get("currency") or x.get("currencyName","")).upper()==quote_ccy), None)
-                                if rb:
-                                    base_avail = float(rb.get("available", rb.get("availableBalance", rb.get("free", 0))) or 0.0)
-                                if rq:
-                                    quote_avail = float(rq.get("available", rq.get("availableBalance", rq.get("free", 0))) or 0.0)
-                        except Exception:
-                            pass
-
-                        raw_pos_size = float(pos.get("size", 0.0))
-                        exit_px = float(px or 0.0)
-
-                        # --- küldendő mezők összeállítása oldal szerint ---
-                        send_size_base: float | None = None
-                        send_funds_quote: float | None = None
-
-                        if close_side == "sell":
-                            # long zárás: BASE-t adunk el → size kell; ne lépjük túl az elérhető BASE-t
-                            cap = base_avail if base_avail > 0 else raw_pos_size
-                            sz = min(raw_pos_size, cap)
-                            # lot_step-re padlózás (Decimal-al, float hibák nélkül)
-                            sz = self._mb_floor_to_step_dec(float(sz), float(lot_step or 0.0))
-                            # minimum ellenőrzés
-                            if sz <= 0 or (min_base and float(sz) < float(min_base)):
-                                self._safe_log(f"ℹ️ Záró méret a minimum alatt (size={sz:.6f}, minBase={float(min_base) if min_base else 0:g}) – kihagyva.\n")
-                                i += 1
-                                continue
-                            send_size_base = float(sz)
+                        if ok:
+                            # csak sikeres LIVE zárás után tükörzárunk a SIM-ben
+                            _close_sim_by_index(side, i, px)
+                            continue  # lista rövidült, i nem növekszik
                         else:
-                            # short zárás: BASE-t veszünk vissza → funds (QUOTE) kell
-                            if exit_px <= 0:
-                                self._safe_log("⚠️ Ismeretlen ár BUY záráshoz – kihagyva.\n")
-                                i += 1
-                                continue
-                            # maximálisan vehető BASE a rendelkezésre álló QUOTE-ból
-                            buyable_base = (quote_avail / exit_px) if quote_avail > 0 else raw_pos_size
-                            sz = min(raw_pos_size, buyable_base)
-                            # lot_step-re padlózás
-                            sz = self._mb_floor_to_step_dec(float(sz), float(lot_step or 0.0))
-                            if sz <= 0 or (min_base and float(sz) < float(min_base)):
-                                self._safe_log(f"ℹ️ Záró méret a minimum alatt (size={sz:.6f}, minBase={float(min_base) if min_base else 0:g}) – kihagyva.\n")
-                                i += 1
-                                continue
-                            # funds = sz * ár, lefelé kerekítve quote_step-re; ne lépjük túl a quote_avail-t
-                            funds = float(sz) * float(exit_px)
-                            funds = self._mb_floor_to_step_dec(float(funds), float(quote_step or 0.0))
-                            if quote_avail > 0:
-                                funds = min(float(funds), float(quote_avail))
-                            if funds <= 0 or (min_funds and float(funds) < float(min_funds)):
-                                self._safe_log(f"ℹ️ Záró funds a minimum alatt (funds={funds:.6f}, minFunds={float(min_funds) if min_funds else 0:g}) – kihagyva.\n")
-                                i += 1
-                                continue
-                            send_funds_quote = float(funds)
-
-                        payload = {
-                            "mode": mode, "symbol": sym, "side": close_side,
-                            "size_base": (send_size_base if send_size_base is not None else None),
-                            "funds_quote": (send_funds_quote if send_funds_quote is not None else None),
-                            "leverage": lev, "auto_borrow": False, "auto_repay": True
-                        }
-
-                        try:
-                            self._safe_log(f"🐞 SEND CLOSE: {json.dumps(payload, ensure_ascii=False)}\n")
-                        except Exception:
-                            self._safe_log(f"🐞 SEND CLOSE: {repr(payload)}\n")
-
-                        resp = self.exchange.place_margin_market_order(
-                            mode, sym, close_side,
-                            size_base=send_size_base if send_size_base is not None else None,
-                            funds_quote=send_funds_quote if send_funds_quote is not None else None,
-                            leverage=lev,
-                            auto_borrow=False,
-                            auto_repay=True
-                        )
-
-                        try:
-                            self._safe_log(
-                                "🐞 RECV CLOSE: " +
-                                (json.dumps(resp, ensure_ascii=False) if isinstance(resp, dict) else repr(resp)) + "\n"
-                            )
-                        except Exception:
-                            self._safe_log(f"🐞 RECV CLOSE: {repr(resp)}\n")
-
-                        # válasz vizsgálata
-                        code = None
-                        data = None
-                        if isinstance(resp, dict):
-                            code = resp.get("code")
-                            data = resp.get("data") or {}
-                        elif hasattr(resp, "code"):
-                            code = getattr(resp, "code", None)
-                            data = getattr(resp, "data", None)
-
-                        oid = cid = None
-                        if isinstance(data, dict):
-                            oid = data.get("orderId") or data.get("id") or data.get("orderid")
-                            cid = data.get("clientOid") or data.get("clientOrderId")
-
-                        if str(code) != "200000" or (not oid and not cid):
-                            self._safe_log(
-                                f"❌ LIVE zárás elutasítva (code={code}) – nincs orderId/clientOid. Teljes resp: {repr(resp)}\n"
-                            )
+                            self._safe_log("❗ LIVE zárás sikertelen – a pozíció nyitva marad.\n")
                             i += 1
                             continue
 
-                        order_key = oid or cid
-                        self._safe_log(f"✅ LIVE CLOSE {close_side.upper()} elküldve – orderId={order_key}\n")
-
-                        try:
-                            open_oid = str(pos.get('oid')) if pos.get('oid') else None
-                            if open_oid:
-                                self._mb_hist_update_exit(open_oid, px)
-                        except Exception:
-                            pass
-
-                        # === Fee + nettó PnL ===
-                        entry = float(pos.get('entry', 0.0))
-
-                        # ténylegesen küldött mennyiség (size vagy funds/ár)
-                        try:
-                            if payload.get("size_base") is not None:
-                                sent_sz = float(payload["size_base"])
-                            elif payload.get("funds_quote") is not None:
-                                sent_sz = float(payload["funds_quote"]) / max(px, 1e-12)
-                            else:
-                                sent_sz = float(pos.get('size', 0.0))
-                        except Exception:
-                            sent_sz = float(pos.get('size', 0.0))
-
-                        gross = (px - entry) * sent_sz * (1 if side == 'buy' else -1)
-
-                        # tényleges close fee lekérése (ha sikerül)
-                        try:
-                            if oid:
-                                fee_close_act = self._mb_try_fetch_close_fee(str(oid))
-                                if fee_close_act and fee_close_act > 0:
-                                    pos['fee_close_actual'] = float(fee_close_act)
-                        except Exception:
-                            pass
-
-                        fee_rate = self._mb_get_taker_fee()
-                        f_open, f_close, f_total = self._mb_sum_fee_actual_or_est(pos, px, fee_rate)
-                        pnl = gross - f_total
-
-                        self._safe_log(
-                            f"🔚 LIVE MIRROR {side.upper()} | entry={entry:.6f} → exit={px:.6f} | "
-                            f"sz={sent_sz:.6f} | GROSS={gross:+.4f} | fee_tot={f_total:.4f} | "
-                            f"PNL={pnl:+.4f} USDT\n"
-                        )
-
-                        with self._mb_lock:
-                            self._sim_pnl_usdt += pnl
-                            self._pool_balance_quote += pnl
-                            # felszabadítjuk a commit + open fee reservet
-                            self._pool_used_quote = max(
-                                0.0,
-                                self._pool_used_quote - (float(pos.get('commit_usdt',0.0)) + float(pos.get('fee_reserved',0.0)))
-                            )
-
-                        # History fee total (open+close) frissítése a fee oszlopban
-                        try:
-                            open_oid = str(pos.get('oid')) if pos.get('oid') else None
-                            if open_oid:
-                                self._mb_hist_update_exit(open_oid, px, fee_total=f_total)
-                        except Exception:
-                            pass
-
-                        del lst[i]
-                        continue
-
-                    except Exception as e:
-                        self._safe_log(f"❌ LIVE zárási hiba: {e}\n")
-                        i += 1
-                        continue
-
-                    i += 1  # ha nem töröltünk
-
-            # összegzés
+            # összegzés (egyszer)
             try:
                 self._mb_do_summary_once("mb_stop")
             except Exception as e:
@@ -3221,7 +3013,7 @@ class CryptoBotApp:
         except Exception as e:
             self._safe_log(f"❌ Stop során hiba: {e}\n")
 
-        # szál lecsatlakoztatás
+        # szál lecsatlakoztatás (ha még él)
         try:
             if hasattr(self, "_mb_thread") and self._mb_thread.is_alive():
                 self._mb_thread.join(timeout=1.0)
