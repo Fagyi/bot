@@ -2843,51 +2843,64 @@ class CryptoBotApp:
         self.mb_stop_btn  = ttk.Button(btns, text="Stop bot",  command=self.mb_stop, state=tk.DISABLED); self.mb_stop_btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
         r += 1
 
-        # ===== jobb oszlop: (felső) LIVE Trade History + (alsó) Bot napló =====
+        # ===== jobb oszlop: felül fülek (History / Bot napló), alul mini-diagram =====
         right = ttk.Frame(root)
         right.grid(row=0, column=1, sticky="nsew", padx=(6,10), pady=10)
         right.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(0, weight=1)   # history
-        right.grid_rowconfigure(1, weight=1)   # log
+        right.grid_rowconfigure(0, weight=3)   # notebook (history+log)
+        right.grid_rowconfigure(1, weight=2)   # chart
 
-        # --- LIVE Trade History ---
-        hist_box = ttk.Labelframe(right, text="Trade History (LIVE)", padding=6)
-        hist_box.grid(row=0, column=0, sticky="nsew", padx=0, pady=(0,6))
-        hist_box.grid_columnconfigure(0, weight=1)
-        hist_box.grid_rowconfigure(0, weight=1)
+        # --- Fülrendszer: History + Bot napló ---
+        right_nb = ttk.Notebook(right)
+        right_nb.grid(row=0, column=0, sticky="nsew")
 
-        cols = ("timestamp","side","entry","exit","size","lev","fee", "pnl", "orderId")
-        self._mb_hist_tv = ttk.Treeview(hist_box, columns=cols, show="headings", height=8)
+        # 1) Trade History (LIVE) fül
+        tab_hist = ttk.Frame(right_nb)
+        right_nb.add(tab_hist, text="Trade History (LIVE)")
+        tab_hist.grid_columnconfigure(0, weight=1)
+        tab_hist.grid_rowconfigure(0, weight=1)
+
+        cols = ("timestamp","side","entry","exit","size","lev","fee","pnl","orderId")
+        self._mb_hist_tv = ttk.Treeview(tab_hist, columns=cols, show="headings", height=10)
         for c, w, text in (
             ("timestamp", 160, "Időbélyeg"),
-            ("side", 70, "Irány"),
-            ("entry", 110, "Belépő ár"),
-            ("exit", 110, "Kilépő ár"),
-            ("size", 110, "Méret"),
-            ("lev", 90, "Tőkeáttét"),
-            ("fee", 90, "Díj"),
-            ("pnl", 90, "PNL"),
-            ("orderId", 180, "Order ID")
+            ("side",       70,  "Irány"),
+            ("entry",      110, "Belépő ár"),
+            ("exit",       110, "Kilépő ár"),
+            ("size",       110, "Méret"),
+            ("lev",         90, "Tőkeáttét"),
+            ("fee",         90, "Díj"),
+            ("pnl",         90, "PNL"),
+            ("orderId",    180, "Order ID"),
         ):
             self._mb_hist_tv.heading(c, text=text)
             self._mb_hist_tv.column(c, width=w, anchor="center")
-        self._mb_hist_col_index = {name: i for i, name in enumerate(cols)}
         self._mb_hist_tv.column("orderId", width=180, anchor="center", stretch=True)
-        vsb = ttk.Scrollbar(hist_box, orient="vertical", command=self._mb_hist_tv.yview)
+        vsb = ttk.Scrollbar(tab_hist, orient="vertical", command=self._mb_hist_tv.yview)
         self._mb_hist_tv.configure(yscrollcommand=vsb.set)
         self._mb_hist_tv.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
 
-        # --- Bot napló (SIM + általános log) ---
-        log_box = ttk.Labelframe(right, text="Bot napló", padding=8)
-        log_box.grid(row=1, column=0, sticky="nsew", padx=0, pady=(6,0))
-        log_box.grid_columnconfigure(0, weight=1)
-        log_box.grid_rowconfigure(0, weight=1)
-        self.mb_log = scrolledtext.ScrolledText(log_box, wrap=tk.WORD, height=12)
-        self.mb_log.grid(row=0, column=0, sticky="nsew")
-
         # History segéd-struktúrák
         self._mb_hist_rows_by_oid = {}
+
+        # 2) Bot napló fül
+        tab_log = ttk.Frame(right_nb)
+        right_nb.add(tab_log, text="Bot napló")
+        tab_log.grid_columnconfigure(0, weight=1)
+        tab_log.grid_rowconfigure(0, weight=1)
+        self.mb_log = scrolledtext.ScrolledText(tab_log, wrap=tk.WORD)
+        self.mb_log.grid(row=0, column=0, sticky="nsew")
+
+        # --- Mini-diagram az aktuális párról (Dashboardhoz hasonló) ---
+        ch_box = ttk.Labelframe(right, text="Diagram (aktuális pár)", padding=6)
+        ch_box.grid(row=1, column=0, sticky="nsew", pady=(6,0))
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        self.mb_fig = Figure(figsize=(6,2.4), dpi=100)
+        self.mb_ax  = self.mb_fig.add_subplot(111)
+        self.mb_canvas = FigureCanvasTkAgg(self.mb_fig, master=ch_box)
+        self.mb_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
         # --- Margin Bot belső flag-ek / állapotok ---
         self._mb_running = False
@@ -2916,8 +2929,54 @@ class CryptoBotApp:
         # a history táblázat létrehozása UTÁN:
         self._mb_hist_start_pnl_loop()
 
+        # első rajz
+        self._mb_draw_chart()
+
+        # ha TF vagy pár változik, frissítsünk
+        try:
+            self.mb_tf.bind("<<ComboboxSelected>>", lambda _e: self._mb_draw_chart())
+            self.mt_symbol.bind("<<ComboboxSelected>>", lambda _e: self._mb_draw_chart())
+        except Exception:
+            pass
+
         if not hasattr(self, "_mb_stopping"): 
             self._mb_stopping = False
+
+    def _mb_draw_chart(self, lookback: int = 150):
+        """Minidiagram a Margin Bot fülön: Close + opcionálisan két EMA a formból."""
+        try:
+            symbol = normalize_symbol(self.mt_symbol.get())
+            tf     = self.mb_tf.get()
+            fa     = int(self.mb_ma_fast.get())
+            slw    = int(self.mb_ma_slow.get())
+
+            ohlcv = self.exchange.fetch_ohlcv(symbol, tf, limit=max(lookback, slw+5))  # type: ignore[union-attr]
+            if not ohlcv:
+                return
+            import pandas as pd, matplotlib.dates as mdates
+            df = pd.DataFrame(ohlcv, columns=["ts","o","h","l","c","v"])
+            df["dt"] = pd.to_datetime(df["ts"], unit="ms")
+
+            # EMA-k
+            close = df["c"].astype(float)
+            ema_f = close.ewm(span=fa, adjust=False).mean()
+            ema_s = close.ewm(span=slw, adjust=False).mean()
+
+            # rajz
+            self.mb_ax.clear()
+            self.mb_ax.plot(df["dt"], close, label="Close")
+            self.mb_ax.plot(df["dt"], ema_f, label=f"EMA({fa})")
+            self.mb_ax.plot(df["dt"], ema_s, label=f"EMA({slw})")
+            self.mb_ax.legend(loc="lower left")
+            self.mb_ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+            self.mb_ax.set_title(symbol + " • " + tf)
+            self.mb_ax.grid(True, alpha=0.25)
+            self.mb_fig.tight_layout()
+            self.mb_canvas.draw_idle()
+        except Exception as e:
+            # csendes – ne dobáljon fel ablakot
+            try: self._safe_log(f"Chart hiba: {e}\n")
+            except Exception: pass
 
     # --- Safe helpers: NaN/0 guard minden osztáshoz ---
     def _is_pos_num(self, x) -> bool:
