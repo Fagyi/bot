@@ -1425,52 +1425,53 @@ class CryptoBotApp:
         return "\n".join(lines)
 
     def _fill_isolated_table(self, rows: list[dict]):
-        for iid in self.tbl_iso.get_children():
-            self.tbl_iso.delete(iid)
+        tv = self.tbl_iso
+        for iid in tv.get_children():
+            tv.delete(iid)
+        tv.configure(displaycolumns=tv["columns"])  # biztosítsd a gyors render utat
+        inserts = []
         for r in rows:
-            self.tbl_iso.insert("", tk.END, values=(
-                r["symbol"], r["side"], f"{r['closable']:,.6f}",
-                r["base"], r["quote"], r["risk"]
-            ))
+            inserts.append(("", tk.END, None, (r["symbol"], r["side"], f"{r['closable']:,.6f}", r["base"], r["quote"], r["risk"])))
+        for parent, index, iid, values in inserts:
+            tv.insert(parent, index, iid=iid, values=values)
 
     # ---- price loop ----
     def _mt_start_price_loop(self):
         if self._mt_price_job:
             self.root.after_cancel(self._mt_price_job)
 
+        self._mt_price_inflight = False  # egyszerre csak egy kérés fusson
+
         def _tick():
             try:
-                # Csak akkor frissítünk, ha a "Margin Trade" fül aktív
+                # csak aktív fülön frissítünk
                 if self.nb.tab(self.nb.select(), "text") != "Margin Trade":
-                    pass
-                else:
-                    sym = normalize_symbol(self.mt_symbol.get())
+                    return
+                if self._mt_price_inflight:
+                    return
+                self._mt_price_inflight = True
+
+                sym = normalize_symbol(self.mt_symbol.get())
+
+                def fetch():
                     px = 0.0
+                    if self.exchange:
+                        px = float(self.exchange.fetch_last_price(sym))  # SDK/REST saját fallbackkel
+                    return px
 
-                    # 1) SDK/bulk próbálkozás
-                    try:
-                        if self.exchange:
-                            px = float(self.exchange.fetch_last_price(sym))  # type: ignore[union-attr]
-                    except Exception:
-                        px = 0.0
-
-                    # 2) Ha nincs ár, azonnali REST fallback ugyanebben a ciklusban
-                    if px <= 0 and self.exchange:
-                        try:
-                            px2 = float(self.exchange.fetch_last_price(sym))  # fetch_last_price már REST fallbackel is
-                            if px2 > 0:
-                                px = px2
-                        except Exception:
-                            pass
-
-                    # UI frissítés + becslés
+                def apply(px):
+                    self._mt_price_inflight = False
                     self.mt_price_lbl.config(text=f"Ár: {px:.6f}" if px > 0 else "Ár: –")
                     self._mt_update_estimate(px)
 
-            finally:
-                self._mt_price_job = self.root.after(2000, _tick)
+                def fail(_e):
+                    self._mt_price_inflight = False
 
-        self._mt_price_job = self.root.after(50, _tick)
+                self._bg(fetch, apply, fail)
+            finally:
+                self._mt_price_job = self.root.after(1000, _tick)  # kicsit sűrűbb, de nem akaszt
+
+        self._mt_price_job = self.root.after(100, _tick)
 
     def _mt_update_estimate(self, last_price: float):
         sym = normalize_symbol(self.mt_symbol.get())
@@ -2942,6 +2943,17 @@ class CryptoBotApp:
         if not hasattr(self, "_mb_stopping"): 
             self._mb_stopping = False
 
+    def _bg(self, fn, ok, err=None):
+        import threading
+        def run():
+            try:
+                res = fn()
+                self.root.after(0, lambda: ok(res))
+            except Exception as e:
+                if err:
+                    self.root.after(0, lambda e=e: err(e))
+        threading.Thread(target=run, daemon=True).start()
+
     def _mb_draw_chart(self, lookback: int = 150):
         """Minidiagram a Margin Bot fülön: Close + opcionálisan két EMA a formból."""
         try:
@@ -3089,38 +3101,41 @@ class CryptoBotApp:
             pass
 
     def _mb_hist_start_pnl_loop(self):
-        """Egyszer indítandó ciklus, ami 5 mp-enként frissíti az OPEN ügyletek becsült PnL-jét."""
         if getattr(self, "_mb_hist_pnl_job", None):
-            return  # már fut
+            return
+        self._mb_hist_pnl_inflight = False
         self._mb_hist_pnl_tick()
 
     def _mb_hist_pnl_tick(self):
         try:
-            # szükséges oszlop indexek
-            col = getattr(self, "_mb_hist_col_index", {})
-            ENTRY_IDX = col.get("entry", 2); EXIT_IDX = col.get("exit", 3)
-            SIZE_IDX  = col.get("size", 4);  SIDE_IDX = col.get("side", 1)
-            FEE_IDX   = col.get("fee", 6);   PNL_IDX  = col.get("pnl", 7)
+            if self._mb_hist_pnl_inflight:
+                return
+            self._mb_hist_pnl_inflight = True
 
-            # aktuális rt ár a jelenlegi szimbólumhoz
             try:
                 symbol = normalize_symbol(self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)))
             except Exception:
                 symbol = None
 
-            rt = None
-            if symbol:
-                try:
-                    rt = float(self.exchange.fetch_last_price(symbol))
-                except Exception:
-                    rt = None
+            def fetch_rt():
+                if not symbol:
+                    return None
+                return float(self.exchange.fetch_last_price(symbol))
 
-            if rt and rt > 0:
-                # végigmegyünk azokon a sorokon, ahol Exit üres → OPEN státusz
+            def apply(rt):
+                self._mb_hist_pnl_inflight = False
+                if not rt or rt <= 0:
+                    return
+
+                col = getattr(self, "_mb_hist_col_index", {})
+                ENTRY_IDX = col.get("entry", 2); EXIT_IDX = col.get("exit", 3)
+                SIZE_IDX  = col.get("size", 4);  SIDE_IDX = col.get("side", 1)
+                FEE_IDX   = col.get("fee", 6);   PNL_IDX  = col.get("pnl", 7)
+
                 for iid in self._mb_hist_tv.get_children(""):
                     vals = list(self._mb_hist_tv.item(iid, "values"))
                     try:
-                        if vals[EXIT_IDX]:  # már zárt
+                        if vals[EXIT_IDX]:
                             continue
                         entry = float(vals[ENTRY_IDX] or "0")
                         size  = float(vals[SIZE_IDX]  or "0")
@@ -3129,20 +3144,17 @@ class CryptoBotApp:
                         fee_est = float(fee_s) if fee_s not in ("", None) else 0.0
 
                         gross = (rt - entry) * size * (1 if side == "BUY" else -1)
-                        pnl_est = gross - fee_est
-                        vals[PNL_IDX] = f"{pnl_est:.6f}"
-
+                        vals[PNL_IDX] = f"{(gross - fee_est):.6f}"
                         self._mb_hist_tv.item(iid, values=tuple(vals))
                     except Exception:
                         continue
-        except Exception:
-            pass
+
+            def fail(_e):
+                self._mb_hist_pnl_inflight = False
+
+            self._bg(fetch_rt, apply, fail)
         finally:
-            # 5 mp múlva újra
-            try:
-                self._mb_hist_pnl_job = self.root.after(5000, self._mb_hist_pnl_tick)
-            except Exception:
-                pass
+            self._mb_hist_pnl_job = self.root.after(5000, self._mb_hist_pnl_tick)
 
     # === ORDER SANITIZER: lot_step/price_step/minBase/minFunds + padlózás ===
     def _mb_sanitize_order(
