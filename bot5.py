@@ -1839,29 +1839,172 @@ class CryptoBotApp:
         if self.public_mode.get():
             messagebox.showwarning("Privát mód szükséges", "Kapcsold ki a publikus módot és állítsd be az API kulcsokat.")
             return
+
+        # --- UI: gombok tiltása, kurzor ---
         self.btn_spot_buy.config(state=tk.DISABLED)
         self.btn_spot_sell.config(state=tk.DISABLED)
         self.root.config(cursor="watch")
 
-        def worker():
+        # --- PARAMÉTEREK KIOLVASÁSA A FŐ SZÁLON ---
+        try:
+            symbol = normalize_symbol(self.trade_symbol.get())
+            size_str  = (self.trade_size.get()  or "").strip()
+            funds_str = (self.trade_funds.get() or "").strip()
+        except Exception as e:
+            self.log(f"⚠ Paraméter hiba: {e}")
+            return
+
+        # üres → None
+        size_str  = size_str  if size_str  else None
+        funds_str = funds_str if funds_str else None
+
+        import threading
+        def worker(p_symbol: str, p_side: str, p_size: str | None, p_funds: str | None):
             try:
-                symbol = normalize_symbol(self.trade_symbol.get())
-                size = self.trade_size.get().strip() or None
-                funds = self.trade_funds.get().strip() or None
-                if not (size or funds):
-                    raise ValueError("Adj meg Size (BASE) vagy Funds (QUOTE) értéket.")
-                resp = self.exchange.place_market_order(symbol, side, size_base=size, funds_quote=funds)  # type: ignore[arg-type]
-                oid = getattr(resp, 'orderId', None) or getattr(resp, 'data', {}).get('orderId') or resp
-                self.root.after(0, lambda oid=oid, s=side: [self.log(f"✅ Spot market {s.upper()} elküldve – orderId={oid}"),
-                                                            messagebox.showinfo("Order", f"Sikeres {s} order. ID: {oid}")])
+                import math
+                send_size: str | None  = None  # BASE
+                send_funds: str | None = None  # QUOTE
+
+                # --- Alapelv SPOT-on:
+                # BUY: funds az elsődleges; ha csak size van → átszámít funds-ra (last price alapján)
+                # SELL: size az elsődleges; ha csak funds van → átszámít size-ra (last price alapján)
+
+                # 1) Élő ár és (opcionális) sanitize előkészítés _ex_lock alatt
+                last_px = None
+                lot_step = price_step = min_base = min_funds = quote_step = None
+                try:
+                    with getattr(self, "_ex_lock", threading.RLock()):
+                        # élő ár
+                        try:
+                            last_px = float(self.exchange.fetch_last_price(p_symbol))
+                            if not last_px or math.isnan(last_px) or last_px <= 0:
+                                last_px = None
+                        except Exception:
+                            last_px = None
+                        # lépésközök (ha van szanitered és használni akarod)
+                        try:
+                            lot_step, price_step, min_base, min_funds, quote_step = self._mb_get_market_steps(p_symbol)  # type: ignore[attr-defined]
+                        except Exception:
+                            lot_step = price_step = min_base = min_funds = quote_step = None
+                except Exception:
+                    pass
+
+                # 2) Side-aware paraméter választás
+                #    - ha mindkettő meg van adva, a side szerinti preferált mezőt választjuk, a másikat ignoráljuk és logoljuk
+                if p_side.lower() == "buy":
+                    if p_funds:
+                        send_funds = p_funds
+                        if p_size:
+                            self.log("ℹ BUY: funds megadva, a size-t figyelmen kívül hagyom (SPOT).")
+                    elif p_size:
+                        # csak size → funds konverzió (ha van ár)
+                        if last_px and last_px > 0:
+                            try:
+                                est_f = float(p_size) * float(last_px)
+                                send_funds = f"{est_f:.12g}"
+                            except Exception:
+                                raise ValueError("BUY: Nem sikerült a size→funds konverzió.")
+                        else:
+                            # ha nincs ár, küldhetünk size-ot is KuCoin felé, de BUY SPOT-on általában funds az elvárt
+                            send_size = p_size
+                    else:
+                        raise ValueError("Adj meg legalább Funds (QUOTE) értéket BUY-hoz, vagy Size-et konverzióval.")
+
+                else:  # SELL
+                    if p_size:
+                        send_size = p_size
+                        if p_funds:
+                            self.log("ℹ SELL: size megadva, a funds-t figyelmen kívül hagyom (SPOT).")
+                    elif p_funds:
+                        # csak funds → size konverzió (ha van ár)
+                        if last_px and last_px > 0:
+                            try:
+                                est_sz = float(p_funds) / float(last_px)
+                                send_size = f"{est_sz:.12g}"
+                            except Exception:
+                                raise ValueError("SELL: Nem sikerült a funds→size konverzió.")
+                        else:
+                            # fallback: küldjük funds-ként (KuCoin SPOT BUY-nál standard, SELL-nél size szokott lenni)
+                            send_funds = p_funds
+                    else:
+                        raise ValueError("Adj meg legalább Size (BASE) értéket SELL-hez, vagy Funds-ot konverzióval.")
+
+                # 3) (Opcionális) SZANITER – ha már van kész és szeretnéd SPOT-nál is használni
+                #    BUY-nál: price kell a funds→méret ellenőrzéshez; SELL-nél: size padlózás/guard
+                try:
+                    if hasattr(self, "_mb_sanitize_order"):
+                        if p_side.lower() == "buy":
+                            _sb, _fq = self._mb_sanitize_order(  # type: ignore[attr-defined]
+                                symbol=p_symbol, side="buy",
+                                price=(last_px or 0.0) if last_px else None,
+                                size_base=None if send_size is None else float(send_size),
+                                funds_quote=None if send_funds is None else float(send_funds),
+                            )
+                            # BUY: a végeredmény funds legyen (a szaniter size→funds-t is tud)
+                            if _fq is None and _sb is None:
+                                raise ValueError("Sanitizer eldobta a BUY megbízást (min/step).")
+                            if _fq is not None:
+                                send_size, send_funds = None, f"{_fq:.12g}"
+                            elif _sb is not None:
+                                send_size, send_funds = f"{_sb:.12g}", None
+                        else:
+                            _sb, _fq = self._mb_sanitize_order(  # type: ignore[attr-defined]
+                                symbol=p_symbol, side="sell",
+                                price=(last_px or 0.0) if last_px else None,
+                                size_base=None if send_size is None else float(send_size),
+                                funds_quote=None if send_funds is None else float(send_funds),
+                            )
+                            # SELL: a végeredmény size legyen
+                            if _sb is None and _fq is None:
+                                raise ValueError("Sanitizer eldobta a SELL megbízást (min/step).")
+                            if _sb is not None:
+                                send_size, send_funds = f"{_sb:.12g}", None
+                            elif _fq is not None:
+                                send_size, send_funds = None, f"{_fq:.12g}"
+                except Exception as se:
+                    # ha a szaniterrel gond van, ne dőljön össze a GUI – mehet a nyers érték
+                    self.log(f"⚠ Sanitizer hiba (SPOT): {se}. Nyers paraméterekkel küldöm.")
+
+                # Végső guard: legalább az egyik legyen nem-None
+                if not (send_size or send_funds):
+                    raise ValueError("Nincs küldhető mennyiség (size/funds).")
+
+                # 4) ORDER KÜLDÉS – _ex_lock alatt
+                with getattr(self, "_ex_lock", threading.RLock()):
+                    resp = self.exchange.place_market_order(
+                        p_symbol, p_side, size_base=send_size, funds_quote=send_funds  # type: ignore[arg-type]
+                    )
+
+                # 5) Válasz feldolgozás
+                try:
+                    oid = None
+                    if isinstance(resp, dict):
+                        # KuCoin: {"code":"200000","data":{"orderId":"..."}}
+                        data = resp.get("data") or {}
+                        oid = data.get("orderId") or data.get("id") or data.get("orderid")
+                    if not oid:
+                        oid = getattr(resp, "orderId", None) or getattr(resp, "id", None) or str(resp)
+                except Exception:
+                    oid = str(resp)
+
+                self.root.after(0, lambda oid=oid, s=p_side: [
+                    self.log(f"✅ Spot market {s.upper()} elküldve – orderId={oid}"),
+                    messagebox.showinfo("Order", f"Sikeres {s} order.\nID: {oid}")
+                ])
+
             except Exception as e:
-                self.root.after(0, lambda e=e: [self.log(f"❌ Spot order hiba: {e}"),
-                                                messagebox.showerror("Order hiba", str(e))])
+                self.root.after(0, lambda e=e: [
+                    self.log(f"❌ Spot order hiba: {e}"),
+                    messagebox.showerror("Order hiba", str(e))
+                ])
             finally:
-                self.root.after(0, lambda: [self.btn_spot_buy.config(state=tk.NORMAL),
-                                             self.btn_spot_sell.config(state=tk.NORMAL),
-                                             self.root.config(cursor="")])
-        threading.Thread(target=worker, daemon=True).start()
+                self.root.after(0, lambda: [
+                    self.btn_spot_buy.config(state=tk.NORMAL),
+                    self.btn_spot_sell.config(state=tk.NORMAL),
+                    self.root.config(cursor="")
+                ])
+
+        threading.Thread(target=worker, args=(symbol, side, size_str, funds_str), daemon=True).start()
 
     # ---- SPOT egyenleg (thread) ----
     def refresh_balances(self):
