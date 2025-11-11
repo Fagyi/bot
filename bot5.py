@@ -841,10 +841,18 @@ class CryptoBotApp:
         ttk.Separator(ticket).grid(row=8, column=0, columnspan=4, sticky="we", pady=8)
 
         # akció gombok – nagy, színezett
-        ttk.Button(ticket, text="BUY (margin)",  style="Buy.TButton",
-                   command=lambda: self._mt_place('buy')).grid(row=9, column=0, columnspan=2, sticky="we", padx=(0,6))
-        ttk.Button(ticket, text="SELL (margin)", style="Sell.TButton",
-                   command=lambda: self._mt_place('sell')).grid(row=9, column=2, columnspan=2, sticky="we", padx=(6,0))
+        btn_frame = ttk.Frame(ticket)
+        btn_frame.grid(row=9, column=0, columnspan=4, sticky="we", pady=(4,0))
+        btn_frame.grid_columnconfigure(0, weight=1)
+        btn_frame.grid_columnconfigure(1, weight=1)
+        # BUY / SELL gombok
+        self.btn_mt_buy = ttk.Button(btn_frame, text="BUY (margin)", style="Buy.TButton",
+                                     command=lambda: self._mt_place('buy'))
+        self.btn_mt_buy.grid(row=0, column=0, sticky="we", padx=(0,3))
+
+        self.btn_mt_sell = ttk.Button(btn_frame, text="SELL (margin)", style="Sell.TButton",
+                                      command=lambda: self._mt_place('sell'))
+        self.btn_mt_sell.grid(row=0, column=1, sticky="we", padx=(3,0))
 
         # jobb: INFO / LOG
         info = ttk.Labelframe(wrap, text="Margin részletek", style="Card.TLabelframe")
@@ -1658,33 +1666,182 @@ class CryptoBotApp:
         return ab, aq
 
     def _mt_place(self, side: str):
+        """Margin/spot gyors rendelés a manuális panelről – thread-safe, sanitizer-rel."""
         if self.public_mode.get():
             messagebox.showwarning("Privát mód szükséges", "Kapcsold ki a publikus módot és állítsd be az API kulcsokat.")
             return
-        sym = normalize_symbol(self.mt_symbol.get())
-        typ = self.mt_type.get()
-        price = self.mt_price.get().strip()
-        size = self.mt_size.get().strip() or None
-        funds = self.mt_funds.get().strip() or None
-        lev = int(self.mt_lev.get()) if self.mt_lev.get() else None
-        # korlát: cross 5x, isolated 10x
-        lev = min(lev or 1, 5 if self.mt_mode.get()=='cross' else 10)
-        auto = bool(self.mt_autobr.get())
+
+        # UI lock
+        self.root.config(cursor="watch")
         try:
-            if typ == 'limit' and not price:
-                raise ValueError("Limit megbízáshoz ár szükséges.")
-            resp = self.exchange.place_margin_market_order(  # type: ignore[union-attr]
-                self.mt_mode.get(), sym, side,
-                size_base=size, funds_quote=funds,
-                leverage=lev, auto_borrow=auto, auto_repay=True
-            )
-            oid = getattr(resp, 'orderId', None) or getattr(resp, 'data', {}).get('orderId') or None
-            self.margin_log.insert(tk.END, f"✅ {self.mt_mode.get()} {typ} {side} – {sym} | size={size} funds={funds} lev={lev} auto={auto} | orderId={oid}\n")
-            self.margin_log.see(tk.END)
-            messagebox.showinfo("Margin order", f"Sikeres {side.upper()} ({self.mt_mode.get()})\nPár: {sym}\nOrderId: {oid}")
+            btn_buy  = getattr(self, "btn_mt_buy",  None)
+            btn_sell = getattr(self, "btn_mt_sell", None)
+            if btn_buy:  btn_buy.config(state=tk.DISABLED)
+            if btn_sell: btn_sell.config(state=tk.DISABLED)
+        except Exception:
+            pass
+
+        # Paraméterek kiolvasása itt (főszálon), majd átadás a workernek
+        try:
+            sym   = normalize_symbol(self.mt_symbol.get())
+            typ   = (self.mt_type.get() or "market").strip().lower()   # 'market' / 'limit'
+            price_s = (self.mt_price.get() or "").strip()
+            size_s  = (self.mt_size.get()  or "").strip()
+            funds_s = (self.mt_funds.get() or "").strip()
+
+            size  = float(size_s)  if size_s  else None
+            funds = float(funds_s) if funds_s else None
+            px_ui = float(price_s) if price_s else None
+
+            lev = int(self.mt_lev.get()) if self.mt_lev.get() else 1
+            lev = min(max(1, lev), 5 if self.mt_mode.get() == 'cross' else 10)
+            auto = bool(self.mt_autobr.get())
+            mode = self.mt_mode.get()
         except Exception as e:
-            self.margin_log.insert(tk.END, f"❌ Margin order hiba: {e}\n"); self.margin_log.see(tk.END)
-            messagebox.showerror("Margin order hiba", str(e))
+            self.margin_log.insert(tk.END, f"⚠ Paraméter hiba: {e}\n"); self.margin_log.see(tk.END)
+            self.root.config(cursor="")
+            try:
+                if btn_buy:  btn_buy.config(state=tk.NORMAL)
+                if btn_sell: btn_sell.config(state=tk.NORMAL)
+            except Exception:
+                pass
+            return
+
+        import threading
+        def worker(p_sym, p_side, p_typ, p_px_ui, p_size, p_funds, p_lev, p_auto, p_mode):
+            try:
+                import math
+                # Ha market BUY-hoz csak size van → kell egy ár a sanitizer konverzióhoz
+                px = p_px_ui
+                if p_typ == "market" and p_side == "buy" and px is None:
+                    try:
+                        with getattr(self, "_ex_lock", threading.RLock()):
+                            last = float(self.exchange.fetch_last_price(p_sym))
+                        if last > 0:
+                            px = last
+                    except Exception:
+                        px = None
+
+                # Alap validáció
+                if p_typ == "limit" and (px is None or px <= 0):
+                    raise ValueError("Limit megbízáshoz érvényes ár szükséges.")
+                if not (p_size or p_funds):
+                    raise ValueError("Adj meg Size (BASE) vagy Funds (QUOTE) értéket.")
+
+                size_to_send = None
+                funds_to_send = None
+
+                if p_typ == "market":
+                    if p_side == "buy":
+                        # BUY market: funds az elsődleges; ha csak size van, a sanitizer konvertál funds-ra (ár kell hozzá)
+                        sb, fq = self._mb_sanitize_order(
+                            symbol=p_sym, side="buy", price=px,
+                            size_base=p_size, funds_quote=p_funds
+                        )
+                        # Market BUY-nál a küldendő érték: funds
+                        if fq is None:
+                            raise ValueError("A megbízás a minimum/step feltételek miatt nem küldhető (BUY/funds).")
+                        funds_to_send = fq
+                    else:
+                        # SELL market: size az elsődleges
+                        sb, fq = self._mb_sanitize_order(
+                            symbol=p_sym, side="sell", price=px,
+                            size_base=p_size, funds_quote=p_funds
+                        )
+                        if sb is None:
+                            raise ValueError("A megbízás a minimum/step feltételek miatt nem küldhető (SELL/size).")
+                        size_to_send = sb
+
+                    # Küldés – thread-safe
+                    with getattr(self, "_ex_lock", threading.RLock()):
+                        resp = self.exchange.place_margin_market_order(  # type: ignore[union-attr]
+                            p_mode, p_sym, p_side,
+                            size_base=size_to_send,
+                            funds_quote=funds_to_send,
+                            leverage=p_lev,
+                            auto_borrow=p_auto,
+                            auto_repay=True
+                        )
+
+                else:
+                    # LIMIT rendelés – ha van külön limit hívásod, itt használd:
+                    #   resp = self.exchange.place_margin_limit_order(...)
+                    # Ha nincs, továbbra is marketet használsz? (nem ideális)
+                    # Itt konzisztensen előkészítjük a méretet:
+                    if p_side == "buy":
+                        # ha funds jön, számoljunk belőle size-t (lépésközre padlózva), majd szaniter
+                        if p_size is None and (p_funds and p_funds > 0) and (px and px > 0):
+                            lot_step, _ps, _mb, _mf, _qs = self._mb_get_market_steps(p_sym)
+                            est_size = float(p_funds) / float(px)
+                            p_size = self._mb_floor_to_step_dec(est_size, float(lot_step or 0.0))
+                        sb, _ = self._mb_sanitize_order(
+                            symbol=p_sym, side="sell",  # size padlózáshoz a SELL ág size_guardja praktikus
+                            price=px, size_base=p_size, funds_quote=None
+                        )
+                        if sb is None or sb <= 0:
+                            raise ValueError("Limit BUY: a számolt/kért méret a minimum alatt van.")
+                        # Küldd el a saját limit API-don (ha van). Itt demo: market helyett NEM ideális fallback.
+                        with getattr(self, "_ex_lock", threading.RLock()):
+                            resp = self.exchange.place_margin_limit_order(  # type: ignore[attr-defined]
+                                p_mode, p_sym, p_side, price=str(px),
+                                size_base=str(sb), leverage=p_lev,
+                                auto_borrow=p_auto, auto_repay=True
+                            )
+                    else:
+                        # Limit SELL – méretet szanitereljük
+                        sb, _ = self._mb_sanitize_order(
+                            symbol=p_sym, side="sell",
+                            price=px, size_base=p_size, funds_quote=None
+                        )
+                        if sb is None or sb <= 0:
+                            raise ValueError("Limit SELL: a kért méret a minimum alatt van.")
+                        with getattr(self, "_ex_lock", threading.RLock()):
+                            resp = self.exchange.place_margin_limit_order(  # type: ignore[attr-defined]
+                                p_mode, p_sym, p_side, price=str(px),
+                                size_base=str(sb), leverage=p_lev,
+                                auto_borrow=p_auto, auto_repay=True
+                            )
+
+                # UI visszajelzés
+                def ok_ui():
+                    oid = None
+                    try:
+                        oid = (getattr(resp, 'orderId', None)
+                               or (resp.get('data') or {}).get('orderId')
+                               or (resp.get('orderId') if isinstance(resp, dict) else None))
+                    except Exception:
+                        pass
+                    self.margin_log.insert(
+                        tk.END,
+                        f"✅ {p_mode} {p_typ} {p_side} – {p_sym} | size={size_to_send} funds={funds_to_send} lev={p_lev} auto={p_auto} | orderId={oid}\n"
+                    )
+                    self.margin_log.see(tk.END)
+                    messagebox.showinfo("Margin order",
+                                        f"Sikeres {p_side.upper()} ({p_mode}/{p_typ})\nPár: {p_sym}\nOrderId: {oid}")
+                self.root.after(0, ok_ui)
+
+            except Exception as e:
+                self.root.after(0, lambda: [
+                    self.margin_log.insert(tk.END, f"❌ Margin order hiba: {e}\n"),
+                    self.margin_log.see(tk.END),
+                    messagebox.showerror("Margin order hiba", str(e))
+                ])
+            finally:
+                # UI unlock
+                def unlock():
+                    try:
+                        if btn_buy:  btn_buy.config(state=tk.NORMAL)
+                        if btn_sell: btn_sell.config(state=tk.NORMAL)
+                    except Exception:
+                        pass
+                    self.root.config(cursor="")
+                self.root.after(0, unlock)
+
+        threading.Thread(
+            target=worker,
+            args=(sym, side, typ, px_ui, size, funds, lev, auto, mode),
+            daemon=True
+        ).start()
 
     # ---- Lifecycle ----
     def start_bot(self):
