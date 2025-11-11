@@ -2008,20 +2008,72 @@ class CryptoBotApp:
 
     # ---- SPOT egyenleg (thread) ----
     def refresh_balances(self):
+        """SPOT egyenlegek frissítése háttérszálban, üres devizák elrejtésével."""
         if self.public_mode.get():
             messagebox.showwarning("Privát mód szükséges", "Kapcsold ki a publikus módot és add meg az API kulcsokat.")
             return
+
+        # (opcionális) UI lock
+        btn = getattr(self, "btn_refresh_bal", None)
+        if btn:
+            btn.config(state=tk.DISABLED)
+        self.root.config(cursor="watch")
+
+        import threading
         def worker():
             try:
-                balances = self.exchange.fetch_spot_balances()  # type: ignore[union-attr]
+                # --- EXCHANGE HÍVÁS THREAD-SAFE ---
+                with getattr(self, "_ex_lock", threading.RLock()):
+                    balances = self.exchange.fetch_spot_balances()  # type: ignore[union-attr]
+
+                # --- UI FRISSÍTÉS A FŐ SZÁLON ---
                 def fill():
-                    for row in self.tbl_bal.get_children():
-                        self.tbl_bal.delete(row)
-                    for cur, vals in sorted(balances.items()):
-                        self.tbl_bal.insert("", tk.END, values=(cur, f"{vals['available']:.8f}", f"{vals['holds']:.8f}"))
+                    try:
+                        # először ürítjük a táblát
+                        for row in self.tbl_bal.get_children():
+                            self.tbl_bal.delete(row)
+
+                        # feltöltés (ABC sorrendben, csak nem 0 egyenlegek)
+                        for cur, vals in sorted((balances or {}).items()):
+                            if not isinstance(vals, dict):
+                                continue
+
+                            av = vals.get("available", 0)
+                            hd = vals.get("holds", 0)
+                            try:
+                                av = float(av)
+                            except Exception:
+                                av = 0.0
+                            try:
+                                hd = float(hd)
+                            except Exception:
+                                hd = 0.0
+
+                            # Üres deviza (0.0 / 0.0) → kihagyjuk
+                            if av == 0.0 and hd == 0.0:
+                                continue
+
+                            self.tbl_bal.insert(
+                                "",
+                                tk.END,
+                                values=(cur, f"{av:.8f}", f"{hd:.8f}")
+                            )
+                    finally:
+                        # UI visszaállítás
+                        if btn:
+                            btn.config(state=tk.NORMAL)
+                        self.root.config(cursor="")
+
                 self.root.after(0, fill)
+
             except Exception as e:
-                self.root.after(0, lambda e=e: messagebox.showerror("Egyenleg hiba", str(e)))
+                def on_err():
+                    if btn:
+                        btn.config(state=tk.NORMAL)
+                    self.root.config(cursor="")
+                    messagebox.showerror("Egyenleg hiba", str(e))
+                self.root.after(0, on_err)
+
         threading.Thread(target=worker, daemon=True).start()
 
     # ---- Isolated accounts (thread) ----
