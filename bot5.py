@@ -995,206 +995,190 @@ class CryptoBotApp:
         self.funds_log.see(tk.END)
 
     def refresh_all_funds_balances(self):
-        """Lekérdezi, frissíti az összes számlatípus egyenlegét és kiszámolja a Bevételt/PNL-t egy külön szálon."""
+        """Összes egyenleg frissítése + USD értékek számítása. Eredményt cache-eljük is."""
         if self.public_mode.get():
-            messagebox.showwarning("Privát mód szükséges", "Kapcsold ki a publikus módot és állítsd be az API kulcsokat.")
+            messagebox.showwarning("Privát mód szükséges",
+                                   "Kapcsold ki a publikus módot és állítsd be az API kulcsokat.")
             return
 
         def worker():
-            # opcionális cache/összegző
+            # cache vödör
+            self._balance_cache = {"spot": {}, "cross": {}, "isolated": {}}
             self.usdt_avail = 0.0
 
             try:
-                exchange = self.exchange
-                all_balances: list[dict] = []
-                unique_currencies: set[str] = set()  # árfolyamokhoz
+                ex = self.exchange
+                all_rows = []
+                unique_ccy: set[str] = set()
 
-                # --- 1) Összes egyenleg lekérése ---
-
-                # 1.1 SPOT (Main / Trade / Futures)
-                r = exchange._rest_get("/api/v1/accounts", {})  # type: ignore[union-attr]
+                # ---------- 1) SPOT ----------
+                r = ex._rest_get("/api/v1/accounts", {})  # type: ignore[union-attr]
                 spot_accounts = r.get("data", []) if isinstance(r, dict) else []
+
+                # cache: spot[CCY] = {"main": {...}, "trade": {...}, "futures": {...}}
+                spot_cache: dict[str, dict] = {}
+
                 for acc in spot_accounts:
-                    acc_type = (acc.get("type") or "main").lower()
-                    if acc_type in ("main", "trade", "futures"):
-                        ccy = (acc.get("currency") or acc.get("currencyName") or "").strip().upper()
-                        # KuCoin itt jellemzően 'available' + 'holds' kulcsokat ad
-                        current_avail = float(acc.get("available") or 0)
-                        current_holds = float(acc.get("holds") or 0)
-                        if ccy and (current_avail > 0 or current_holds > 0):
-                            all_balances.append({
-                                "ccy": ccy,
-                                "acc_type": acc_type.capitalize(),
-                                "avail": current_avail,
-                                "holds": current_holds,
-                                "liability": 0.0,
-                                "symbol": ""
-                            })
-                            unique_currencies.add(ccy)
-
-                # 1.2 CROSS margin — NORMALIZÁLT olvasás
-                cross_resp = exchange.fetch_cross_accounts()  # type: ignore[union-attr]
-                cross_data = cross_resp.get("data", {}) if isinstance(cross_resp, dict) else {}
-                cross_accounts = (
-                    cross_data.get("accounts", [])
-                    or cross_data.get("accountList", [])
-                    or cross_data.get("debtList", [])
-                )
-
-                for acc in cross_accounts:
-                    ccy = (acc.get("currency") or acc.get("currencyName") or "").strip().upper()
+                    acc_type = (acc.get("type") or "main").lower()  # main/trade/futures
+                    if acc_type not in ("main", "trade", "futures"):
+                        continue
+                    ccy = (acc.get("currency") or acc.get("currencyName") or "").upper()
+                    avail = float(acc.get("available") or 0.0)
+                    holds = float(acc.get("holds") or 0.0)
                     if not ccy:
                         continue
 
-                    # ==== NORMALIZÁLÁS ====
-                    # preferált kulcsok: available / availableBalance / free
-                    avail = float(
-                        acc.get("available",
-                        acc.get("availableBalance",
-                        acc.get("free", 0))) or 0.0
-                    )
-                    # hold/locked: holds / holdBalance
-                    holds = float(
-                        acc.get("holds",
-                        acc.get("holdBalance", 0)) or 0.0
-                    )
-                    # liability/debt
-                    liability = float(
-                        acc.get("liability",
-                        acc.get("debt", 0)) or 0.0
-                    )
+                    spot_cache.setdefault(ccy, {}).setdefault(acc_type, {})
+                    spot_cache[ccy][acc_type] = {"avail": avail, "holds": holds}
 
-                    # Ha csak 'balance' van (összes), osszuk szét available + holds-ra,
-                    # vagy ha holdBalance nincs, tekintsük available-nek.
-                    if avail == 0 and "balance" in acc:
-                        bal = float(acc.get("balance") or 0.0)
-                        hb  = float(acc.get("holdBalance") or 0.0)
+                    if avail > 0 or holds > 0:
+                        all_rows.append({
+                            "ccy": ccy, "acc_type": acc_type.capitalize(),
+                            "avail": avail, "holds": holds, "liability": 0.0, "symbol": ""
+                        })
+                        unique_ccy.add(ccy)
+
+                self._balance_cache["spot"] = spot_cache
+
+                # ---------- 2) CROSS ----------
+                cross_resp = ex.fetch_cross_accounts()  # type: ignore[union-attr]
+                cdata = cross_resp.get("data", {}) if isinstance(cross_resp, dict) else {}
+                accounts = cdata.get("accounts", []) or cdata.get("accountList", []) or []
+
+                # cache: cross[CCY] = {"avail":..., "holds":..., "liability":...}
+                cross_cache: dict[str, dict] = {}
+
+                for a in accounts:
+                    ccy = (a.get("currency") or a.get("currencyName") or "").upper()
+                    if not ccy:
+                        continue
+                    avail = float(a.get("available", a.get("availableBalance", a.get("free", 0))) or 0)
+                    holds = float(a.get("holds", a.get("holdBalance", 0)) or 0)
+                    liab  = float(a.get("liability", a.get("debt", 0)) or 0)
+
+                    # ha csak 'balance' volt
+                    if avail == 0 and "balance" in a:
+                        bal = float(a.get("balance") or 0.0)
+                        hb  = float(a.get("holdBalance") or 0.0)
                         if bal > 0 and bal >= hb:
                             avail = bal - hb
                             holds = hb
 
-                    if ccy and (avail > 0 or holds > 0 or liability > 0):
-                        all_balances.append({
-                            "ccy": ccy,
-                            "acc_type": "Cross",
-                            "avail": avail,
-                            "holds": holds,
-                            "liability": liability,
-                            "symbol": ""
-                        })
-                        unique_currencies.add(ccy)
+                    cross_cache[ccy] = {"avail": avail, "holds": holds, "liability": liab}
 
-                # 1.3 ISOLATED margin
-                isolated_resp = exchange.fetch_isolated_accounts()  # type: ignore[union-attr]
-                # kompatibilis kinyerés
-                _idata = isolated_resp.get("data", {}) if isinstance(isolated_resp, dict) else getattr(isolated_resp, "data", {}) or {}
-                isolated_assets = _idata.get("assets", []) or []
-                for asset in isolated_assets:
+                    if avail > 0 or holds > 0 or liab > 0:
+                        all_rows.append({
+                            "ccy": ccy, "acc_type": "Cross",
+                            "avail": avail, "holds": holds, "liability": liab, "symbol": ""
+                        })
+                        unique_ccy.add(ccy)
+
+                self._balance_cache["cross"] = cross_cache
+
+                # ---------- 3) ISOLATED ----------
+                iso_resp = ex.fetch_isolated_accounts()  # type: ignore[union-attr]
+                idata = iso_resp.get("data", {}) if isinstance(iso_resp, dict) else getattr(iso_resp, "data", {}) or {}
+                assets = idata.get("assets", []) or []
+
+                # cache: isolated[SYMBOL] = {"base":{ccy,avail,holds,liability}, "quote":{...}}
+                iso_cache: dict[str, dict] = {}
+
+                for asset in assets:
                     symbol = (asset.get("symbol") or "").upper()
                     if not symbol:
                         continue
-
                     base = asset.get("baseAsset") or {}
                     quote = asset.get("quoteAsset") or {}
 
                     base_ccy = (base.get("currency") or "").upper()
-                    base_av  = float(base.get("available") or 0)
-                    base_hd  = float(base.get("holds") or 0)
-                    base_li  = float(base.get("liability") or 0)
-
                     quote_ccy = (quote.get("currency") or "").upper()
-                    quote_av  = float(quote.get("available") or 0)
-                    quote_hd  = float(quote.get("holds") or 0)
-                    quote_li  = float(quote.get("liability") or 0)
 
-                    if base_ccy and (base_av > 0 or base_hd > 0 or base_li > 0):
-                        all_balances.append({
+                    base_pack = {
+                        "ccy": base_ccy,
+                        "avail": float(base.get("available") or 0),
+                        "holds": float(base.get("holds") or 0),
+                        "liability": float(base.get("liability") or 0),
+                    }
+                    quote_pack = {
+                        "ccy": quote_ccy,
+                        "avail": float(quote.get("available") or 0),
+                        "holds": float(quote.get("holds") or 0),
+                        "liability": float(quote.get("liability") or 0),
+                    }
+
+                    iso_cache[symbol] = {"base": base_pack, "quote": quote_pack}
+
+                    if base_pack["ccy"] and (base_pack["avail"] > 0 or base_pack["holds"] > 0 or base_pack["liability"] > 0):
+                        all_rows.append({
                             "ccy": base_ccy, "acc_type": "Isolated",
-                            "avail": base_av, "holds": base_hd,
-                            "liability": base_li, "symbol": symbol
+                            "avail": base_pack["avail"], "holds": base_pack["holds"],
+                            "liability": base_pack["liability"], "symbol": symbol
                         })
-                        unique_currencies.add(base_ccy)
+                        unique_ccy.add(base_ccy)
 
-                    if quote_ccy and (quote_av > 0 or quote_hd > 0 or quote_li > 0):
-                        all_balances.append({
+                    if quote_pack["ccy"] and (quote_pack["avail"] > 0 or quote_pack["holds"] > 0 or quote_pack["liability"] > 0):
+                        all_rows.append({
                             "ccy": quote_ccy, "acc_type": "Isolated",
-                            "avail": quote_av, "holds": quote_hd,
-                            "liability": quote_li, "symbol": symbol
+                            "avail": quote_pack["avail"], "holds": quote_pack["holds"],
+                            "liability": quote_pack["liability"], "symbol": symbol
                         })
-                        unique_currencies.add(quote_ccy)
+                        unique_ccy.add(quote_ccy)
 
-                # --- 2) Árfolyamok lekérése ---
-                prices: dict[str, float] = {}
-                for ccy in unique_currencies:
+                self._balance_cache["isolated"] = iso_cache
+
+                # ---------- 4) Árfolyamok BULK ----------
+                to_fetch = [f"{ccy}-USDT" for ccy in unique_ccy if ccy.upper() != "USDT"]
+                prices_raw = {}
+                try:
+                    prices_raw = self.exchange.fetch_last_prices_bulk(to_fetch)  # type: ignore[union-attr]
+                except Exception:
+                    prices_raw = {}
+
+                prices: dict[str, float] = {"USDT": 1.0}
+                for sym, px in (prices_raw or {}).items():
                     try:
-                        # pl. ha USDT, akkor az 1.0
-                        if ccy.upper() == "USDT":
-                            prices[ccy] = 1.0
-                        else:
-                            # USD-ben kifejezve ár
-                            sym = f"{ccy}-USDT"
-                            prices[ccy] = float(self.exchange.fetch_last_price(sym))
+                        ccy = sym.split("-")[0].upper()
+                        prices[ccy] = float(px or 0.0)
                     except Exception:
-                        prices[ccy] = 0.0
+                        continue
 
-                # --- 3. Bevétel és PNL számítás, előbb rekordok (dict), utána rendezés és tuple-képzés ---
-                records = []  # ide gyűjtjük dict formában, hogy legyen min rendezni
+                # ---------- 5) USD értékek ----------
+                def _pair_key(rec):
+                    sym = rec.get("symbol") or ""
+                    return sym if sym else f"{rec.get('ccy','')}-USDT"
 
-                for bal in all_balances:
-                    ccy = bal['ccy']
-                    px  = float(prices.get(ccy, 0.0))
-                    avail_amount = float(bal['avail'] or 0.0)
-                    holds_amount = float(bal['holds'] or 0.0)
+                ACCOUNT_SORT_PRIORITY = {"Main": 0, "Trade": 1, "Cross": 2, "Isolated": 3}
 
-                    # Bevétel (USD) = ELÉRHETŐ × ár
-                    value_usd = avail_amount * (px if px > 0 else 0.0)
-                    liability_usd = float(bal['liability'] or 0.0) * (px if px > 0 else 0.0)
-                    pnl_usd = value_usd - liability_usd
+                records = []
+                for row in all_rows:
+                    ccy = row["ccy"]
+                    px = float(prices.get(ccy, 0.0))
+                    value_usd = float(row["avail"]) * (px if px > 0 else 0.0)
+                    liab_usd  = float(row["liability"]) * (px if px > 0 else 0.0)
+                    pnl_usd   = value_usd - liab_usd
+                    nrow = dict(row)
+                    nrow.update({"value": value_usd, "pnl": pnl_usd})
+                    records.append(nrow)
 
-                    records.append({
-                        "ccy": ccy,
-                        "acc_type": bal["acc_type"],
-                        "avail": avail_amount,
-                        "holds": holds_amount,
-                        "liability": float(bal["liability"] or 0.0),
-                        "value": value_usd,
-                        "pnl": pnl_usd,
-                        "symbol": bal["symbol"],
-                    })
+                records.sort(key=lambda r: (
+                    ACCOUNT_SORT_PRIORITY.get(r.get("acc_type"), 99),
+                    _pair_key(r),
+                    (r.get("ccy") or "")
+                ))
 
-                # --- RENDEZÉS ---
-                # 1) deviza (ccy)
-                # 2) számlatípus prioritás (Main -> Trade -> Cross -> Isolated)
-                # 3) pár-csoport (valódi symbol, különben szintetikus CCY-USDT) – csak finom rendezéshez
-                records.sort(
-                    key=lambda r: (
-                        ACCOUNT_SORT_PRIORITY.get(r.get("acc_type"), 99),  # 1) számlatípus
-                        _pair_group_key(r),                                 # 2) pár-csoport
-                        (r.get("ccy") or "").upper()                        # 3) deviza
-                    )
-                )
-
-                # --- Tuple-okká alakítás a táblához ---
                 final_rows = [
                     self._get_balance_row(
-                        ccy=rec["ccy"],
-                        acc_type=rec["acc_type"],
-                        avail=rec["avail"],
-                        holds=rec["holds"],
-                        liability=rec["liability"],
-                        value=rec["value"],
-                        pnl=rec["pnl"],
-                        symbol=rec["symbol"]
+                        ccy=r["ccy"], acc_type=r["acc_type"], avail=r["avail"],
+                        holds=r["holds"], liability=r["liability"], value=r["value"],
+                        pnl=r["pnl"], symbol=r["symbol"]
                     )
-                    for rec in records
+                    for r in records
                 ]
 
                 self.root.after(0, lambda: (
                     self._update_funds_balance_table(final_rows),
-                    # Margin Bot „Elérhető” felirat újratöltése ugyanazzal a logikával
-                    self._mb_refresh_available() if hasattr(self, "_mb_refresh_available") else None
+                    self._mb_refresh_available()
                 ))
-
 
             except RuntimeError as e:
                 self.root.after(0, lambda: messagebox.showwarning("Privát hívás hiba", str(e)))
@@ -1202,7 +1186,7 @@ class CryptoBotApp:
                 self.root.after(0, lambda: messagebox.showerror("Hiba", f"Hiba az egyenlegek frissítésekor: {e}"))
 
         threading.Thread(target=worker, daemon=True).start()
-        
+
     # ---- DASHBOARD LOG ----
     def log(self, msg: str):
         def _append(area, text):
@@ -1238,13 +1222,19 @@ class CryptoBotApp:
             self.log(f"Symbols betöltési hiba: {e}")
 
     def _apply_symbols_to_widgets(self):
-        for cb in (self.e_symbol, self.trade_symbol, self.cross_symbol, self.mt_symbol, self.f_iso_sym):
+        """
+        Alkalmazza a self.symbols listát az összes Comboboxra, ami a __init__-ben jött létre.
+        """
+        # Hozzáadtuk az mb_symbol-t (Margin Bot)
+        for cb in (self.e_symbol, self.trade_symbol, self.cross_symbol, self.mt_symbol, self.mb_symbol, self.f_iso_sym):
             try:
                 cb.configure(values=self.symbols)
                 # ha a jelenlegi érték nem normalizált, próbáljuk megmenteni
                 cur = normalize_symbol(cb.get() or "")
+                # ha a jelenlegi érték nem szerepel az új listában, beállítjuk az alapértelmezettre
                 cb.set(cur if cur in self.symbols else DEFAULT_SYMBOL)
             except Exception:
+                # Csendes hiba, ha a combobox még nem létezik (pl. tesztelés alatt)
                 pass
 
     # ---- pretty isolated view ----
@@ -1636,32 +1626,47 @@ class CryptoBotApp:
             pass # Csendes hiba, ha valamiért nem sikerül (pl. widget nem létezik)
 
     def _mt_available(self, base_ccy: str, quote_ccy: str) -> tuple[float, float]:
-        ab, aq = 0.0, 0.0
+        """
+        Elérhető BASE/QUOTE a kiválasztott margin mód szerint.
+        Cache-first; NEM esik vissza SPOT-ra.
+        """
+        ab = aq = 0.0
         if not self.exchange or self.public_mode.get():
             return ab, aq
+
+        mode = (self.mt_mode.get() or "isolated").lower()
         try:
-            if self.mt_mode.get() == 'isolated':
-                sym = f"{base_ccy}-{quote_ccy}"
-                resp = self.exchange.fetch_isolated_accounts()  # type: ignore[union-attr]
-                payload = resp if isinstance(resp, dict) else getattr(resp, '__dict__', {}) or {'data': getattr(resp, 'data', {})}
-                assets = (payload.get('data', payload) or {}).get('assets', []) or []
-                for a in assets:
-                    if a.get('symbol','').upper() == sym:
-                        b = a.get('baseAsset', {}) or {}
-                        q = a.get('quoteAsset', {}) or {}
-                        ab = float(b.get('available', 0) or 0)
-                        aq = float(q.get('available', 0) or 0)
-                        break
-            else:
-                resp = self.exchange.fetch_cross_accounts()  # type: ignore[union-attr]
-                data = resp.get('data', resp) if isinstance(resp, dict) else getattr(resp, 'data', {})
-                accounts = (data or {}).get('accounts', []) or data.get('accountList', []) or []
-                for it in accounts:
-                    cur = (it.get('currency') or it.get('currencyName') or '').upper()
-                    if cur == base_ccy.upper():
-                        ab = float(it.get('available', it.get('availableBalance', 0)) or 0)
-                    if cur == quote_ccy.upper():
-                        aq = float(it.get('available', it.get('availableBalance', 0)) or 0)
+            bc = getattr(self, "_balance_cache", {}) or {}
+
+            if mode == "isolated":
+                sym = normalize_symbol(f"{base_ccy}-{quote_ccy}")
+                iso = (bc.get("isolated") or {})
+                pack = iso.get(sym)
+                if pack:
+                    if (pack.get("base") or {}).get("ccy") == base_ccy.upper():
+                        ab = float((pack["base"].get("avail") or 0.0))
+                    if (pack.get("quote") or {}).get("ccy") == quote_ccy.upper():
+                        aq = float((pack["quote"].get("avail") or 0.0))
+                else:
+                    # nincs cache – ne használj spotot; opcionális lassú fallback:
+                    try:
+                        resp = self.exchange.fetch_isolated_accounts()  # type: ignore[union-attr]
+                        data = resp.get("data", {}) if isinstance(resp, dict) else getattr(resp, "data", {}) or {}
+                        for a in data.get("assets", []) or []:
+                            if (a.get("symbol") or "").upper() == sym:
+                                b = a.get("baseAsset", {}) or {}
+                                q = a.get("quoteAsset", {}) or {}
+                                ab = float(b.get("available") or 0.0)
+                                aq = float(q.get("available") or 0.0)
+                                break
+                    except Exception:
+                        pass
+
+            else:  # cross
+                cross = (bc.get("cross") or {})
+                ab = float((cross.get(base_ccy.upper(), {}) or {}).get("avail", 0.0))
+                aq = float((cross.get(quote_ccy.upper(), {}) or {}).get("avail", 0.0))
+
         except Exception:
             pass
         return ab, aq
@@ -1897,6 +1902,15 @@ class CryptoBotApp:
 
         self.is_running = True
         self.set_status("Fut")
+        try:
+            # 1. Egyenleg frissítése (ez magában elindítja a háttérszálat)
+            self._mb_refresh_available()
+            
+            # 2. Chart frissítése (piaci adat lekérdezése)
+            self._mb_draw_chart()
+        except Exception as e:
+            # Csak logoljuk, ha valamiért itt elhasal, de ne akadályozza a bot indulását
+            self.log(f"❌ Automatikus Margin Bot frissítési hiba a start után: {e}")
         threading.Thread(target=self.loop, daemon=True).start()
     
     def stop_bot(self):
@@ -2601,9 +2615,9 @@ class CryptoBotApp:
         row_pair = ttk.Frame(form)
         row_pair.grid(row=r, column=1, pady=(4,0), sticky="w")
         # Pár combó
-        self.mt_symbol = ttk.Combobox(row_pair, values=self.symbols, width=12, state='readonly')
-        self.mt_symbol.set(DEFAULT_SYMBOL)
-        self.mt_symbol.pack(side="left")
+        self.mb_symbol = ttk.Combobox(row_pair, values=self.symbols, width=12, state='readonly')
+        self.mb_symbol.set(DEFAULT_SYMBOL)
+        self.mb_symbol.pack(side="left")
         # Max pozíció (0 = korlátlan) – KÖZVETLENÜL a Pár mellett
         ttk.Label(row_pair, text="  Max pozíció:").pack(side="left")
         self.mb_max_open = ttk.Spinbox(row_pair, from_=0, to=999, width=6)
@@ -2611,7 +2625,7 @@ class CryptoBotApp:
         # alapértelmezett érték
         self.mb_max_open.delete(0, "end"); self.mb_max_open.insert(0, "0")
         # párváltáskor frissítsük az elérhető egyenleget
-        self.mt_symbol.bind("<<ComboboxSelected>>", lambda _e: self._mb_refresh_available())
+        self.mb_symbol.bind("<<ComboboxSelected>>", self._mb_refresh_available)
         r += 1
 
         # Idősík
@@ -2933,9 +2947,14 @@ class CryptoBotApp:
         # első rajz
         self._mb_draw_chart()
 
+        # Margin és spot egyenleg cache. Ezt tölti fel a funds fül, de előre inicializálni kell.
+        self._balance_cache: Dict[str, Any] = {}
+        self._ex_lock = threading.Lock()
+
         # ha TF vagy pár változik, frissítsünk
         try:
             self.mb_tf.bind("<<ComboboxSelected>>", lambda _e: self._mb_draw_chart())
+            self.mb_symbol.bind("<<ComboboxSelected>>", lambda _e: self._mb_draw_chart())
             self.mt_symbol.bind("<<ComboboxSelected>>", lambda _e: self._mb_draw_chart())
         except Exception:
             pass
@@ -2955,40 +2974,56 @@ class CryptoBotApp:
         threading.Thread(target=run, daemon=True).start()
 
     def _mb_draw_chart(self, lookback: int = 150):
-        """Minidiagram a Margin Bot fülön: Close + opcionálisan két EMA a formból."""
-        try:
-            symbol = normalize_symbol(self.mt_symbol.get())
-            tf     = self.mb_tf.get()
-            fa     = int(self.mb_ma_fast.get())
-            slw    = int(self.mb_ma_slow.get())
+            """Minidiagram a Margin Bot fülön: Close + opcionálisan két EMA a formból."""
+            try:
+                # Paraméterek kiolvasása
+                symbol = normalize_symbol(self.mb_symbol.get())
+                tf     = self.mb_tf.get()
+                fa     = int(self.mb_ma_fast.get())
+                slw    = int(self.mb_ma_slow.get())
 
-            ohlcv = self.exchange.fetch_ohlcv(symbol, tf, limit=max(lookback, slw+5))  # type: ignore[union-attr]
-            if not ohlcv:
-                return
-            import pandas as pd, matplotlib.dates as mdates
-            df = pd.DataFrame(ohlcv, columns=["ts","o","h","l","c","v"])
-            df["dt"] = pd.to_datetime(df["ts"], unit="ms")
+                # ----------------------------------------------------
+                # ÚJ ELLENŐRZÉS: Exchange objektum inicializálva van-e
+                # ----------------------------------------------------
+                ex = getattr(self, "exchange", None)
+                if ex is None:
+                    # Csendes hibajelzés, ha a bot nincs indítva.
+                    # Ezzel megelőzzük a 'NoneType' object has no attribute 'fetch_ohlcv' hibát.
+                    try: self._safe_log("❌ Chart hiba: Az Exchange objektum nincs inicializálva (nincs futás).\n")
+                    except Exception: pass
+                    return
+                # ----------------------------------------------------
 
-            # EMA-k
-            close = df["c"].astype(float)
-            ema_f = close.ewm(span=fa, adjust=False).mean()
-            ema_s = close.ewm(span=slw, adjust=False).mean()
+                # Lekérés (most már a biztonságos 'ex' változót használjuk)
+                ohlcv = ex.fetch_ohlcv(symbol, tf, limit=max(lookback, slw+5)) # type: ignore
+                if not ohlcv:
+                    return
+                
+                import pandas as pd, matplotlib.dates as mdates
+                
+                df = pd.DataFrame(ohlcv, columns=["ts","o","h","l","c","v"])
+                df["dt"] = pd.to_datetime(df["ts"], unit="ms")
 
-            # rajz
-            self.mb_ax.clear()
-            self.mb_ax.plot(df["dt"], close, label="Close")
-            self.mb_ax.plot(df["dt"], ema_f, label=f"EMA({fa})")
-            self.mb_ax.plot(df["dt"], ema_s, label=f"EMA({slw})")
-            self.mb_ax.legend(loc="lower left")
-            self.mb_ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
-            self.mb_ax.set_title(symbol + " • " + tf)
-            self.mb_ax.grid(True, alpha=0.25)
-            self.mb_fig.tight_layout()
-            self.mb_canvas.draw_idle()
-        except Exception as e:
-            # csendes – ne dobáljon fel ablakot
-            try: self._safe_log(f"Chart hiba: {e}\n")
-            except Exception: pass
+                # EMA-k
+                close = df["c"].astype(float)
+                ema_f = close.ewm(span=fa, adjust=False).mean()
+                ema_s = close.ewm(span=slw, adjust=False).mean()
+
+                # rajz
+                self.mb_ax.clear()
+                self.mb_ax.plot(df["dt"], close, label="Close")
+                self.mb_ax.plot(df["dt"], ema_f, label=f"EMA({fa})")
+                self.mb_ax.plot(df["dt"], ema_s, label=f"EMA({slw})")
+                self.mb_ax.legend(loc="lower left")
+                self.mb_ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+                self.mb_ax.set_title(symbol + " • " + tf)
+                self.mb_ax.grid(True, alpha=0.25)
+                self.mb_fig.tight_layout()
+                self.mb_canvas.draw_idle()
+            except Exception as e:
+                # csendes – ne dobáljon fel ablakot
+                try: self._safe_log(f"Chart hiba: {e}\n")
+                except Exception: pass
 
     # --- Safe helpers: NaN/0 guard minden osztáshoz ---
     def _is_pos_num(self, x) -> bool:
@@ -3009,21 +3044,136 @@ class CryptoBotApp:
             return float(fallback)
 
     # --- Elérhető egyenleg kijelzés frissítése (UI segédfüggvény) ---
-    def _mb_refresh_available(self):
-        """A Margin Bot „Elérhető” feliratát a Margin Trade fül egységes logikájával tölti."""
-        try:
-            # a Margin Bot fül a Margin Trade combóját (mt_symbol) használja
-            sym = normalize_symbol(self.mt_symbol.get())
-            base, quote = split_symbol(sym)
-            avail_base, avail_quote = (0.0, 0.0)
-            if hasattr(self, "_mt_available"):
-                avail_base, avail_quote = self._mt_available(base, quote)
-            self.mb_avail_var.set(f"{avail_quote:.2f} {quote}")
-        except Exception:
+    def _mb_refresh_available(self, _event=None):
+            """
+            A Margin Bot „Elérhető” címkéjének frissítése.
+            - Először a cache-ből próbál olvasni.
+            - Ha a cache üres (vagy hiányos), egy háttérszálon
+              célzottan lekéri a szükséges margin (isolated/cross) adatot.
+            - Nem hívja meg a teljes, lassú `refresh_all_funds_balances`-t.
+            """
             try:
-                self.mb_avail_var.set("–")
-            except Exception:
-                pass
+                if not getattr(self, "is_running", False):
+                    self.mb_avail_var.set("Indítsa a botot!")
+                    return
+                
+                if self.public_mode.get():
+                    self.mb_avail_var.set("N/A (public)")
+                    return
+                # 1. Azonnali UI frissítés "Töltés..."-re
+                self.mb_avail_var.set("Töltés...")
+                
+                # 2. Paraméterek kiolvasása a fő szálon
+                # JAVÍTÁS: Itt már az új 'self.mb_symbol'-t használjuk (lásd 2. pont)
+                sym = normalize_symbol(self.mb_symbol.get()) 
+                base, quote = split_symbol(sym)
+                mode = (self.mb_mode.get() or "isolated").lower()
+
+                if self.public_mode.get():
+                    self.mb_avail_var.set("N/A (public)")
+                    return
+            except Exception as e:
+                self.mb_avail_var.set("Hiba (param)")
+                self._safe_log(f"❌ _mb_refresh param hiba: {e}\n")
+                return
+
+            def worker():
+                avail_quote = None
+                try:
+                    # 3. Próba a cache-ből (gyors út)
+                    bc = getattr(self, "_balance_cache", {})
+                    iso_cache = bc.get("isolated", {})
+                    cross_cache = bc.get("cross", {})
+
+                    if mode == "isolated" and sym in iso_cache:
+                        pack = iso_cache.get(sym, {})
+                        if pack and (pack.get("quote") or {}).get("ccy") == quote.upper():
+                            avail_quote = float((pack["quote"].get("avail") or 0.0))
+                    
+                    elif mode == "cross" and quote in cross_cache:
+                        avail_quote = float((cross_cache.get(quote, {}) or {}).get("avail", 0.0))
+
+                    # 4. Ha a cache-ben volt, frissítjük a UI-t és kész
+                    if avail_quote is not None:
+                        self.root.after(0, self.mb_avail_var.set, f"{avail_quote:.2f} {quote}")
+                        return
+
+                    # 5. Cache miss: Célzott lekérés
+                    self._safe_log(f"ℹ️ MarginBot egyenleg: cache miss ({mode}/{sym}), célzott lekérés...\n")
+
+                    if mode == "isolated":
+                        with self._ex_lock:
+                            resp = self.exchange.fetch_isolated_accounts() # type: ignore[union-attr]
+                        
+                        idata = resp.get("data", {}) if isinstance(resp, dict) else getattr(resp, "data", {}) or {}
+                        assets = idata.get("assets", []) or []
+                        
+                        # Biztosítjuk, hogy a cache létezzen
+                        if "isolated" not in self._balance_cache:
+                            self._balance_cache["isolated"] = {}
+                        
+                        for asset in assets:
+                            symbol_from_asset = (asset.get("symbol") or "").upper()
+                            if not symbol_from_asset: continue
+                            
+                            base_pack = asset.get("baseAsset", {}) or {}
+                            quote_pack = asset.get("quoteAsset", {}) or {}
+                            
+                            # Cache feltöltése a talált adattal
+                            self._balance_cache["isolated"][symbol_from_asset] = {
+                                "base": {
+                                    "ccy": (base_pack.get("currency") or "").upper(),
+                                    "avail": float(base_pack.get("available") or 0),
+                                    "holds": float(base_pack.get("holds") or 0),
+                                    "liability": float(base_pack.get("liability") or 0),
+                                },
+                                "quote": {
+                                    "ccy": (quote_pack.get("currency") or "").upper(),
+                                    "avail": float(quote_pack.get("available") or 0),
+                                    "holds": float(quote_pack.get("holds") or 0),
+                                    "liability": float(quote_pack.get("liability") or 0),
+                                }
+                            }
+                            
+                            # Ha ez a keresett szimbólum, mentsük el az értéket
+                            if symbol_from_asset == sym:
+                                avail_quote = float(quote_pack.get("available") or 0.0)
+
+                    elif mode == "cross":
+                        with self._ex_lock:
+                            resp = self.exchange.fetch_cross_accounts() # type: ignore[union-attr]
+                        
+                        cdata = resp.get("data", {}) if isinstance(resp, dict) else {}
+                        accounts = cdata.get("accounts", []) or cdata.get("accountList", []) or []
+                        
+                        if "cross" not in self._balance_cache:
+                            self._balance_cache["cross"] = {}
+
+                        for a in accounts:
+                            ccy = (a.get("currency") or a.get("currencyName") or "").upper()
+                            if not ccy: continue
+                            
+                            avail = float(a.get("available", a.get("availableBalance", a.get("free", 0))) or 0)
+                            holds = float(a.get("holds", a.get("holdBalance", 0)) or 0)
+                            liab  = float(a.get("liability", a.get("debt", 0)) or 0)
+                            
+                            # Cache feltöltése
+                            self._balance_cache["cross"][ccy] = {"avail": avail, "holds": holds, "liability": liab}
+                            
+                            if ccy == quote:
+                                avail_quote = avail
+                    
+                    # 6. UI frissítés a lekért adattal
+                    if avail_quote is None: avail_quote = 0.0
+                    self.root.after(0, self.mb_avail_var.set, f"{avail_quote:.2f} {quote}")
+
+                except Exception as e:
+                    self.root.after(0, self.mb_avail_var.set, "Hiba (lekérés)")
+                    self._safe_log(f"❌ _mb_refresh_available hiba: {e}\n")
+
+            # 7. A worker indítása háttérszálon
+            import threading
+            threading.Thread(target=worker, daemon=True).start()
 
     # --- Thread-safe logoló segéd ---
     def _safe_log(self, text: str):
