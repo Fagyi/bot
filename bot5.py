@@ -4593,6 +4593,12 @@ class CryptoBotApp:
                                 self._mb_last_cross_ts = now
                                 self._mb_last_signal   = combined_sig
 
+                    # --- Diagram frissítés ---
+                    try:
+                        self.root.after(0, self._mb_draw_chart)
+                    except Exception:
+                        pass
+
                     # --- TF-hez igazított alvás ---
                     tf_sec = {
                         "1m":60, "3m":180, "5m":300, "15m":900, "30m":1800,
