@@ -3783,11 +3783,20 @@ class CryptoBotApp:
 
             # --- 6. Tényleges close fee kinyerése és PnL véglegesítése ---
             fee_close = 0.0
+
+            # 1) első próbálkozás
             try:
-                # KuCoin fill-ek → tényleges díj (USDT-ben, feeCurrency alapján)
                 fee_close = float(self._mb_try_fetch_close_fee(str(oid)) or 0.0)
             except Exception as e:
-                self._safe_log(f"⚠️ Close fee lekérdezési hiba: {e}\n")
+                self._safe_log(f"⚠️ Close fee lekérdezési hiba (1): {e}\n")
+
+            # 2) ha elsőre 0 → várunk egy kicsit, hogy a fill-ek megjelenjenek
+            if fee_close <= 0.0:
+                time.sleep(0.5)  # <<< Ezt a késleltetést szabadon állíthatod 0.3–1.0s közé
+                try:
+                    fee_close = float(self._mb_try_fetch_close_fee(str(oid)) or 0.0)
+                except Exception as e:
+                    self._safe_log(f"⚠️ Close fee lekérdezési hiba (2): {e}\n")
 
             total_fee = None
             pnl_final = None
