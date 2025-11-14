@@ -578,6 +578,33 @@ class KucoinSDKWrapper:
         if leverage is not None: body["leverage"] = leverage
         return self._rest_post("/api/v3/hf/margin/order", body)
 
+    def get_margin_fills_by_order(
+        self,
+        order_id: str,
+        symbol: Optional[str] = None,
+        trade_type: str = "MARGIN_TRADE",
+    ) -> list[dict]:
+        """
+        HF margin trade history egy adott orderId-hoz.
+        KuCoin REST: GET /api/v3/hf/margin/fills
+        """
+        if self.public_mode:
+            raise RuntimeError("Publikus módban nem elérhető a margin trade history.")
+        if not order_id:
+            return []
+
+        params: dict[str, Any] = {"orderId": order_id}
+        if symbol:
+            params["symbol"] = symbol
+        if trade_type:
+            params["tradeType"] = trade_type  # pl. MARGIN_TRADE / MARGIN_ISOLATED_TRADE
+
+        r = self._rest_get("/api/v3/hf/margin/fills", params)
+        data = r.get("data") or {}
+        items = data.get("items") or data.get("list") or []
+        # csak dict típusú elemeket engedünk tovább
+        return [it for it in items if isinstance(it, dict)]
+
     # ----- Pozíció zárás helpers -----
     def close_cross_position(self, symbol: str) -> dict:
         acc = self.fetch_cross_accounts()
@@ -3184,7 +3211,7 @@ class CryptoBotApp:
                           ts: float | None = None, pnl_est: float | None = None):
         """
         Új sor felvétele OPEN-nél.
-        - fee: nyitási becsült fee (QUOTE-ban)
+        - fee: nyitási fee (QUOTE-ban) – becsült VAGY tényleges
         - pnl_est: becsült PnL nyitás után (rt ár alapján), ha None, üresen marad
         """
         try:
@@ -3746,15 +3773,54 @@ class CryptoBotApp:
                 pass
 
             if not oid:
-                self._safe_log(f"❌ LIVE zárási hiba: Nincs 'orderId' a válaszban. Resp: {self._mb_pp(resp)}\n")
+                self._safe_log(
+                    f"❌ LIVE zárási hiba: Nincs 'orderId' a válaszban. "
+                    f"Resp: {self._mb_pp(resp)}\n"
+                )
                 return False
 
-            self._safe_log(f"✅ LIVE zárás elküldve (ID: {oid})... (A Fill monitorozás és PnL számítás a jövőbeni fejlesztés része lehet.)\n")
-            
-            # History frissítése a becsült zárási árral
+            self._safe_log(f"✅ LIVE zárás elküldve (ID: {oid})\n")
+
+            # --- 6. Tényleges close fee kinyerése és PnL véglegesítése ---
+            fee_close = 0.0
             try:
-                # Fontos: self._mb_hist_update_exit (class-level)
-                self._mb_hist_update_exit(pos_id, close_px)
+                # KuCoin fill-ek → tényleges díj (USDT-ben, feeCurrency alapján)
+                fee_close = float(self._mb_try_fetch_close_fee(str(oid)) or 0.0)
+            except Exception as e:
+                self._safe_log(f"⚠️ Close fee lekérdezési hiba: {e}\n")
+
+            total_fee = None
+            pnl_final = None
+            try:
+                if fee_close > 0.0:
+                    # eltároljuk a tényleges zárási díjat
+                    pos["fee_close_actual"] = float(fee_close)
+
+                    # open + close fee kiszámítása a meglévő helperrel
+                    fee_rate = self._mb_get_taker_fee()
+                    f_open, f_close, _ = self._mb_sum_fee_actual_or_est(
+                        pos,
+                        close_px,
+                        fee_rate
+                    )
+                    total_fee = float(f_open + f_close)
+
+                    # Bruttó PnL (entry→close, irányfüggő)
+                    sz    = float(pos.get("size", 0.0))
+                    entry = float(pos.get("entry", 0.0))
+                    gross = (close_px - entry) * sz * (1 if side == "buy" else -1)
+                    pnl_final = float(gross - total_fee)
+            except Exception as e:
+                self._safe_log(f"⚠️ Fee/PnL számítási hiba: {e}\n")
+
+            # History frissítése a záróárral + ha ismert, a végleges Fee/PnL értékkel
+            try:
+                self._mb_hist_update_exit(
+                    pos_id,
+                    close_px,
+                    fee_total=total_fee,
+                    pnl_final=pnl_final,
+                )
             except Exception as e:
                 self._safe_log(f"⚠️ Hiba a history frissítésekor: {e}\n")
 
@@ -3822,6 +3888,19 @@ class CryptoBotApp:
                       atr_pack=None, fixed_pack=None, **extra):
             fee_rate = self._mb_get_taker_fee()
             fee_open_est = self._mb_est_fee_quote(entry_px, size_base, fee_rate)
+
+            # Opcionális override-ok LIVE orderből:
+            extra = extra or {}
+            fee_open_actual = float(extra.pop("fee_open_actual_override", 0.0) or 0.0)
+            fee_reserved_override = extra.pop("fee_reserved_override", None)
+            if fee_reserved_override is None:
+                fee_reserved = fee_open_est
+            else:
+                try:
+                    fee_reserved = float(fee_reserved_override)
+                except Exception:
+                    fee_reserved = fee_open_est
+
             pos = {
                 'side': side,
                 'entry': float(entry_px),
@@ -3829,10 +3908,10 @@ class CryptoBotApp:
                 'peak': float(entry_px),
                 'pnl': 0.0,
                 'commit_usdt': float(commit_usdt),
-                'fee_open_est': float(fee_open_est),
-                'fee_open_actual': 0.0,
+                'fee_open_est': float(fee_open_est),      # becsült nyitási díj
+                'fee_open_actual': float(fee_open_actual),# ha van tényleges nyitási díj
                 'fee_close_actual': 0.0,
-                'fee_reserved': float(fee_open_est),
+                'fee_reserved': float(fee_reserved),      # a pool-ból lefoglalt díj (actual>0 ? actual : est)
                 'mgmt': 'none'
             }
             pos.update({k: v for k, v in (extra or {}).items()})
@@ -3852,11 +3931,12 @@ class CryptoBotApp:
                 pos.update({'tp_pct': tpct, 'sl_pct': spct, 'trail_pct': trpct, 'mgmt': 'fixed'})
             with self._mb_lock:
                 _pos_list(side).append(pos)
-                self._pool_used_quote += float(commit_usdt) + float(fee_open_est)
+                self._pool_used_quote += float(commit_usdt) + float(fee_reserved)
 
+            fee_log = fee_open_actual if fee_open_actual > 0 else fee_open_est
             self._safe_log(
                 f"🧪 SIM OPEN {side.upper()} @ {entry_px:.6f} | sz={size_base:.6f} | "
-                f"commit={commit_usdt:.2f} | fee≈{fee_open_est:.4f} | "
+                f"commit={commit_usdt:.2f} | fee≈{fee_log:.4f} | "
                 f"pool used={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f}\n"
             )
 
@@ -3865,18 +3945,28 @@ class CryptoBotApp:
                 return
 
             entry = float(pos['entry']); sz = float(pos['size'])
+
             try:
-                symbol_safe = normalize_symbol(self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)))
+                symbol_safe = normalize_symbol(
+                    self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL))
+                )
             except Exception:
                 symbol_safe = None
+
             try:
-                lot_step, _price_step, _min_base, _min_funds, _quote_step = self._mb_get_market_steps(symbol_safe or "BTC-USDT")
+                lot_step, _price_step, _min_base, _min_funds, _quote_step = self._mb_get_market_steps(
+                    symbol_safe or "BTC-USDT"
+                )
             except Exception:
                 lot_step = 0.0
+
             raw_half = sz * 0.5
             close_sz = self._mb_floor_to_step_dec(raw_half, float(lot_step or 0.0))
-            if close_sz <= 0: return
-            if sz <= 0: return
+            if close_sz <= 0:
+                return
+            if sz <= 0:
+                return
+
             pnl = (px - entry) * close_sz * (1 if side == 'buy' else -1)
 
             commit_before = float(pos.get('commit_usdt', 0.0))
@@ -3886,18 +3976,32 @@ class CryptoBotApp:
                 rel_ratio = 0.5
             release = commit_before * rel_ratio
 
+            fee_res_before = float(pos.get('fee_reserved', 0.0))
+            fee_release = fee_res_before * rel_ratio
+
             with self._mb_lock:
                 self._sim_pnl_usdt += pnl
                 self._pool_balance_quote += pnl
-                pos.update({'size': sz - close_sz,
-                            'commit_usdt': max(0.0, commit_before - release),
-                            'half_closed': True})
-                self._pool_used_quote = max(0.0, self._pool_used_quote - release)
+
+                pos.update({
+                    'size': sz - close_sz,
+                    'commit_usdt': max(0.0, commit_before - release),
+                    'fee_reserved': max(0.0, fee_res_before - fee_release),
+                    'half_closed': True,
+                })
+
+                # commit + fee arányos része felszabadul a poolból
+                self._pool_used_quote = max(
+                    0.0,
+                    self._pool_used_quote - (release + fee_release),
+                )
 
             try:
                 import time as _t
                 try:
-                    symbol_safe = normalize_symbol(self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)))
+                    symbol_safe = normalize_symbol(
+                        self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL))
+                    )
                 except Exception:
                     symbol_safe = "UNKNOWN"
 
@@ -3909,14 +4013,15 @@ class CryptoBotApp:
                     "exit": float(px),
                     "size_closed": float(close_sz),
                     "pnl": float(pnl),
-                    "ts": _t.time()
+                    "ts": _t.time(),
                 })
             except Exception:
                 pass
 
             self._safe_log(
                 f"🔹 PARTIAL 50% | entry={entry:.6f} → exit={px:.6f} | "
-                f"zárt={close_sz:.6f} | PnL={pnl:+.2f} | pool used={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f}\n"
+                f"zárt={close_sz:.6f} | PnL={pnl:+.2f} | "
+                f"pool used={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f}\n"
             )
 
         def _manage_atr_on_pos(pos: dict, last_px: float, atr_val: float) -> bool:
@@ -4509,28 +4614,46 @@ class CryptoBotApp:
                                             _fee_rate = self._mb_get_taker_fee()
                                             _fee_open_est = self._mb_est_fee_quote(last_px_rt, size_now, _fee_rate)
 
+                                            # --- TÉNYLEGES nyitási díj kinyerése (fills alapján) ---
+                                            _fee_open_actual = 0.0
+                                            try:
+                                                _fee_open_actual = float(
+                                                    self._mb_try_fetch_close_fee(str(order_key)) or 0.0
+                                                )
+                                            except Exception as e:
+                                                self._safe_log(f"⚠️ Nyitási fee lekérdezési hiba: {e}\n")
+
+                                            _fee_for_pnl = _fee_open_actual if _fee_open_actual > 0.0 else _fee_open_est
+
                                             pnl_est = None
                                             try:
                                                 with self._ex_lock:
                                                     rt_now = float(self.exchange.fetch_last_price(symbol))
                                                 if rt_now > 0:
                                                     gross = (rt_now - last_px_rt) * size_now * (1 if combined_sig == 'buy' else -1)
-                                                    pnl_est = gross - float(_fee_open_est)
+                                                    pnl_est = gross - float(_fee_for_pnl)
                                             except Exception:
                                                 pass
 
+                                            # History: fee = tényleges, ha elérhető, különben a becsült
                                             self._mb_hist_add_open(
                                                 order_id=str(order_key),
                                                 side=combined_sig, entry=last_px_rt,
                                                 size=size_now,
-                                                lev=lev, fee=float(_fee_open_est),
+                                                lev=lev, fee=float(_fee_for_pnl),
                                                 pnl_est=pnl_est
                                             )
+
+                                            # SIM pool/pozíció: fee_open_actual + fee_reserved override-dal
                                             _open_sim(
                                                 combined_sig, last_px_rt,
                                                 size_now, commit_real,
                                                 atr_pack=(mul_sl, mul_tp1, mul_tp2, mul_tr, atr_val) if (use_atr and atr_val is not None) else None,
                                                 fixed_pack=(tpct, spct, trpct) if use_fixed else None,
+                                                fee_open_actual_override=(
+                                                    _fee_open_actual if _fee_open_actual > 0.0 else 0.0
+                                                ),
+                                                fee_reserved_override=_fee_for_pnl,
                                                 oid=str(order_key),
                                             )
                                             opened = True
