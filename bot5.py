@@ -4623,14 +4623,26 @@ class CryptoBotApp:
                                             _fee_rate = self._mb_get_taker_fee()
                                             _fee_open_est = self._mb_est_fee_quote(last_px_rt, size_now, _fee_rate)
 
-                                            # --- TÉNYLEGES nyitási díj kinyerése (fills alapján) ---
+                                            # --- TÉNYLEGES nyitási díj kinyerése (fills alapján, 2 lépcsőben) ---
                                             _fee_open_actual = 0.0
+
+                                            # 1) első próbálkozás – azonnal a nyitás után
                                             try:
                                                 _fee_open_actual = float(
                                                     self._mb_try_fetch_close_fee(str(order_key)) or 0.0
                                                 )
                                             except Exception as e:
-                                                self._safe_log(f"⚠️ Nyitási fee lekérdezési hiba: {e}\n")
+                                                self._safe_log(f"⚠️ Nyitási fee lekérdezési hiba (1): {e}\n")
+
+                                            # 2) ha még 0, várunk kicsit, hogy a fill-ek megjelenjenek, majd újra próbáljuk
+                                            if _fee_open_actual <= 0.0:
+                                                time.sleep(0.5)  # nyugodtan állíthatod 0.3–1.0 között
+                                                try:
+                                                    _fee_open_actual = float(
+                                                        self._mb_try_fetch_close_fee(str(order_key)) or 0.0
+                                                    )
+                                                except Exception as e:
+                                                    self._safe_log(f"⚠️ Nyitási fee lekérdezési hiba (2): {e}\n")
 
                                             _fee_for_pnl = _fee_open_actual if _fee_open_actual > 0.0 else _fee_open_est
 
