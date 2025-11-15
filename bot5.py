@@ -659,6 +659,7 @@ class CryptoBotApp:
         self.symbols: list[str] = [DEFAULT_SYMBOL]
 
         self._init_styles()
+
         # Notebook
         self.nb = ttk.Notebook(root); self.nb.pack(fill=tk.BOTH, expand=True)
 
@@ -924,6 +925,9 @@ class CryptoBotApp:
 
         # Szimbólumok betöltése háttérben
         threading.Thread(target=self._load_symbols_async, daemon=True).start()
+
+        # 4) FONT GLOBÁLIS ALKALMAZÁSA
+        self._apply_global_font()
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -5441,36 +5445,53 @@ class CryptoBotApp:
         box = ttk.Labelframe(self.tab_settings, text="Megjelenés / betűk", padding=10)
         box.pack(fill="x", padx=10, pady=10)
 
+        # oszlop kicsit engedjen jobbra is
+        box.grid_columnconfigure(1, weight=1)
+
+        # --- Betűméret ---
         ttk.Label(box, text="Betűméret:").grid(row=0, column=0, sticky="w")
-        size_var = tk.IntVar(value=self.base_font.cget("size"))
-        size_spin = ttk.Spinbox(box, from_=8, to=18, width=5, textvariable=size_var)
+        self.font_size_var = tk.IntVar(value=self.base_font.cget("size"))
+        size_spin = ttk.Spinbox(
+            box,
+            from_=8,
+            to=24,
+            width=5,
+            textvariable=self.font_size_var
+        )
         size_spin.grid(row=0, column=1, sticky="w", padx=4)
 
-        ttk.Label(box, text="Betűtípus:").grid(row=1, column=0, sticky="w", pady=(8,0))
-        family_var = tk.StringVar(value=self.base_font.cget("family"))
+        # --- Betűtípus ---
+        ttk.Label(box, text="Betűtípus:").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.font_family_var = tk.StringVar(value=self.base_font.cget("family"))
         font_list = sorted(set(tkfont.families()))
-        family_cb = ttk.Combobox(box, textvariable=family_var, values=font_list,
-                                 width=20, state="readonly")
-        family_cb.grid(row=1, column=1, sticky="w", padx=4, pady=(8,0))
+        family_cb = ttk.Combobox(
+            box,
+            textvariable=self.font_family_var,
+            values=font_list,
+            width=20,
+            state="readonly"
+        )
+        family_cb.grid(row=1, column=1, sticky="w", padx=4, pady=(8, 0))
 
         def apply_font():
             # értékek beolvasása
             try:
-                new_size = int(size_var.get())
-            except ValueError:
+                new_size = int(self.font_size_var.get())
+            except (ValueError, tk.TclError):
                 new_size = self.base_font.cget("size")
 
-            new_family = family_var.get() or self.base_font.cget("family")
+            new_family = self.font_family_var.get() or self.base_font.cget("family")
 
             # alap + félkövér font frissítése
             self.base_font.configure(size=new_size, family=new_family)
             self.bold_font.configure(size=new_size, family=new_family)
 
-            # Minden ttk stílus újrafontozása
+            # Minden ttk stílus + Tk alapfont újrafontozása
             self._apply_global_font()
 
         ttk.Button(box, text="Alkalmaz", command=apply_font)\
-           .grid(row=2, column=0, columnspan=2, pady=(10,0), sticky="w")
+           .grid(row=2, column=0, columnspan=2, pady=(10, 0), sticky="w")
+
 
     def _apply_global_font(self):
         """A base_font-ot ráteszi minden fontos ttk widget stílusra.
@@ -5482,20 +5503,19 @@ class CryptoBotApp:
         f = self.base_font
         family = f.cget("family")
         size   = f.cget("size")
-        
+
         # Font tuple a Tk opció adatbázisnak
         font_tuple = (family, size)
+
+        # --- Tk alapértelmezett fontok frissítése (kritikus a ttk belső részeihez) ---
         try:
-            # Frissítjük a rendszer alapértelmezett fontját
             tkfont.nametofont("TkDefaultFont").configure(family=family, size=size)
-            # Frissítjük a szövegmezők alapértelmezett fontját
             tkfont.nametofont("TkTextFont").configure(family=family, size=size)
         except Exception as e:
-            # Hiba lehet, ha a fontokat még nem inicializálták, de ez ritka.
+            # ha valamiért még nem léteznek, nem dől össze a program
             print(f"Hiba a Tk alapértelmezett fontok frissítésekor: {e}")
-            pass
 
-        # Alapértelmezett ttk stílus frissítése
+        # --- Alap ttk stílus ---
         self.style.configure(".", font=f)
 
         # Gyakran használt stílusok
@@ -5515,13 +5535,24 @@ class CryptoBotApp:
         self.style.configure("Treeview.Heading", font=self.bold_font)
         self.style.configure("Card.TLabelframe.Label", font=self.bold_font)
 
-        # Combobox lenyíló lista betűtípusa (ez szükséges a legördülő részhez)
+        # Combobox lenyíló lista + menük
         try:
             self.root.option_add('*TCombobox*Listbox.font', font_tuple)
-            # Menük frissítése
             self.root.option_add('*Menu.font', font_tuple)
         except Exception:
             pass
+
+        # --- Nem-ttk szövegmezők (ScrolledText, Text) frissítése ---
+        for name in ("log_area", "margin_log", "txt_positions", "funds_log", "mb_log"):
+            if hasattr(self, name):
+                try:
+                    getattr(self, name).configure(font=font_tuple)
+                except Exception:
+                    pass
+
+        # Layout frissítés, hogy minden az új mérethez igazodjon
+        self.root.update_idletasks()
+
 
 # ========= main =========
 if __name__ == "__main__":
