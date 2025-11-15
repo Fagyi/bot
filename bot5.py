@@ -2890,11 +2890,24 @@ class CryptoBotApp:
         htf_box = ttk.Labelframe(form, text="HTF trend filter (EMA alapú)", padding=6)
         htf_box.grid(row=r, column=0, columnspan=2, sticky="we", pady=(8,0))
         htf_row = ttk.Frame(htf_box); htf_row.pack(anchor="w")
+
         self.mb_use_htf = tk.BooleanVar(value=False)
-        ttk.Checkbutton(htf_row, text="HTF filter használata", variable=self.mb_use_htf).pack(side=tk.LEFT)
+        ttk.Checkbutton(
+            htf_row,
+            text="HTF filter használata",
+            variable=self.mb_use_htf,
+            command=self._mb_toggle_htf_widgets     # <<< ÚJ
+        ).pack(side=tk.LEFT)
+
         ttk.Label(htf_row, text="  HTF TF:").pack(side=tk.LEFT, padx=(6,2))
-        self.mb_htf_tf = ttk.Combobox(htf_row, state="readonly", width=6, values=["15m","30m","1h","4h","1d"])
-        self.mb_htf_tf.set("15m"); self.mb_htf_tf.pack(side=tk.LEFT)
+        self.mb_htf_tf = ttk.Combobox(
+            htf_row,
+            state="readonly",
+            width=6,
+            values=["15m","30m","1h","4h","1d"]
+        )
+        self.mb_htf_tf.set("15m")
+        self.mb_htf_tf.pack(side=tk.LEFT)
         r += 1
 
         # ATR menedzsment – kapcsoló + ATR n + szorzók
@@ -3035,6 +3048,7 @@ class CryptoBotApp:
         self._mb_toggle_brk_widgets()
         self._mb_toggle_live_widgets()
         self._mb_toggle_rsi_widgets()
+        self._mb_toggle_htf_widgets()
 
         # a history táblázat létrehozása UTÁN:
         self._mb_hist_start_pnl_loop()
@@ -4863,6 +4877,15 @@ class CryptoBotApp:
                 self.mb_rsi_sell_max,
             ):
                 w.config(state=state)
+        except Exception:
+            pass
+
+    def _mb_toggle_htf_widgets(self):
+        """HTF filter ki/be – a HTF TF combobox engedélyezése/tiltása."""
+        try:
+            on = bool(self.mb_use_htf.get())
+            state = "readonly" if on else "disabled"
+            self.mb_htf_tf.config(state=state)
         except Exception:
             pass
 
