@@ -25,6 +25,7 @@ import pandas as pd
 # Tkinter
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
+from tkinter import font as tkfont
 from decimal import Decimal, ROUND_DOWN, ROUND_UP, getcontext
 import ttkbootstrap as tb
 
@@ -640,6 +641,18 @@ class CryptoBotApp:
         self.root.title("KuCoin Universal SDK Bot (SPOT + Margin)")
         self.root.geometry("1280x930")
 
+        # === Globális fontok ===
+        # A TkDefaultFont-ot használjuk alapnak, hogy minden ttk widget automatikusan ezt vegye át.
+        self.base_font = tkfont.nametofont("TkDefaultFont")
+        self.base_font.configure(family="Segoe UI", size=10)  # kezdeti érték
+
+        # Félkövér változat kártya címkékhez
+        self.bold_font = tkfont.Font(
+            family=self.base_font.cget("family"),
+            size=self.base_font.cget("size"),
+            weight="bold",
+        )
+
         self.is_running = False
         self.exchange: Optional[KucoinSDKWrapper] = None
         self.public_mode = tk.BooleanVar(value=PUBLIC_MODE_DEFAULT)
@@ -906,18 +919,22 @@ class CryptoBotApp:
         # --- Margin Bot (auto) ---
         self._build_margin_bot_tab()
 
+        # --- Beállítások fül (font) ---
+        self._build_settings_tab()
+
         # Szimbólumok betöltése háttérben
         threading.Thread(target=self._load_symbols_async, daemon=True).start()
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def _init_styles(self):
-        style = ttk.Style()
+        self.style = ttk.Style(self.root)
+        style = self.style
         style.configure("TLabel", padding=(2, 2))
         style.configure("TEntry", padding=(2, 2))
         style.configure("TButton", padding=(6, 6))
         style.configure("Card.TLabelframe", padding=12)
-        style.configure("Card.TLabelframe.Label", font=("Segoe UI", 10, "bold"))
+        # BUY / SELL gombok
         style.configure("Buy.TButton",  foreground="#0a0a0a", background="#1f9d55")
         style.map("Buy.TButton", background=[("active", "#178246")])
         style.configure("Sell.TButton", foreground="#0a0a0a", background="#d64545")
@@ -5415,6 +5432,96 @@ class CryptoBotApp:
             return max(0.0, float(fee_sum))
         except Exception:
             return 0.0
+
+    ###---    BEÁLLÍTÁSOK FÜL     ---###
+    def _build_settings_tab(self):
+        self.tab_settings = ttk.Frame(self.nb)
+        self.nb.add(self.tab_settings, text="Beállítások")
+
+        box = ttk.Labelframe(self.tab_settings, text="Megjelenés / betűk", padding=10)
+        box.pack(fill="x", padx=10, pady=10)
+
+        ttk.Label(box, text="Betűméret:").grid(row=0, column=0, sticky="w")
+        size_var = tk.IntVar(value=self.base_font.cget("size"))
+        size_spin = ttk.Spinbox(box, from_=8, to=18, width=5, textvariable=size_var)
+        size_spin.grid(row=0, column=1, sticky="w", padx=4)
+
+        ttk.Label(box, text="Betűtípus:").grid(row=1, column=0, sticky="w", pady=(8,0))
+        family_var = tk.StringVar(value=self.base_font.cget("family"))
+        font_list = sorted(set(tkfont.families()))
+        family_cb = ttk.Combobox(box, textvariable=family_var, values=font_list,
+                                 width=20, state="readonly")
+        family_cb.grid(row=1, column=1, sticky="w", padx=4, pady=(8,0))
+
+        def apply_font():
+            # értékek beolvasása
+            try:
+                new_size = int(size_var.get())
+            except ValueError:
+                new_size = self.base_font.cget("size")
+
+            new_family = family_var.get() or self.base_font.cget("family")
+
+            # alap + félkövér font frissítése
+            self.base_font.configure(size=new_size, family=new_family)
+            self.bold_font.configure(size=new_size, family=new_family)
+
+            # Minden ttk stílus újrafontozása
+            self._apply_global_font()
+
+        ttk.Button(box, text="Alkalmaz", command=apply_font)\
+           .grid(row=2, column=0, columnspan=2, pady=(10,0), sticky="w")
+
+    def _apply_global_font(self):
+        """A base_font-ot ráteszi minden fontos ttk widget stílusra.
+
+        Ezt hívd meg:
+          - __init__ végén (miután megvannak a fontok és a Style)
+          - betűméret / betűtípus változtatás után (Beállítások fül).
+        """
+        f = self.base_font
+        family = f.cget("family")
+        size   = f.cget("size")
+        
+        # Font tuple a Tk opció adatbázisnak
+        font_tuple = (family, size)
+        try:
+            # Frissítjük a rendszer alapértelmezett fontját
+            tkfont.nametofont("TkDefaultFont").configure(family=family, size=size)
+            # Frissítjük a szövegmezők alapértelmezett fontját
+            tkfont.nametofont("TkTextFont").configure(family=family, size=size)
+        except Exception as e:
+            # Hiba lehet, ha a fontokat még nem inicializálták, de ez ritka.
+            print(f"Hiba a Tk alapértelmezett fontok frissítésekor: {e}")
+            pass
+
+        # Alapértelmezett ttk stílus frissítése
+        self.style.configure(".", font=f)
+
+        # Gyakran használt stílusok
+        for sty in (
+            "TLabel",
+            "TButton",
+            "TEntry",
+            "TCombobox",
+            "TSpinbox",
+            "TCheckbutton",
+            "TRadiobutton",
+            "Treeview",
+        ):
+            self.style.configure(sty, font=f)
+
+        # Különleges stílusok
+        self.style.configure("Treeview.Heading", font=self.bold_font)
+        self.style.configure("Card.TLabelframe.Label", font=self.bold_font)
+
+        # Combobox lenyíló lista betűtípusa (ez szükséges a legördülő részhez)
+        try:
+            self.root.option_add('*TCombobox*Listbox.font', font_tuple)
+            # Menük frissítése
+            self.root.option_add('*Menu.font', font_tuple)
+        except Exception:
+            pass
 
 # ========= main =========
 if __name__ == "__main__":
