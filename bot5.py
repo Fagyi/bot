@@ -2850,12 +2850,19 @@ class CryptoBotApp:
         ttk.Checkbutton(brk_row1, text="Csak HTF trend irányába", variable=self.mb_brk_with_trend).pack(side=tk.LEFT, padx=(10,0))
         r += 1
 
-        # RSI szűrő – kapcsoló + hossz + (opcionális küszöbök)
+        # RSI szűrő – kapcsoló + hossz + zónák
         rsi_box = ttk.Labelframe(form, text="RSI szűrő", padding=6)
         rsi_box.grid(row=r, column=0, columnspan=2, sticky="we", pady=(8,0))
+
         rsi_row1 = ttk.Frame(rsi_box); rsi_row1.pack(anchor="w")
         self.mb_use_rsi = tk.BooleanVar(value=True)
-        ttk.Checkbutton(rsi_row1, text="RSI használata", variable=self.mb_use_rsi).pack(side=tk.LEFT)
+        ttk.Checkbutton(
+            rsi_row1,
+            text="RSI használata",
+            variable=self.mb_use_rsi,
+            command=self._mb_toggle_rsi_widgets      # <-- ÚJ
+        ).pack(side=tk.LEFT)
+
         ttk.Label(rsi_row1, text="  RSI len:").pack(side=tk.LEFT, padx=(6,2))
         self.mb_rsi_len = ttk.Spinbox(rsi_row1, from_=5, to=50, width=6)
         self.mb_rsi_len.delete(0, tk.END); self.mb_rsi_len.insert(0, "14")
@@ -3026,6 +3033,8 @@ class CryptoBotApp:
         self._mb_toggle_fixed_widgets()
         self._mb_toggle_atr_widgets()
         self._mb_toggle_brk_widgets()
+        self._mb_toggle_live_widgets()
+        self._mb_toggle_rsi_widgets()
 
         # a history táblázat létrehozása UTÁN:
         self._mb_hist_start_pnl_loop()
@@ -4837,6 +4846,22 @@ class CryptoBotApp:
             on = bool(self.mb_use_live.get())
             state = "normal" if on else "disabled"
             for w in (self.mb_live_shock_pct, self.mb_live_shock_atr):
+                w.config(state=state)
+        except Exception:
+            pass
+
+    def _mb_toggle_rsi_widgets(self):
+        """RSI használata ki/be – az RSI mezők engedélyezése/tiltása."""
+        try:
+            on = bool(self.mb_use_rsi.get())
+            state = "normal" if on else "disabled"
+            for w in (
+                self.mb_rsi_len,
+                self.mb_rsi_buy_min,
+                self.mb_rsi_buy_max,
+                self.mb_rsi_sell_min,
+                self.mb_rsi_sell_max,
+            ):
                 w.config(state=state)
         except Exception:
             pass
