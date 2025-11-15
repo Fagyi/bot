@@ -2809,8 +2809,12 @@ class CryptoBotApp:
         live_row1 = ttk.Frame(live_box); live_row1.pack(anchor="w")
 
         self.mb_use_live = tk.BooleanVar(value=True)
-        ttk.Checkbutton(live_row1, text="Élő ár figyelése (breakout/shock)", variable=self.mb_use_live)\
-           .pack(side=tk.LEFT)
+        ttk.Checkbutton(
+            live_row1,
+            text="Élő ár figyelése (breakout/shock)",
+            variable=self.mb_use_live,
+            command=self._mb_toggle_live_widgets   # <<< ÚJ: állapot váltáskor hívjuk
+        ).pack(side=tk.LEFT)
 
         ttk.Label(live_row1, text="  Shock %:").pack(side=tk.LEFT, padx=(10,2))
         self.mb_live_shock_pct = ttk.Spinbox(live_row1, from_=0.0, to=10.0, increment=0.05, width=6)
@@ -4827,6 +4831,16 @@ class CryptoBotApp:
         except Exception:
             pass
 
+    def _mb_toggle_live_widgets(self):
+        """Élő ár figyelése ki/be – a Shock mezők engedélyezése/tiltása."""
+        try:
+            on = bool(self.mb_use_live.get())
+            state = "normal" if on else "disabled"
+            for w in (self.mb_live_shock_pct, self.mb_live_shock_atr):
+                w.config(state=state)
+        except Exception:
+            pass
+
     def _mb_on_fixed_changed(self):
         """Ha FIX-t bekapcsolod, ATR-t kikapcsolja (pipa is le), és frissíti a mezők állapotát."""
         if getattr(self, "_mb_toggling", False):
@@ -5552,7 +5566,6 @@ class CryptoBotApp:
 
         # Layout frissítés, hogy minden az új mérethez igazodjon
         self.root.update_idletasks()
-
 
 # ========= main =========
 if __name__ == "__main__":
