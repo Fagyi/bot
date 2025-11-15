@@ -26,6 +26,7 @@ import pandas as pd
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 from decimal import Decimal, ROUND_DOWN, ROUND_UP, getcontext
+import ttkbootstrap as tb
 
 # Matplotlib
 import matplotlib
@@ -2603,23 +2604,60 @@ class CryptoBotApp:
 
     # ==================== MARGIN TRADE BOT (fejlesztett) ====================
     def _build_margin_bot_tab(self):
-        """Margin Bot fül – bal: form, jobb: napló. Opcionális EMA/RSI/HTF/ATR beállításokkal."""
+        """Margin Bot fül – bal: form (scrollozható), jobb: napló + mini-diagram."""
         import threading
+
         # fül
         self.tab_mbot = ttk.Frame(self.nb)
         self.nb.add(self.tab_mbot, text="Margin Bot")
         root = self.tab_mbot
-        root.grid_columnconfigure(0, weight=0)  # form (bal)
-        root.grid_columnconfigure(1, weight=1)  # log (jobb)
+        root.grid_columnconfigure(0, weight=0, minsize=800)  # bal: form
+        root.grid_columnconfigure(1, weight=1)  # jobb: history+chart
         root.grid_rowconfigure(0, weight=1)
 
-        # ===== bal oszlop: beállítások (form) =====
-        form = ttk.Labelframe(root, text="Margin bot – beállítások", padding=10)
-        form.grid(row=0, column=0, sticky="nsew", padx=(10, 6), pady=10)
+        # ===== bal oszlop: SCROLL-OZHATÓ konténer =====
+        left_container = ttk.Frame(root)
+        left_container.grid(row=0, column=0, sticky="nsew", padx=(10, 6), pady=10)
+        left_container.grid_columnconfigure(0, weight=1)
+        left_container.grid_rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(left_container, highlightthickness=0, borderwidth=0)
+        vscroll = ttk.Scrollbar(left_container, orient="vertical", command=canvas.yview)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        vscroll.grid(row=0, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=vscroll.set)
+
+        # A valódi form egy frame-ben ül a canvasban
+        scroll_frame = ttk.Frame(canvas)
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+
+        # Scrollregion frissítés
+        def _on_scroll_frame_config(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        scroll_frame.bind("<Configure>", _on_scroll_frame_config)
+
+        # Egérgörgő görgetés – csak bal panel, ne léptesse a Spinboxokat
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            return "break"
+
+        def _bind_mousewheel_recursively(widget):
+            widget.bind("<MouseWheel>", _on_mousewheel)
+            for child in widget.winfo_children():
+                _bind_mousewheel_recursively(child)
+
+        # ===== bal oszlop: beállítások (form) – IDE jön a régi tartalom =====
+        form = ttk.Labelframe(
+            scroll_frame,
+            text="Margin bot – beállítások",
+            padding=10,
+            style="Card.TLabelframe",
+        )
+        form.grid(row=0, column=0, sticky="nwe")
         for i in range(2):
             form.grid_columnconfigure(i, weight=1)
-
         r = 0
+
         # mód választó
         self.mb_mode = tk.StringVar(value="isolated")
         mrow = ttk.Frame(form); mrow.grid(row=r, column=0, columnspan=2, sticky="w")
@@ -2981,6 +3019,9 @@ class CryptoBotApp:
             self.mt_symbol.bind("<<ComboboxSelected>>", lambda _e: self._mb_draw_chart())
         except Exception:
             pass
+
+        # --- itt már MINDEN bal oldali widget létezik ---
+        _bind_mousewheel_recursively(scroll_frame)
 
         if not hasattr(self, "_mb_stopping"): 
             self._mb_stopping = False
@@ -5377,6 +5418,6 @@ class CryptoBotApp:
 
 # ========= main =========
 if __name__ == "__main__":
-    root = tk.Tk()
+    root = tb.Window(themename="flatly")
     app = CryptoBotApp(root)
     root.mainloop()
