@@ -694,28 +694,79 @@ class CryptoBotApp:
         self.fig = Figure(figsize=(8,3), dpi=100); self.ax = self.fig.add_subplot(111)
         self.canvas = FigureCanvasTkAgg(self.fig, master=lf_ch); self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        # --- Trade (SPOT) ---
-        self.tab_trade = ttk.Frame(self.nb); self.nb.add(self.tab_trade, text="Trade (SPOT)")
-        tf = ttk.Labelframe(self.tab_trade, text="Kézi SPOT market megbízás", padding=10); tf.pack(fill=tk.X, padx=10, pady=10)
-        ttk.Label(tf, text="Pár:").grid(row=0, column=0, sticky='w')
-        self.trade_symbol = ttk.Combobox(tf, values=self.symbols, width=18, state='readonly')
-        self.trade_symbol.set(DEFAULT_SYMBOL); self.trade_symbol.grid(row=0, column=1, padx=6)
-        ttk.Label(tf, text="Size (BASE):").grid(row=0, column=2, sticky='w')
-        self.trade_size = ttk.Entry(tf, width=12); self.trade_size.grid(row=0, column=3, padx=6)
-        ttk.Label(tf, text="Funds (QUOTE):").grid(row=0, column=4, sticky='w')
-        self.trade_funds = ttk.Entry(tf, width=12); self.trade_funds.grid(row=0, column=5, padx=6)
-        self.btn_spot_buy  = ttk.Button(tf, text="BUY (market)",  command=lambda: self.market_order('buy'));  self.btn_spot_buy.grid(row=0, column=6, padx=6)
-        self.btn_spot_sell = ttk.Button(tf, text="SELL (market)", command=lambda: self.market_order('sell')); self.btn_spot_sell.grid(row=0, column=7, padx=6)
+        # --- SPOT (Trade + Balances egy fülön, card stílus) ---
+        self.tab_spot = ttk.Frame(self.nb)
+        self.nb.add(self.tab_spot, text="SPOT")
 
-        # --- Balances (SPOT) ---
-        self.tab_bal = ttk.Frame(self.nb); self.nb.add(self.tab_bal, text="Balances (SPOT)")
-        bf = ttk.Labelframe(self.tab_bal, text="Egyenlegek", padding=10); bf.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        cols = ("currency","available","holds")
+        # Külső wrap – grid, hogy felül ticket, alul táblázat legyen
+        spot_wrap = ttk.Frame(self.tab_spot)
+        spot_wrap.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        spot_wrap.grid_columnconfigure(0, weight=1)
+        spot_wrap.grid_rowconfigure(1, weight=1)   # az alsó rész (táblázat) nyúlhat
+
+        # ===== FELSŐ: Kézi SPOT market megbízás (BALRA ZÁRT, CARD stílus) =====
+        tf = ttk.Labelframe(
+            spot_wrap,
+            text="Kézi SPOT market megbízás",
+            padding=10,
+            style="Card.TLabelframe",   # <<-- cards stílus, Flatly esetén is működik
+        )
+        # csak balra zárjuk, nem töltjük ki a teljes sort
+        tf.grid(row=0, column=0, sticky="w")
+
+        # rugalmasabb layout: az 1-es oszlop kicsit tágulhat
+        for c in range(0, 8):
+            tf.grid_columnconfigure(c, weight=0)
+        tf.grid_columnconfigure(1, weight=1)
+
+        ttk.Label(tf, text="Pár:").grid(row=0, column=0, sticky="w")
+        self.trade_symbol = ttk.Combobox(tf, values=self.symbols, width=18, state='readonly')
+        self.trade_symbol.set(DEFAULT_SYMBOL)
+        self.trade_symbol.grid(row=0, column=1, sticky="w", padx=6)
+
+        ttk.Label(tf, text="Size (BASE):").grid(row=0, column=2, sticky="w")
+        self.trade_size = ttk.Entry(tf, width=12)
+        self.trade_size.grid(row=0, column=3, sticky="w", padx=6)
+
+        ttk.Label(tf, text="Funds (QUOTE):").grid(row=0, column=4, sticky="w")
+        self.trade_funds = ttk.Entry(tf, width=12)
+        self.trade_funds.grid(row=0, column=5, sticky="w", padx=6)
+
+        self.btn_spot_buy = ttk.Button(
+            tf,
+            text="BUY (market)",
+            command=lambda: self.market_order('buy')
+        )
+        self.btn_spot_buy.grid(row=0, column=6, sticky="w", padx=6)
+
+        self.btn_spot_sell = ttk.Button(
+            tf,
+            text="SELL (market)",
+            command=lambda: self.market_order('sell')
+        )
+        self.btn_spot_sell.grid(row=0, column=7, sticky="w", padx=6)
+
+        # ===== ALSÓ: Balances (SPOT) – card stílus, kitöltve =====
+        bf = ttk.Labelframe(
+            spot_wrap,
+            text="Egyenlegek (SPOT)",
+            padding=10,
+            style="Card.TLabelframe",   # <<-- ugyanaz a cards stílus
+        )
+        bf.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+
+        cols = ("currency", "available", "holds")
         self.tbl_bal = ttk.Treeview(bf, columns=cols, show='headings', height=14)
         for c in cols:
-            self.tbl_bal.heading(c, text=c); self.tbl_bal.column(c, width=160, anchor='center')
+            self.tbl_bal.heading(c, text=c)
+            self.tbl_bal.column(c, width=160, anchor='center')
         self.tbl_bal.pack(fill=tk.BOTH, expand=True)
-        ttk.Button(bf, text="Frissítsd egyenlegeket", command=self.refresh_balances).pack(pady=6)
+
+        ttk.Button(
+            bf,
+            text="Frissítsd egyenlegeket",
+            command=self.refresh_balances
+        ).pack(pady=6)
 
         # --- Pozíciók (margin olvasás) ---
         self.tab_positions = ttk.Frame(self.nb); self.nb.add(self.tab_positions, text="Pozíciók")
