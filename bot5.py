@@ -17,6 +17,7 @@ import os, sys, time, json, uuid, hmac, base64, hashlib, threading
 from typing import List, Optional, Literal, Any, Dict
 from urllib.parse import urlencode
 import time as _time
+import threading
 
 # -------- 3rd party --------
 import requests
@@ -638,6 +639,7 @@ class KucoinSDKWrapper:
 class CryptoBotApp:
     def __init__(self, root: tk.Tk):
         self.root = root
+        self._ex_lock = threading.RLock()
         self.root.title("KuCoin Universal SDK Bot (SPOT + Margin)")
         self.root.geometry("1280x930")
 
@@ -1230,7 +1232,8 @@ class CryptoBotApp:
                 to_fetch = [f"{ccy}-USDT" for ccy in unique_ccy if ccy.upper() != "USDT"]
                 prices_raw = {}
                 try:
-                    prices_raw = self.exchange.fetch_last_prices_bulk(to_fetch)  # type: ignore[union-attr]
+                    with self._ex_lock:
+                        prices_raw = self.exchange.fetch_last_prices_bulk(to_fetch)  # type: ignore[union-attr]
                 except Exception:
                     prices_raw = {}
 
@@ -1346,7 +1349,8 @@ class CryptoBotApp:
         symbols = [a.get('symbol', '').upper() for a in assets if a.get('symbol')]
         prices: Dict[str, float] = {}
         try:
-            prices = self.exchange.fetch_last_prices_bulk(symbols) if self.exchange else {}  # type: ignore[union-attr]
+            with self._ex_lock:
+                prices = self.exchange.fetch_last_prices_bulk(symbols) if self.exchange else {}  # type: ignore[union-attr]
         except Exception:
             prices = {}
 
@@ -1371,7 +1375,8 @@ class CryptoBotApp:
             last = float(prices.get(sym, 0.0))
             if last <= 0 and self.exchange:
                 try:
-                    last = float(self.exchange.fetch_last_price(sym))  # type: ignore[union-attr]
+                    with self._ex_lock:
+                        last = float(self.exchange.fetch_last_price(sym))  # type: ignore[union-attr]
                 except Exception:
                     last = 0.0
 
@@ -1493,7 +1498,8 @@ class CryptoBotApp:
         symbols = [r["symbol"] for r in rows]
         prices = {}
         try:
-            prices = self.exchange.fetch_last_prices_bulk(symbols) if self.exchange else {}  # type: ignore[union-attr]
+            with self._ex_lock:
+                prices = self.exchange.fetch_last_prices_bulk(symbols) if self.exchange else {}  # type: ignore[union-attr]
         except Exception:
             prices = {}
 
@@ -1546,7 +1552,8 @@ class CryptoBotApp:
                 def fetch():
                     px = 0.0
                     if self.exchange:
-                        px = float(self.exchange.fetch_last_price(sym))  # SDK/REST saját fallbackkel
+                        with self._ex_lock:
+                            px = float(self.exchange.fetch_last_price(sym))  # SDK/REST saját fallbackkel
                     return px
 
                 def apply(px):
@@ -1626,7 +1633,8 @@ class CryptoBotApp:
             px = 0.0
             if self.exchange:
                 try:
-                    px = float(self.exchange.fetch_last_price(sym))  # type: ignore[union-attr]
+                    with self._ex_lock:
+                        px = float(self.exchange.fetch_last_price(sym))  # type: ignore[union-attr]
                 except Exception:
                     px = 0.0
             
@@ -1750,7 +1758,8 @@ class CryptoBotApp:
                 else:
                     # nincs cache – ne használj spotot; opcionális lassú fallback:
                     try:
-                        resp = self.exchange.fetch_isolated_accounts()  # type: ignore[union-attr]
+                        with self._ex_lock:
+                            resp = self.exchange.fetch_isolated_accounts()  # type: ignore[union-attr]
                         data = resp.get("data", {}) if isinstance(resp, dict) else getattr(resp, "data", {}) or {}
                         for a in data.get("assets", []) or []:
                             if (a.get("symbol") or "").upper() == sym:
@@ -1813,7 +1822,6 @@ class CryptoBotApp:
                 pass
             return
 
-        import threading
         def worker(p_sym, p_side, p_typ, p_px_ui, p_size, p_funds, p_lev, p_auto, p_mode):
             try:
                 import math
@@ -1821,7 +1829,7 @@ class CryptoBotApp:
                 px = p_px_ui
                 if p_typ == "market" and p_side == "buy" and px is None:
                     try:
-                        with getattr(self, "_ex_lock", threading.RLock()):
+                        with self._ex_lock:
                             last = float(self.exchange.fetch_last_price(p_sym))
                         if last > 0:
                             px = last
@@ -1859,7 +1867,7 @@ class CryptoBotApp:
                         size_to_send = sb
 
                     # Küldés – thread-safe
-                    with getattr(self, "_ex_lock", threading.RLock()):
+                    with self._ex_lock:
                         resp = self.exchange.place_margin_market_order(  # type: ignore[union-attr]
                             p_mode, p_sym, p_side,
                             size_base=size_to_send,
@@ -1887,7 +1895,7 @@ class CryptoBotApp:
                         if sb is None or sb <= 0:
                             raise ValueError("Limit BUY: a számolt/kért méret a minimum alatt van.")
                         # Küldd el a saját limit API-don (ha van). Itt demo: market helyett NEM ideális fallback.
-                        with getattr(self, "_ex_lock", threading.RLock()):
+                        with self._ex_lock:
                             resp = self.exchange.place_margin_limit_order(  # type: ignore[attr-defined]
                                 p_mode, p_sym, p_side, price=str(px),
                                 size_base=str(sb), leverage=p_lev,
@@ -1901,7 +1909,7 @@ class CryptoBotApp:
                         )
                         if sb is None or sb <= 0:
                             raise ValueError("Limit SELL: a kért méret a minimum alatt van.")
-                        with getattr(self, "_ex_lock", threading.RLock()):
+                        with self._ex_lock:
                             resp = self.exchange.place_margin_limit_order(  # type: ignore[attr-defined]
                                 p_mode, p_sym, p_side, price=str(px),
                                 size_base=str(sb), leverage=p_lev,
@@ -1955,7 +1963,8 @@ class CryptoBotApp:
         if self.is_running:
             return
         try:
-            self.exchange = KucoinSDKWrapper(public_mode=self.public_mode.get(), log_fn=self.log)
+            with self._ex_lock:
+                self.exchange = KucoinSDKWrapper(public_mode=self.public_mode.get(), log_fn=self.log)
             if self.public_mode.get():
                 self.log("ℹ️ Publikus mód: csak piaci adatok")
             else:
@@ -1967,7 +1976,8 @@ class CryptoBotApp:
                     rs = None
                     ms = None
                     if hasattr(self.exchange, "_client") and getattr(self.exchange, "_client") is not None:
-                        rs = self.exchange._client.rest_service()
+                        with self._ex_lock:
+                            rs = self.exchange._client.rest_service()
                     if rs:
                         ms = rs.get_margin_service()
                     ms_methods = ", ".join([m for m in dir(ms) if m and m.startswith("get_")]) if ms else "N/A"
@@ -1984,10 +1994,12 @@ class CryptoBotApp:
                 try:
                     moa = None
                     if hasattr(self.exchange, "get_margin_order_api"):
-                        moa = self.exchange.get_margin_order_api()
+                        with self._ex_lock:
+                            moa = self.exchange.get_margin_order_api()
                     if moa is None and hasattr(self.exchange, "_client"):
                         try:
-                            rs = self.exchange._client.rest_service()
+                            with self._ex_lock:
+                                rs = self.exchange._client.rest_service()
                             ms = rs.get_margin_service()
                             if ms and hasattr(ms, "get_order_api"):
                                 moa = ms.get_order_api()
@@ -2052,7 +2064,7 @@ class CryptoBotApp:
                 if getattr(self, "exchange", None) is None:
                     self.exchange = KucoinSDKWrapper(public_mode=True, log_fn=self.log)
 
-                with getattr(self, "_ex_lock", threading.RLock()):
+                with self._ex_lock:
                     ohlcv = self.exchange.fetch_ohlcv(p_symbol, p_tf, limit=200)
 
                 if not ohlcv:
@@ -2078,7 +2090,6 @@ class CryptoBotApp:
             except Exception as e:
                 self.root.after(0, lambda: (self.log(f"❌ tick_once hiba: {e}\n"), setattr(self, "_tick_busy", False)))
 
-        import threading
         threading.Thread(target=_work, args=(symbol, tf, short, long), daemon=True).start()
 
     # ---- diagram ----
@@ -2118,7 +2129,6 @@ class CryptoBotApp:
         size_str  = size_str  if size_str  else None
         funds_str = funds_str if funds_str else None
 
-        import threading
         def worker(p_symbol: str, p_side: str, p_size: str | None, p_funds: str | None):
             try:
                 import math
@@ -2133,7 +2143,7 @@ class CryptoBotApp:
                 last_px = None
                 lot_step = price_step = min_base = min_funds = quote_step = None
                 try:
-                    with getattr(self, "_ex_lock", threading.RLock()):
+                    with self._ex_lock:
                         # élő ár
                         try:
                             last_px = float(self.exchange.fetch_last_price(p_symbol))
@@ -2230,7 +2240,7 @@ class CryptoBotApp:
                     raise ValueError("Nincs küldhető mennyiség (size/funds).")
 
                 # 4) ORDER KÜLDÉS – _ex_lock alatt
-                with getattr(self, "_ex_lock", threading.RLock()):
+                with self._ex_lock:
                     resp = self.exchange.place_market_order(
                         p_symbol, p_side, size_base=send_size, funds_quote=send_funds  # type: ignore[arg-type]
                     )
@@ -2279,11 +2289,10 @@ class CryptoBotApp:
             btn.config(state=tk.DISABLED)
         self.root.config(cursor="watch")
 
-        import threading
         def worker():
             try:
                 # --- EXCHANGE HÍVÁS THREAD-SAFE ---
-                with getattr(self, "_ex_lock", threading.RLock()):
+                with self._ex_lock:
                     balances = self.exchange.fetch_spot_balances()  # type: ignore[union-attr]
 
                 # --- UI FRISSÍTÉS A FŐ SZÁLON ---
@@ -2348,7 +2357,8 @@ class CryptoBotApp:
 
         def worker():
             try:
-                resp = self.exchange.fetch_isolated_accounts()  # type: ignore[union-attr]
+                with self._ex_lock:
+                    resp = self.exchange.fetch_isolated_accounts()  # type: ignore[union-attr]
                 payload = resp if isinstance(resp, dict) else getattr(resp, '__dict__', {}) or {'data': getattr(resp, 'data', {})}
                 pretty = self.pretty_isolated_accounts(payload)
                 rows = self._parse_isolated_rows(payload)
@@ -2380,7 +2390,8 @@ class CryptoBotApp:
 
         def worker():
             try:
-                resp = self.exchange.fetch_cross_accounts()  # type: ignore[union-attr]
+                with self._ex_lock:
+                    resp = self.exchange.fetch_cross_accounts()  # type: ignore[union-attr]
                 payload = resp if isinstance(resp, dict) else getattr(resp, "__dict__", {}) or {"data": getattr(resp, "data", {})}
                 rows = self._parse_cross_rows(payload, dq)
                 pretty = self.pretty_cross_accounts(payload, dq)
@@ -2416,7 +2427,8 @@ class CryptoBotApp:
 
         def worker():
             try:
-                acc = self.exchange.fetch_cross_accounts()  # type: ignore[union-attr]
+                with self._ex_lock:
+                    acc = self.exchange.fetch_cross_accounts()  # type: ignore[union-attr]
                 payload = acc if isinstance(acc, dict) else getattr(acc, "__dict__", {}) or {"data": getattr(acc, "data", {})}
                 dq = symbol.split("-")[1]
                 rows = self._parse_cross_rows(payload, dq)
@@ -2449,7 +2461,8 @@ class CryptoBotApp:
         - Short zárás → BUY (funds küldése, szaniter végzi a size→funds becslést és ellenőrzést)
         """
         # 1) Isolated számla lekérése és a kiválasztott pár sora
-        acc = self.exchange.fetch_isolated_accounts()
+        with self._ex_lock:
+            acc = self.exchange.fetch_isolated_accounts()
         data = acc.get("data", acc)
         assets = (data or {}).get("assets", []) or []
         row = next((a for a in assets if (a.get("symbol") or "").upper() == symbol.upper()), None)
@@ -2475,7 +2488,8 @@ class CryptoBotApp:
 
         # 3) Utolsó ár BUY funds-becsléshez (ha nem sikerül, None maradhat – a szaniter kezelni fogja)
         try:
-            last_px = float(self.exchange.fetch_last_price(symbol)) or None
+            with self._ex_lock:
+                last_px = float(self.exchange.fetch_last_price(symbol)) or None
         except Exception:
             last_px = None
 
@@ -2516,14 +2530,15 @@ class CryptoBotApp:
         }
         self._safe_log(f"🐞 SEND MANUAL CLOSE: {self._mb_pp(payload_dbg)}\n")
 
-        resp = self.exchange.place_margin_market_order(
-            "isolated", symbol, side,
-            size_base=size_arg,
-            funds_quote=funds_arg,
-            leverage=lev,
-            auto_borrow=False,
-            auto_repay=True
-        )
+        with self._ex_lock:
+            resp = self.exchange.place_margin_market_order(
+                "isolated", symbol, side,
+                size_base=size_arg,
+                funds_quote=funds_arg,
+                leverage=lev,
+                auto_borrow=False,
+                auto_repay=True
+            )
 
         self._safe_log(f"🐞 RECV MANUAL CLOSE: {self._mb_pp(resp)}\n")
         return resp if isinstance(resp, dict) else {"data": resp}
@@ -2547,7 +2562,8 @@ class CryptoBotApp:
             try:
                 if mode == "cross":
                     # marad a wrapperes cross close, ha van
-                    resp = self.exchange.close_cross_position(symbol)  # type: ignore[union-attr]
+                    with self._ex_lock:
+                        resp = self.exchange.close_cross_position(symbol)  # type: ignore[union-attr]
                     refreshed = self.view_cross_accounts
                     ok_title = "Close cross"
                 else:
@@ -2586,7 +2602,8 @@ class CryptoBotApp:
 
         def worker():
             try:
-                resp = self.exchange.close_cross_position(symbol)  # type: ignore[union-attr]
+                with self._ex_lock:
+                    resp = self.exchange.close_cross_position(symbol)  # type: ignore[union-attr]
                 oid = (resp.get("data", {}) or {}).get("orderId")
                 self.root.after(0, lambda oid=oid, s=symbol: [
                     self.log(f"✅ Cross pozíció zárva ({s}) – orderId={oid}"),
@@ -2614,7 +2631,8 @@ class CryptoBotApp:
             messagebox.showerror("Hiba", "Érvénytelen összeg."); return
         def worker():
             try:
-                resp = self.exchange.transfer_spot_internal(ccy, amt, from_type, to_type)  # type: ignore[union-attr]
+                with self._ex_lock:
+                    resp = self.exchange.transfer_spot_internal(ccy, amt, from_type, to_type)  # type: ignore[union-attr]
                 self.root.after(0, lambda: [self.funds_log.insert(tk.END, f"✅ Spot transfer {from_type}→{to_type} {amt} {ccy}\n"),
                                              self.funds_log.see(tk.END)])
             except Exception as e:
@@ -2635,7 +2653,8 @@ class CryptoBotApp:
 
         def worker():
             try:
-                resp = self.exchange.transfer_cross_margin(ccy, amt, direction)  # ← EZT hívjuk
+                with self._ex_lock:
+                    resp = self.exchange.transfer_cross_margin(ccy, amt, direction)  # ← EZT hívjuk
                 self.root.after(0, lambda: [
                     self.funds_log.insert(tk.END, f"✅ Cross transfer {direction} {amt} {ccy}\n"),
                     self.funds_log.see(tk.END)
@@ -2661,7 +2680,8 @@ class CryptoBotApp:
 
         def worker():
             try:
-                resp = self.exchange.transfer_isolated_margin(sym, ccy, amt, direction)  # ← EZT hívjuk
+                with self._ex_lock:
+                    resp = self.exchange.transfer_isolated_margin(sym, ccy, amt, direction)  # ← EZT hívjuk
                 self.root.after(0, lambda: [
                     self.funds_log.insert(tk.END, f"✅ Isolated transfer {direction} {amt} {ccy}  ({sym})\n"),
                     self.funds_log.see(tk.END)
@@ -2677,8 +2697,6 @@ class CryptoBotApp:
     # ==================== MARGIN TRADE BOT (fejlesztett) ====================
     def _build_margin_bot_tab(self):
         """Margin Bot fül – bal: form (scrollozható), jobb: napló + mini-diagram."""
-        import threading
-
         # fül
         self.tab_mbot = ttk.Frame(self.nb)
         self.nb.add(self.tab_mbot, text="Margin Bot")
@@ -3109,7 +3127,6 @@ class CryptoBotApp:
 
         # Margin és spot egyenleg cache. Ezt tölti fel a funds fül, de előre inicializálni kell.
         self._balance_cache: Dict[str, Any] = {}
-        self._ex_lock = threading.Lock()
 
         # ha TF vagy pár változik, frissítsünk
         try:
@@ -3126,7 +3143,6 @@ class CryptoBotApp:
             self._mb_stopping = False
 
     def _bg(self, fn, ok, err=None):
-        import threading
         def run():
             try:
                 res = fn()
@@ -3335,7 +3351,6 @@ class CryptoBotApp:
                     self._safe_log(f"❌ _mb_refresh_available hiba: {e}\n")
 
             # 7. A worker indítása háttérszálon
-            import threading
             threading.Thread(target=worker, daemon=True).start()
 
     # --- Thread-safe logoló segéd ---
@@ -3433,7 +3448,8 @@ class CryptoBotApp:
             def fetch_rt():
                 if not symbol:
                     return None
-                return float(self.exchange.fetch_last_price(symbol))
+                with self._ex_lock:
+                    return float(self.exchange.fetch_last_price(symbol))
 
             def apply(rt):
                 self._mb_hist_pnl_inflight = False
@@ -3607,7 +3623,8 @@ class CryptoBotApp:
 
         if self.exchange is None:
             try:
-                self.exchange = KucoinSDKWrapper(public_mode=self.public_mode.get(), log_fn=self.log)
+                with self._ex_lock:
+                    self.exchange = KucoinSDKWrapper(public_mode=self.public_mode.get(), log_fn=self.log)
                 self.log(f"🔧 MarginBot: exchange inicializálva (dry-run: {self.mb_dry.get()}, public_mode: {self.public_mode.get()})")
             except Exception as e:
                 messagebox.showerror("Hiba", f"Exchange nincs inicializálva: {e}")
@@ -3678,7 +3695,6 @@ class CryptoBotApp:
         self._safe_log("⏹️ Bot leállítása folyamatban...\n")
 
         try:
-            import threading
             sym   = normalize_symbol(self._mb_get_str("mb_symbol", self._mb_get_str("mt_symbol", DEFAULT_SYMBOL)))
             dry   = self._mb_get_bool("mb_dry", True)
             lev   = self._mb_get_int("mb_leverage", 10)
@@ -3687,7 +3703,7 @@ class CryptoBotApp:
             # Utolsó ismert élő ár – _ex_lock alatt kérjük le
             last_px = None
             try:
-                with getattr(self, "_ex_lock", threading.RLock()):
+                with self._ex_lock:
                     last_px = float(self.exchange.fetch_last_price(sym))
             except Exception:
                 last_px = None
@@ -3717,7 +3733,7 @@ class CryptoBotApp:
                         # LIVE: KIZÁRÓLAG a központi _live_close_pos → siker esetén tükrözés SIM-ben
                         ok = False
                         try:
-                            with getattr(self, "_ex_lock", threading.RLock()):
+                            with self._ex_lock:
                                 ok = self._live_close_pos(side, pos, px, symbol=sym, mode=mode, lev=lev)
                         except Exception as e:
                             self._safe_log(f"❌ LIVE zárási hiba (stop): {e}\n")
@@ -3983,10 +3999,6 @@ class CryptoBotApp:
     # === MarginBot – fő ciklus, HTF-filter + ATR menedzsment + RSI szűrő === 
     def _mb_worker(self):
         import time, math, pandas as pd, threading
-
-        # biztos, hogy van ex-lock
-        if not hasattr(self, "_ex_lock"):
-            self._ex_lock = threading.RLock()
 
         # --- egyszeri init-ek (ha még nem léteznek) ---
         if not hasattr(self, "_sim_pos_long"):   self._sim_pos_long = []   # list[dict]
@@ -5147,7 +5159,8 @@ class CryptoBotApp:
            Ha be van kapcsolva az EMA INVERT, akkor a trend értelmezése is felcserélődik.
         """
         try:
-            ohlcv = self.exchange.fetch_ohlcv(symbol, tf, limit=max(slow*2, 120))  # type: ignore[arg-type]
+            with self._ex_lock:
+                ohlcv = self.exchange.fetch_ohlcv(symbol, tf, limit=max(slow*2, 120))  # type: ignore[arg-type]
             if not ohlcv:
                 return 0
             import pandas as pd
@@ -5266,7 +5279,8 @@ class CryptoBotApp:
             info = None
             # JAVÍTÁS: A 'get_symbol_meta' függvényt hívjuk, ami a KucoinSDKWrapper-ben létezik (sor 211)
             if hasattr(self.exchange, "get_symbol_meta"):
-                info = self.exchange.get_symbol_meta(symbol) # <-- JAVÍTVA
+                with self._ex_lock:
+                    info = self.exchange.get_symbol_meta(symbol) # <-- JAVÍTVA
 
             if isinstance(info, dict):
                 # JAVÍTÁS: Kulcsok hozzáigazítva a get_symbol_meta által visszaadott dict-hez (sor 201-206)
