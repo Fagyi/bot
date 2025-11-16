@@ -5144,7 +5144,7 @@ class CryptoBotApp:
     # ---------- HTF trend filter (GYORS fölötte = bull) ----------
     def _mb_trend_filter(self, symbol: str, tf: str = "1h", fast: int = 20, slow: int = 50) -> int:
         """+1 bull, -1 bear, 0 semleges – magasabb idősík trendje a GYORS EMA SZERINT.
-           Bull, ha fast > slow; Bear, ha fast < slow.
+           Ha be van kapcsolva az EMA INVERT, akkor a trend értelmezése is felcserélődik.
         """
         try:
             ohlcv = self.exchange.fetch_ohlcv(symbol, tf, limit=max(slow*2, 120))  # type: ignore[arg-type]
@@ -5155,9 +5155,21 @@ class CryptoBotApp:
             s = df['c'].astype(float)
             ema_f = s.ewm(span=fast, adjust=False).mean().iloc[-1]
             ema_s = s.ewm(span=slow, adjust=False).mean().iloc[-1]
-            if ema_f > ema_s: return +1   # gyors fölötte → bull
-            if ema_f < ema_s: return -1   # gyors alatta → bear
-            return 0
+
+            # Alap trend irány
+            if ema_f > ema_s:
+                trend = +1     # gyors a lassú fölött → bull
+            elif ema_f < ema_s:
+                trend = -1     # gyors alatta → bear
+            else:
+                trend = 0
+
+            # 🔥 ÚJ: Ha be van kapcsolva az EMA INVERT, a trendet is invertáljuk
+            if hasattr(self, "mb_invert_ema") and self.mb_invert_ema.get():
+                trend = -trend
+
+            return trend
+
         except Exception:
             return 0
 
