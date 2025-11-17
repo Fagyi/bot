@@ -3874,108 +3874,129 @@ class CryptoBotApp:
 
     def _live_close_pos(self,
                         side: str,           # A pozíció nyitó iránya ('buy' = long, 'sell' = short)
-                        pos: dict,         # A pozíció dict-je a _sim_pos_... listából
-                        close_px: float,   # Az aktuális (becsült) záróár (px_for_mgmt)
-                        *,                 # Innentől keyword-only argumentumok
+                        pos: dict,           # A pozíció dict-je a _sim_pos_... listából
+                        close_px: float,     # Az aktuális (becsült) záróár (px_for_mgmt)
+                        *,                   # Innentől keyword-only argumentumok
                         symbol: str,
                         mode: str,
                         lev: int,
                         is_sl_tp: bool = False,
                         is_manual: bool = False) -> bool:
         """
-        Piacon keresztül zárja a margin pozíciót (JAVÍTOTT VERZIÓ).
-        - Kezeli a 'buy' (long) és 'sell' (short) pozíciókat.
-        - Meghívja a self._mb_sanitize_order-t a helyes size/funds konverzióhoz.
-        - A funkció definíciója most már megegyezik a hívó (_mb_worker) signatúrájával.
-        """
-        try:
-            # --- 1. Adatok kinyerése és logikai előkészítés ---
-            
-            # A 'side' a *pozíció* nyitó oldala. A záró oldal az ellenkezője.
-            # JAVÍTVA: 'buy'/'sell' alapú ellenőrzés
-            close_side: Literal["buy", "sell"] = "sell" if side == "buy" else "buy"
-            
-            # Adatok a 'pos' dictionary-ből (a hívásnak megfelelően)
-            pos_size = float(pos.get('size', 0.0))
-            pos_px = float(pos.get('entry', 0.0))
-            pos_id = str(pos.get('oid', 'N/A')) # Order ID
-            
-            if pos_size <= 0:
-                self._safe_log(f"⚠️ LIVE zárási hiba: A pozíció ({pos_id}) mérete nulla. Átugorva.\n")
-                return False # Nem hiba, de nem is siker
+        Piacon keresztül zárja a margin pozíciót.
 
-            # Devizák a 'symbol' alapján (a keyword argumentumból)
+        FONTOS: A függvény szemlélete:
+          - Ha a CLOSE order SIKERESEN ELMENT és van orderId, akkor a függvény
+            *logikai értelemben* sikeresnek tekinti a pozíciózárást → True-t ad.
+          - A fee lekérdezés, PnL-számítás, history frissítés hibái NEM
+            változtatják meg a visszatérési értéket, csak logolva lesznek.
+        """
+        from typing import Optional, Literal
+        import time
+
+        sent_ok = False         # csak az order küldés sikerességét jelöli
+        oid: Optional[str] = None
+
+        # --- 1. ORDER ELŐKÉSZÍTÉS + KÜLDÉS (kritikus rész) ---
+        try:
+            # A 'side' a *pozíció* nyitó oldala. A záró oldal az ellenkezője.
+            close_side: Literal["buy", "sell"] = "sell" if side == "buy" else "buy"
+
+            # Pozícióadatok
+            pos_size = float(pos.get('size', 0.0))
+            pos_px   = float(pos.get('entry', 0.0))
+            pos_id   = str(pos.get('oid', 'N/A'))
+
+            if pos_size <= 0:
+                self._safe_log(
+                    f"⚠️ LIVE zárási hiba: A pozíció ({pos_id}) mérete nulla. Átugorva.\n"
+                )
+                return False  # nincs mit zárni, de nem tekintjük végzetes hibának
+
             base_ccy, quote_ccy = split_symbol(symbol)
 
-            # --- 2. Sanitizer hívása a helyes küldendő paraméterekért ---
-            # Ez a kulcs:
-            # - 'buy' (short zárás) esetén: (None, funds_quote)-t ad vissza
-            # - 'sell' (long zárás) esetén: (size_base, None)-t ad vissza
-            # A 'close_px'-t (ami a last_px_rt) használjuk a becsléshez.
-            
-            # A 'raw_size'-t (pos_size) adjuk át a sanitizernek
-            # JAVÍTVA: A class-level self._mb_sanitize_order hívása
+            # --- Sanitizer: a küldendő size/funds kiszámítása ---
             sb, fq = self._mb_sanitize_order(
                 symbol=symbol,
-                side=close_side,    # A *záró* oldalt adjuk át
-                price=close_px,     # Az aktuális árat
-                size_base=pos_size, # A nyers méretet
+                side=close_side,       # a *záró* oldalt adjuk át
+                price=close_px,
+                size_base=pos_size,    # nyers base méret
                 funds_quote=None
             )
 
-            # --- 3. Küldendő paraméterek ellenőrzése ---
-            # JAVÍTVA: Helyes size/funds szétválasztás
-            size_to_send: Optional[float | str] = None
-            funds_to_send: Optional[float | str] = None
+            # --- Küldendő paraméterek ellenőrzése ---
+            size_to_send: Optional[str] = None
+            funds_to_send: Optional[str] = None
 
-            if close_side == 'sell': # Long zárása
+            if close_side == "sell":  # long zárása
                 if not sb or sb <= 0:
-                    self._safe_log(f"❌ LIVE zárási hiba (SELL): A sanitizer 0 vagy None 'size'-t adott vissza (min/step). Nyers méret: {pos_size}\n")
+                    self._safe_log(
+                        f"❌ LIVE zárási hiba (SELL): A sanitizer 0 vagy None 'size'-t adott vissza "
+                        f"(min/step). Nyers méret: {pos_size}\n"
+                    )
                     return False
                 size_to_send = str(sb)
-            else: # 'buy' (Short zárása)
+            else:  # "buy" – short zárása
                 if not fq or fq <= 0:
-                    self._safe_log(f"❌ LIVE zárási hiba (BUY): A sanitizer 0 vagy None 'funds'-ot adott vissza (min/step). Nyers méret: {pos_size} @ {close_px}\n")
+                    self._safe_log(
+                        f"❌ LIVE zárási hiba (BUY): A sanitizer 0 vagy None 'funds'-ot adott vissza "
+                        f"(min/step). Nyers méret: {pos_size} @ {close_px}\n"
+                    )
                     return False
                 funds_to_send = str(fq)
 
-            # --- 4. API Hívás ---
-            # A 'closing_a_short' logikailag megegyezik azzal, hogy a záró oldal 'buy'
             closing_a_short = (close_side == "buy")
-            
+
             _payload_dbg = {
-                "mode": mode, "symbol": symbol, "side": close_side,
-                "size_base": size_to_send, "funds_quote": funds_to_send, "leverage": lev,
-                "auto_borrow": closing_a_short, # Short záráskor kellhet borrow
-                "auto_repay": True              # Mindig próbáljon visszafizetni
+                "mode": mode,
+                "symbol": symbol,
+                "side": close_side,
+                "size_base": size_to_send,
+                "funds_quote": funds_to_send,
+                "leverage": lev,
+                "auto_borrow": closing_a_short,
+                "auto_repay": True,
             }
-            
             log_prefix = "🐞 SEND"
-            if is_manual: log_prefix += " MANUAL"
-            if is_sl_tp: log_prefix += " SL/TP"
+            if is_sl_tp:
+                log_prefix += " [SL/TP]"
+            if is_manual:
+                log_prefix += " [MANUAL]"
+
             self._safe_log(f"{log_prefix} CLOSE: {self._mb_pp(_payload_dbg)}\n")
 
-            # Fontos: self.exchange (class-level)
-            with self._ex_lock:
-                resp = self.exchange.place_margin_market_order(
-                    mode, symbol, close_side,
-                    size_base=size_to_send,
-                    funds_quote=funds_to_send,
-                    leverage=lev,
-                    auto_borrow=closing_a_short,
-                    auto_repay=True
-                )
-            
+            # --- API hívás: ORDER KÜLDÉS ---
+            try:
+                with self._ex_lock:
+                    resp = self.exchange.place_margin_market_order(
+                        mode, symbol, close_side,
+                        size_base=size_to_send,
+                        funds_quote=funds_to_send,
+                        leverage=lev,
+                        auto_borrow=closing_a_short,
+                        auto_repay=True,
+                    )
+            except Exception as e:
+                # API hiba → ténylegesen nem ment el a záró order
+                self._safe_log(f"❌ LIVE zárási API hiba: {e}\n")
+                return False
+
             self._safe_log(f"🐞 RECV CLOSE: {self._mb_pp(resp)}\n")
 
-            # --- 5. Válasz ellenőrzése (Order ID) ---
-            oid = None
+            # --- Válaszból az orderId kinyerése ---
             try:
-                oid = (getattr(resp, 'orderId', None)
-                       or (resp.get('data') or {}).get('orderId')
-                       or (resp.get('orderId') if isinstance(resp, dict) else None))
+                if hasattr(resp, "orderId"):
+                    oid = str(getattr(resp, "orderId"))
+                else:
+                    data = resp.get("data") if isinstance(resp, dict) else None
+                    oid = (
+                        (data or {}).get("orderId")
+                        or (resp.get("orderId") if isinstance(resp, dict) else None)
+                    )
+                    if oid is not None:
+                        oid = str(oid)
             except Exception:
-                pass
+                oid = None
 
             if not oid:
                 self._safe_log(
@@ -3985,65 +4006,73 @@ class CryptoBotApp:
                 return False
 
             self._safe_log(f"✅ LIVE zárás elküldve (ID: {oid})\n")
+            sent_ok = True
 
-            # --- 6. Tényleges close fee kinyerése és PnL véglegesítése ---
-            fee_close = 0.0
+        except Exception as e:
+            # Ide csak az ORDER előkészítés / küldés közben keletkező váratlan hibák esnek be
+            self._safe_log(
+                f"❌ Végzetes hiba a _live_close_pos függvényben (order küldés közben): {e}\n"
+            )
+            return False
 
-            # 1) első próbálkozás
+        # --- 2. POST-PROCESSING: fee lekérdezés, PnL, history (NEM befolyásolja a sent_ok-ot) ---
+
+        if not sent_ok or not oid:
+            # Logikailag nem kéne idáig eljutni ilyen állapotban, de biztos, ami biztos:
+            return bool(sent_ok)
+
+        fee_close = 0.0
+
+        # 1) első próbálkozás – csak logoljuk a hibát
+        try:
+            fee_close = float(self._mb_try_fetch_close_fee(str(oid)) or 0.0)
+        except Exception as e:
+            self._safe_log(f"⚠️ Close fee lekérdezési hiba (1): {e}\n")
+
+        # 2) ha még 0, még egyszer próbálkozunk kis várakozás után
+        if fee_close <= 0.0:
+            time.sleep(0.5)
             try:
                 fee_close = float(self._mb_try_fetch_close_fee(str(oid)) or 0.0)
             except Exception as e:
-                self._safe_log(f"⚠️ Close fee lekérdezési hiba (1): {e}\n")
+                self._safe_log(f"⚠️ Close fee lekérdezési hiba (2): {e}\n")
 
-            # 2) ha elsőre 0 → várunk egy kicsit, hogy a fill-ek megjelenjenek
-            if fee_close <= 0.0:
-                time.sleep(0.5)  # <<< Ezt a késleltetést szabadon állíthatod 0.3–1.0s közé
-                try:
-                    fee_close = float(self._mb_try_fetch_close_fee(str(oid)) or 0.0)
-                except Exception as e:
-                    self._safe_log(f"⚠️ Close fee lekérdezési hiba (2): {e}\n")
+        total_fee = None
+        pnl_final = None
 
-            total_fee = None
-            pnl_final = None
-            try:
-                if fee_close > 0.0:
-                    # eltároljuk a tényleges zárási díjat
-                    pos["fee_close_actual"] = float(fee_close)
+        # Fee + PnL számítás – HIBA esetén CSAK log, no return False
+        try:
+            if fee_close > 0.0:
+                pos["fee_close_actual"] = float(fee_close)
 
-                    # open + close fee kiszámítása a meglévő helperrel
-                    fee_rate = self._mb_get_taker_fee()
-                    f_open, f_close, _ = self._mb_sum_fee_actual_or_est(
-                        pos,
-                        close_px,
-                        fee_rate
-                    )
-                    total_fee = float(f_open + f_close)
-
-                    # Bruttó PnL (entry→close, irányfüggő)
-                    sz    = float(pos.get("size", 0.0))
-                    entry = float(pos.get("entry", 0.0))
-                    gross = (close_px - entry) * sz * (1 if side == "buy" else -1)
-                    pnl_final = float(gross - total_fee)
-            except Exception as e:
-                self._safe_log(f"⚠️ Fee/PnL számítási hiba: {e}\n")
-
-            # History frissítése a záróárral + ha ismert, a végleges Fee/PnL értékkel
-            try:
-                self._mb_hist_update_exit(
-                    pos_id,
+                fee_rate = self._mb_get_taker_fee()
+                f_open, f_close, _ = self._mb_sum_fee_actual_or_est(
+                    pos,
                     close_px,
-                    fee_total=total_fee,
-                    pnl_final=pnl_final,
+                    fee_rate,
                 )
-            except Exception as e:
-                self._safe_log(f"⚠️ Hiba a history frissítésekor: {e}\n")
+                total_fee = float(f_open + f_close)
 
-            return True
-
+                sz    = float(pos.get("size", 0.0))
+                entry = float(pos.get("entry", 0.0))
+                gross = (close_px - entry) * sz * (1 if side == "buy" else -1)
+                pnl_final = float(gross - total_fee)
         except Exception as e:
-            # Fontos: self._safe_log (class-level)
-            self._safe_log(f"❌ Végzetes hiba a _live_close_pos függvényben: {e}\n")
-            return False
+            self._safe_log(f"⚠️ Fee/PnL számítási hiba: {e}\n")
+
+        # History frissítés – ez is best-effort
+        try:
+            self._mb_hist_update_exit(
+                pos.get("oid") or pos.get("order_id") or pos.get("id") or str(oid),
+                close_px,
+                fee_total=total_fee,
+                pnl_final=pnl_final,
+            )
+        except Exception as e:
+            self._safe_log(f"⚠️ Hiba a history frissítésekor: {e}\n")
+
+        # FONTOS: ha idáig eljutottunk, a záró order elment és van orderId → logikailag sikeres zárás
+        return True
 
     # === MarginBot – fő ciklus, HTF-filter + ATR menedzsment + RSI szűrő === 
     def _mb_worker(self):
