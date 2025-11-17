@@ -3625,7 +3625,10 @@ class CryptoBotApp:
             try:
                 with self._ex_lock:
                     self.exchange = KucoinSDKWrapper(public_mode=self.public_mode.get(), log_fn=self.log)
-                self.log(f"🔧 MarginBot: exchange inicializálva (dry-run: {self.mb_dry.get()}, public_mode: {self.public_mode.get()})")
+                self.log(
+                    f"🔧 MarginBot: exchange inicializálva "
+                    f"(dry-run: {self.mb_dry.get()}, public_mode: {self.public_mode.get()})"
+                )
             except Exception as e:
                 messagebox.showerror("Hiba", f"Exchange nincs inicializálva: {e}")
                 return
@@ -3638,10 +3641,14 @@ class CryptoBotApp:
 
         # --- Hard reset minden run előtt (különösen pool és bar state) ---
         # töröljük, hogy a worker ÚJRA építse a keretet
-        try: delattr(self, "_pool_balance_quote")
-        except Exception: pass
-        try: delattr(self, "_pool_used_quote")
-        except Exception: pass
+        try:
+            delattr(self, "_pool_balance_quote")
+        except Exception:
+            pass
+        try:
+            delattr(self, "_pool_used_quote")
+        except Exception:
+            pass
 
         # azonnali aktivitás – ne szűrje ki "ugyanaz a gyertya"
         self._mb_last_bar_ts = {}
@@ -3649,13 +3656,29 @@ class CryptoBotApp:
         self._mb_last_rt_px = {} if hasattr(self, "_mb_last_rt_px") else {}
 
         # belső állapotok, ha hiányoznának
-        if not hasattr(self, "_sim_pnl_usdt"):     self._sim_pnl_usdt     = 0.0
-        if not hasattr(self, "_sim_pos_long"):     self._sim_pos_long     = []
-        if not hasattr(self, "_sim_pos_short"):    self._sim_pos_short    = []
-        if not hasattr(self, "_mb_last_bar_ts"):   self._mb_last_bar_ts   = {}   # {(symbol, tf): ts}
-        if not hasattr(self, "_mb_last_cross_ts"): self._mb_last_cross_ts = 0
-        if not hasattr(self, "_mb_last_signal"):   self._mb_last_signal   = "hold"
-        if not hasattr(self, "_mb_lock"):          self._mb_lock          = threading.Lock()
+        if not hasattr(self, "_sim_pnl_usdt"):
+            self._sim_pnl_usdt = 0.0
+        if not hasattr(self, "_sim_pos_long"):
+            self._sim_pos_long = []
+        if not hasattr(self, "_sim_pos_short"):
+            self._sim_pos_short = []
+        if not hasattr(self, "_mb_last_bar_ts"):
+            self._mb_last_bar_ts = {}   # {(symbol, tf): ts}
+        if not hasattr(self, "_mb_last_cross_ts"):
+            self._mb_last_cross_ts = 0
+        if not hasattr(self, "_mb_last_signal"):
+            self._mb_last_signal = "hold"
+        if not hasattr(self, "_mb_lock"):
+            self._mb_lock = threading.Lock()
+
+        # --- CFG SNAPSHOT: minden UI-olvasás itt, FŐ SZÁLBAN! ---
+        try:
+            self._mb_cfg = self._mb_build_cfg()
+            self._safe_log(f"🧩 MarginBot cfg snapshot: {self._mb_cfg}\n")
+        except Exception as e:
+            self._safe_log(f"❌ MarginBot cfg építési hiba: {e}\n")
+            messagebox.showerror("Hiba", f"MarginBot beállítások nem olvashatók ki: {e}")
+            return
 
         self._mb_running = True
         self.mb_start_btn.configure(state=tk.DISABLED)
@@ -3669,10 +3692,13 @@ class CryptoBotApp:
                 self._safe_log(f"❌ Bot hiba: {e}\n")
             finally:
                 self._mb_running = False
-                self.root.after(0, lambda: (
-                    self.mb_start_btn.configure(state=tk.NORMAL),
-                    self.mb_stop_btn.configure(state=tk.DISABLED),
-                ))
+                self.root.after(
+                    0,
+                    lambda: (
+                        self.mb_start_btn.configure(state=tk.NORMAL),
+                        self.mb_stop_btn.configure(state=tk.DISABLED),
+                    ),
+                )
 
         self._mb_thread = threading.Thread(target=_loop, daemon=True)
         self._mb_thread.start()
@@ -4011,14 +4037,16 @@ class CryptoBotApp:
 
         # Dinamikus keret (pool) – induláskor felépítjük
         if not hasattr(self, "_pool_balance_quote") or not hasattr(self, "_pool_used_quote"):
+            cfg0 = getattr(self, "_mb_cfg", {}) or {}
             try:
-                symbol0 = normalize_symbol(self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)))
+                symbol0 = normalize_symbol(cfg0.get("symbol", DEFAULT_SYMBOL))
                 base0, quote0 = split_symbol(symbol0)
             except Exception:
-                base0, quote0 = "","USDT"
+                base0, quote0 = "", "USDT"
 
-            ui_budget = float(self._mb_get_float('mb_budget', 0.0) or 0.0)
-            dry = bool(self._mb_get_bool('mb_dry', True))
+            ui_budget = float(cfg0.get("budget_ui", 0.0) or 0.0)
+            dry = bool(cfg0.get("dry", True))
+
             avail_quote = 0.0
             try:
                 if hasattr(self, "_mt_available"):
@@ -4107,16 +4135,16 @@ class CryptoBotApp:
 
             entry = float(pos['entry']); sz = float(pos['size'])
 
+            # symbol widget helyett cfg-ből
             try:
-                symbol_safe = normalize_symbol(
-                    self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL))
-                )
+                cfg_sym = getattr(self, "_mb_cfg", {}) or {}
+                symbol_safe = cfg_sym.get("symbol", DEFAULT_SYMBOL)
             except Exception:
                 symbol_safe = None
 
             try:
                 lot_step, _price_step, _min_base, _min_funds, _quote_step = self._mb_get_market_steps(
-                    symbol_safe or "BTC-USDT"
+                    normalize_symbol(symbol_safe or "BTC-USDT")
                 )
             except Exception:
                 lot_step = 0.0
@@ -4160,9 +4188,8 @@ class CryptoBotApp:
             try:
                 import time as _t
                 try:
-                    symbol_safe = normalize_symbol(
-                        self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL))
-                    )
+                    cfg_sym = getattr(self, "_mb_cfg", {}) or {}
+                    symbol_safe = normalize_symbol(cfg_sym.get("symbol", DEFAULT_SYMBOL))
                 except Exception:
                     symbol_safe = "UNKNOWN"
 
@@ -4236,52 +4263,65 @@ class CryptoBotApp:
                 if tr_r > 0 and last_px >= trail_px: return True
                 if last_px >= sl_px: return True
             return False
+
         try:
             while self._mb_running:
                 try:
-                    # --- UI beállítások kiolvasása ---
-                    symbol = normalize_symbol(self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)))
-                    tf     = self._mb_get_str('mb_tf', '1m')
-                    fa     = self._mb_get_int('mb_ma_fast', 9)
-                    slw    = self._mb_get_int('mb_ma_slow', 21)
-                    sizep  = self._mb_get_float('mb_size_pct', 50.0)
-                    inpm   = self._mb_get_str('mb_input_mode', 'quote')
-                    mode   = self._mb_get_str('mb_mode', 'isolated')
-                    lev    = max(1, self._mb_get_int('mb_leverage', 10))
-                    tpct   = self._mb_get_float('mb_tp_pct', 2.0)
-                    spct   = self._mb_get_float('mb_sl_pct', 1.0)
-                    trpct  = self._mb_get_float('mb_trail_pct', 0.5)
-                    cd_s   = self._mb_get_int('mb_cooldown_s', 30)
-                    dry    = self._mb_get_bool('mb_dry', True)
-                    budget_ui = self._mb_get_float('mb_budget', 0.0)
+                    # --- CFG beállítások beolvasása (NEM widget!) ---
+                    cfg = getattr(self, "_mb_cfg", {}) or {}
 
-                    # RSI / HTF / ATR
-                    use_rsi  = getattr(self, "mb_use_rsi", tk.BooleanVar(value=False)).get()
-                    rsi_len  = self._mb_get_int('mb_rsi_len', 14)
-                    rsi_bmin = self._mb_get_float('mb_rsi_buy_min', 45.0)
-                    rsi_bmax = self._mb_get_float('mb_rsi_buy_max', 70.0)
-                    rsi_smin = self._mb_get_float('mb_rsi_sell_min', 30.0)
-                    rsi_smax = self._mb_get_float('mb_rsi_sell_max', 55.0)
+                    symbol = normalize_symbol(cfg.get("symbol", DEFAULT_SYMBOL))
+                    tf     = cfg.get("tf", "1m")
+                    fa     = int(cfg.get("ma_fast", 9))
+                    slw    = int(cfg.get("ma_slow", 21))
+                    sizep  = float(cfg.get("size_pct", 50.0))
+                    inpm   = cfg.get("input_mode", "quote")
+                    mode   = cfg.get("mode", "isolated")
+                    lev    = int(cfg.get("leverage", 10))
+                    tpct   = float(cfg.get("tp_pct", 2.0))
+                    spct   = float(cfg.get("sl_pct", 1.0))
+                    trpct  = float(cfg.get("trail_pct", 0.5))
+                    cd_s   = int(cfg.get("cooldown_s", 30))
+                    dry    = bool(cfg.get("dry", True))
+                    budget_ui = float(cfg.get("budget_ui", 0.0))
 
-                    use_htf = getattr(self, "mb_use_htf", tk.BooleanVar(value=False)).get()
-                    htf_tf  = self._mb_get_str('mb_htf_tf', '1h')
+                    # RSI / HTF / ATR / FIX / BRK
+                    use_rsi  = bool(cfg.get("use_rsi", False))
+                    rsi_len  = int(cfg.get("rsi_len", 14))
+                    rsi_bmin = float(cfg.get("rsi_bmin", 45.0))
+                    rsi_bmax = float(cfg.get("rsi_bmax", 70.0))
+                    rsi_smin = float(cfg.get("rsi_smin", 30.0))
+                    rsi_smax = float(cfg.get("rsi_smax", 55.0))
 
-                    use_atr = getattr(self, "mb_use_atr", tk.BooleanVar(value=False)).get()
-                    atr_n   = self._mb_get_int('mb_atr_n', 14)
-                    mul_sl  = self._mb_get_float('mb_atr_mul_sl', 1.2)
-                    mul_tp1 = self._mb_get_float('mb_atr_mul_tp1', 1.5)
-                    mul_tp2 = self._mb_get_float('mb_atr_mul_tp2', 2.5)
-                    mul_tr  = self._mb_get_float('mb_atr_mul_trail', 0.9)
+                    use_htf = bool(cfg.get("use_htf", False))
+                    htf_tf  = cfg.get("htf_tf", "1h")
 
-                    use_fixed = getattr(self, "mb_use_fixed", tk.BooleanVar(value=False)).get()
+                    use_atr = bool(cfg.get("use_atr", False))
+                    atr_n   = int(cfg.get("atr_n", 14))
+                    mul_sl  = float(cfg.get("atr_mul_sl", 1.2))
+                    mul_tp1 = float(cfg.get("atr_mul_tp1", 1.5))
+                    mul_tp2 = float(cfg.get("atr_mul_tp2", 2.5))
+                    mul_tr  = float(cfg.get("atr_mul_tr", 0.9))
 
-                    use_brk  = getattr(self, "mb_use_brk", tk.BooleanVar(value=False)).get()
-                    brk_n    = self._mb_get_int('mb_brk_n', 20)
-                    brk_buf  = self._mb_get_float('mb_brk_buf', 0.05)
-                    brk_with_trend = getattr(self, "mb_brk_with_trend", tk.BooleanVar(value=True)).get()
+                    use_fixed = bool(cfg.get("use_fixed", False))
+
+                    use_brk   = bool(cfg.get("use_brk", False))
+                    brk_n     = int(cfg.get("brk_n", 20))
+                    brk_buf   = float(cfg.get("brk_buf", 0.05))
+                    brk_with_trend = bool(cfg.get("brk_with_trend", True))
 
                     if use_fixed and use_atr:
                         use_fixed = False
+
+                    use_live       = bool(cfg.get("use_live", True))
+                    live_shock_pct = float(cfg.get("live_shock_pct", 1.0))
+                    live_shock_atr = float(cfg.get("live_shock_atr", 1.2))
+                    drift_max_ui   = float(cfg.get("drift_max_pct", 0.0))
+                    max_open       = int(cfg.get("max_open", 0))
+                    pause_new      = bool(cfg.get("pause_new", False))
+                    auto_borrow    = bool(cfg.get("auto_borrow", False))
+                    invert_ema     = bool(cfg.get("invert_ema", False))
+                    ema_hyst_pct   = float(cfg.get("ema_hyst_pct", 1.0))
 
                     # --- OHLCV ---
                     with self._ex_lock:
@@ -4326,10 +4366,6 @@ class CryptoBotApp:
                     except Exception:
                         drift_pct = float("nan")
 
-                    try:
-                        max_open = int(self.mb_max_open.get() or "0")
-                    except Exception:
-                        max_open = 0
                     open_now = len(self._sim_pos_long) + len(self._sim_pos_short)
 
                     atr_val = None
@@ -4339,13 +4375,19 @@ class CryptoBotApp:
                         self._mb_last_atr_val = atr_val 
 
                     closes_for_sig = df['c'].astype(float).tolist()
+                    # hiszterézis mult kivonva cfg-ből → nincs Tk az _mb_signal_from_ema_live-ben
+                    atr_eps_mult = max(0.0, ema_hyst_pct) / 100.0
                     sig_raw, ef_l, es_l = self._mb_signal_from_ema_live(
                         closes_for_sig, fa, slw, last_px_rt=None,
-                        atr_eps_mult=None
+                        atr_eps_mult=atr_eps_mult,
+                        invert=invert_ema,            # <<< invert flag cfg-ből
                     )
                     trend_htf = 0
                     if use_htf:
-                        trend_htf = self._mb_trend_filter(symbol, htf_tf, fa, slw)
+                        trend_htf = self._mb_trend_filter(
+                            symbol, htf_tf, fa, slw,
+                            invert=invert_ema           # <<< itt is cfg-ből
+                        )
 
                     sig = sig_raw
                     if use_htf:
@@ -4370,12 +4412,11 @@ class CryptoBotApp:
                             if (brk_sig == 'buy' and trend_htf < 0) or (brk_sig == 'sell' and trend_htf > 0):
                                 brk_sig = 'hold'
 
+                    # Élő ár szűrők, breakout/shock logika cfg-ből
                     try:
-                        use_live = self._mb_get_bool('mb_use_live', True)
-
                         if use_live:
-                            shock_pct = float(self._mb_get_float('mb_live_shock_pct', 1.0))
-                            shock_atr_mul = float(self._mb_get_float('mb_live_shock_atr', 1.2))
+                            shock_pct = max(0.0, live_shock_pct)
+                            shock_atr_mul = max(0.0, live_shock_atr)
 
                             try:
                                 with self._ex_lock:
@@ -4390,7 +4431,7 @@ class CryptoBotApp:
 
                             chg = last_px_rt - last_px
                             chg_pct = (abs(chg) / max(last_px, 1e-12)) * 100.0
-                            shock_hit_pct = (chg_pct >= max(0.0, shock_pct))
+                            shock_hit_pct = (chg_pct >= shock_pct)
 
                             shock_hit_atr = False
                             if atr_val is not None and shock_atr_mul > 0:
@@ -4438,7 +4479,7 @@ class CryptoBotApp:
                         + (f"[buy:{rsi_bmin:.1f}-{rsi_bmax:.1f} sell:{rsi_smin:.1f}-{rsi_smax:.1f}]" if use_rsi else "")
                         + f", htf={'ON' if use_htf else 'OFF'}({trend_htf:+d})"
                         + f", brk={'ON' if use_brk else 'OFF'}"
-                        + f", live_px={'ON' if self._mb_get_bool('mb_use_live', True) else 'OFF'}"
+                        + f", live_px={'ON' if use_live else 'OFF'}"
                         + f", cd_left={cd_left}s"
                     )
 
@@ -4453,7 +4494,6 @@ class CryptoBotApp:
                     drift_ok = True
                     drift_over_txt = None
                     try:
-                        drift_max_ui = float(self._mb_get_float('mb_drift_max_pct', 0.0) or 0.0)
                         if drift_max_ui > 0 and drift_pct == drift_pct:
                             drift_ok = (abs(drift_pct) <= drift_max_ui)
                             if not drift_ok:
@@ -4551,7 +4591,6 @@ class CryptoBotApp:
 
                     # --- ÚJ NYITÁS (cooldown + pool limit) ---
                     now = int(time.time())
-                    pause_new = self._mb_get_bool("mb_pause_new", False)
                     if combined_sig in ('buy','sell') and (now - self._mb_last_cross_ts >= cd_s):
                         if pause_new:
                             self._safe_log(f"⏸️ Új nyitás szüneteltetve (Checkbox). Jel ({combined_sig}) átugorva.\n")
@@ -4609,7 +4648,9 @@ class CryptoBotApp:
                             else:
                                 size, funds = self._mb_compute_size(
                                     symbol, combined_sig, last_px_rt, sizep_to_use, inpm, mode, lev,
-                                    budget_quote=max_quote_for_trade
+                                    budget_quote=max_quote_for_trade,
+                                    dry=dry,
+                                    auto_borrow=auto_borrow,
                                 )
                                 if funds is not None and funds > 0:
                                     commit_usdt = float(funds)
@@ -4686,9 +4727,6 @@ class CryptoBotApp:
                                         opened = True
                                 else:
                                     try:
-                                        auto_b = getattr(self, "mb_autob", None)
-                                        auto_borrow = bool(auto_b.get()) if auto_b else False
-
                                         size_to_send = None
                                         funds_to_send = None
 
@@ -4719,7 +4757,7 @@ class CryptoBotApp:
                                             _payload_dbg = {
                                                 "mode": mode, "symbol": symbol, "side": combined_sig,
                                                 "size_base": size_to_send, "funds_quote": funds_to_send,
-                                                "leverage": lev, "auto_borrow": auto_borrow
+                                                "leverage": lev, "auto_borrow": auto_borrow,
                                             }
                                             self._safe_log(f"🐞 SEND OPEN: {self._mb_pp(_payload_dbg)}\n")
                                             with self._ex_lock:
@@ -5154,7 +5192,14 @@ class CryptoBotApp:
         return sig, ef_l, es_l
 
     # ---------- HTF trend filter (GYORS fölötte = bull) ----------
-    def _mb_trend_filter(self, symbol: str, tf: str = "1h", fast: int = 20, slow: int = 50) -> int:
+    def _mb_trend_filter(
+        self,
+        symbol: str,
+        tf: str = "1h",
+        fast: int = 20,
+        slow: int = 50,
+        invert: bool | None = None,
+    ) -> int:
         """+1 bull, -1 bear, 0 semleges – magasabb idősík trendje a GYORS EMA SZERINT.
            Ha be van kapcsolva az EMA INVERT, akkor a trend értelmezése is felcserélődik.
         """
@@ -5171,14 +5216,23 @@ class CryptoBotApp:
 
             # Alap trend irány
             if ema_f > ema_s:
-                trend = +1     # gyors a lassú fölött → bull
+                trend = +1
             elif ema_f < ema_s:
-                trend = -1     # gyors alatta → bear
+                trend = -1
             else:
                 trend = 0
 
-            # 🔥 ÚJ: Ha be van kapcsolva az EMA INVERT, a trendet is invertáljuk
-            if hasattr(self, "mb_invert_ema") and self.mb_invert_ema.get():
+            # Invert flag: ha nincs paraméter, *fő szálon* még olvashatunk widgetet
+            if invert is None:
+                try:
+                    if hasattr(self, "mb_invert_ema"):
+                        invert = bool(self.mb_invert_ema.get())
+                    else:
+                        invert = False
+                except Exception:
+                    invert = False
+
+            if invert:
                 trend = -trend
 
             return trend
@@ -5225,6 +5279,8 @@ class CryptoBotApp:
         mode: str,
         leverage: int,
         budget_quote: float = 0.0,
+        dry: bool | None = None,
+        auto_borrow: bool | None = None,
     ) -> tuple[float | None, float | None]:
         """
         Méret számítás:
@@ -5237,6 +5293,8 @@ class CryptoBotApp:
           - LIVE + NINCS Auto-borrow: cap_quote = min(avail_quote, budget) ha budget>0, különben avail_quote
         """
         try:
+            import tkinter as tk  # ha a fájl tetején már van, ez el is hagyható
+
             leverage = max(1, min(leverage, 10 if mode == 'isolated' else 5))
             base, quote = split_symbol(symbol)
 
@@ -5249,17 +5307,25 @@ class CryptoBotApp:
             budget_quote = float(budget_quote or 0.0)
 
             if input_mode == 'quote':
-                # döntés a cap_quote-ról
-                dry = bool(self._mb_get_bool('mb_dry', True))
-                auto_borrow = bool(getattr(self, 'mb_autob', tk.BooleanVar(value=False)).get())
+                # döntés a cap_quote-ról – csak akkor olvas widgetet, ha nem kaptunk paramot
+                if dry is None:
+                    dry = bool(self._mb_get_bool('mb_dry', True))
+                if auto_borrow is None:
+                    auto_borrow = bool(getattr(self, 'mb_autob', tk.BooleanVar(value=False)).get())
 
                 if dry or auto_borrow:
                     cap_quote = budget_quote if budget_quote > 0 else avail_quote
                 else:
-                    cap_quote = min(avail_quote, budget_quote) if budget_quote > 0 else avail_quote
+                    if budget_quote > 0:
+                        cap_quote = min(avail_quote, budget_quote)
+                    else:
+                        cap_quote = avail_quote
 
-                funds = max(0.0, cap_quote * pct)
-                return (None, round(funds, 4)) if funds > 0 else (None, None)
+                use_quote = max(0.0, cap_quote * pct)
+                if use_quote <= 0:
+                    return None, None
+
+                return None, use_quote
 
             else:  # 'base'
                 size = max(0.0, avail_base * pct)
@@ -5391,6 +5457,85 @@ class CryptoBotApp:
             "lev": lev,
             "price": px_rounded
         }
+
+    def _mb_build_cfg(self) -> dict:
+        """Margin bot beállítások snapshot – CSAK fő szálból hívd (pl. mb_start-ban)."""
+        import tkinter as tk
+
+        # Biztonság kedvéért minden _mb_get_* itt még fő szálon fut → thread-safe.
+        symbol = normalize_symbol(
+            self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL))
+        )
+
+        cfg = {
+            # Alap paraméterek
+            "symbol": symbol,
+            "tf": self._mb_get_str('mb_tf', '1m'),
+            "ma_fast": self._mb_get_int('mb_ma_fast', 9),
+            "ma_slow": self._mb_get_int('mb_ma_slow', 21),
+            "size_pct": self._mb_get_float('mb_size_pct', 50.0),
+            "input_mode": self._mb_get_str('mb_input_mode', 'quote'),
+            "mode": self._mb_get_str('mb_mode', 'isolated'),
+            "leverage": max(1, self._mb_get_int('mb_leverage', 10)),
+            "tp_pct": self._mb_get_float('mb_tp_pct', 2.0),
+            "sl_pct": self._mb_get_float('mb_sl_pct', 1.0),
+            "trail_pct": self._mb_get_float('mb_trail_pct', 0.5),
+            "cooldown_s": self._mb_get_int('mb_cooldown_s', 30),
+            "dry": self._mb_get_bool('mb_dry', True),
+            "budget_ui": self._mb_get_float('mb_budget', 0.0),
+
+            # RSI
+            "use_rsi": bool(getattr(self, "mb_use_rsi", tk.BooleanVar(value=False)).get()),
+            "rsi_len": self._mb_get_int('mb_rsi_len', 14),
+            "rsi_bmin": self._mb_get_float('mb_rsi_buy_min', 45.0),
+            "rsi_bmax": self._mb_get_float('mb_rsi_buy_max', 70.0),
+            "rsi_smin": self._mb_get_float('mb_rsi_sell_min', 30.0),
+            "rsi_smax": self._mb_get_float('mb_rsi_sell_max', 55.0),
+
+            # HTF
+            "use_htf": bool(getattr(self, "mb_use_htf", tk.BooleanVar(value=False)).get()),
+            "htf_tf": self._mb_get_str('mb_htf_tf', '1h'),
+
+            # ATR
+            "use_atr": bool(getattr(self, "mb_use_atr", tk.BooleanVar(value=False)).get()),
+            "atr_n": self._mb_get_int('mb_atr_n', 14),
+            "atr_mul_sl": self._mb_get_float('mb_atr_mul_sl', 1.2),
+            "atr_mul_tp1": self._mb_get_float('mb_atr_mul_tp1', 1.5),
+            "atr_mul_tp2": self._mb_get_float('mb_atr_mul_tp2', 2.5),
+            "atr_mul_tr": self._mb_get_float('mb_atr_mul_trail', 0.9),
+
+            # FIX vs ATR
+            "use_fixed": bool(getattr(self, "mb_use_fixed", tk.BooleanVar(value=False)).get()),
+
+            # Breakout
+            "use_brk": bool(getattr(self, "mb_use_brk", tk.BooleanVar(value=False)).get()),
+            "brk_n": self._mb_get_int('mb_brk_n', 20),
+            "brk_buf": self._mb_get_float('mb_brk_buf', 0.05),
+            "brk_with_trend": bool(getattr(self, "mb_brk_with_trend", tk.BooleanVar(value=True)).get()),
+
+            # Élő ár “shock” + drift
+            "use_live": bool(getattr(self, "mb_use_live", tk.BooleanVar(value=True)).get()),
+            "live_shock_pct": self._mb_get_float('mb_live_shock_pct', 1.0),
+            "live_shock_atr": self._mb_get_float('mb_live_shock_atr', 1.2),
+            "drift_max_pct": self._mb_get_float('mb_drift_max_pct', 0.0),
+
+            # Max nyitott, pause new
+            "max_open": self._mb_get_int('mb_max_open', 0),
+            "pause_new": self._mb_get_bool('mb_pause_new', False),
+
+            # Auto-borrow + EMA invert
+            "auto_borrow": bool(getattr(self, "mb_autob", tk.BooleanVar(value=False)).get()),
+            "invert_ema": bool(getattr(self, "mb_invert_ema", tk.BooleanVar(value=False)).get()),
+
+            # EMA hysteresis %
+            "ema_hyst_pct": self._mb_get_float('mb_ema_hyst_pct', 1.0),
+        }
+
+        # Ütközés-kezelés: ATR vs FIX egyszer eldöntve
+        if cfg["use_fixed"] and cfg["use_atr"]:
+            cfg["use_fixed"] = False
+
+        return cfg
 
     # --- MarginBot: biztonságos getterek (változatlanok) ---
     def _mb_get(self, candidates, cast, default):
