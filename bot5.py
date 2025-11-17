@@ -3033,6 +3033,13 @@ class CryptoBotApp:
         self.mb_stop_btn  = ttk.Button(btns, text="Stop bot",  command=self.mb_stop, state=tk.DISABLED); self.mb_stop_btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
         r += 1
 
+        apply_btn = ttk.Button(
+            form,
+            text="Beállítások frissítése / paraméterek állítása ( futó botra )",
+            command=self.mb_reload_cfg,
+        )
+        apply_btn.grid(row=r, column=0, columnspan=2, sticky="we", pady=(10,0))
+        
         # ===== jobb oszlop: felül fülek (History / Bot napló), alul mini-diagram =====
         right = ttk.Frame(root)
         right.grid(row=0, column=1, sticky="nsew", padx=(6,10), pady=10)
@@ -3791,6 +3798,22 @@ class CryptoBotApp:
             pass
 
         self._mb_stopping = False
+
+    def mb_reload_cfg(self, silent: bool = False):
+        """MarginBot cfg újraépítése futás közben – CSAK fő szálról hívd (UI gomb / callback)."""
+        try:
+            new_cfg = self._mb_build_cfg()
+        except Exception as e:
+            # Ha valami nem olvasható ki az UI-ból
+            self._safe_log(f"❌ MarginBot cfg újraépítési hiba: {e}\n")
+            messagebox.showerror("Hiba", f"MarginBot beállítások újraépítése sikertelen: {e}")
+            return
+
+        # Egyszerűen lecseréljük a referenciát – worker a következő ciklusban már ezt fogja látni
+        self._mb_cfg = new_cfg
+
+        if not silent:
+            self._safe_log("♻️ MarginBot cfg frissítve futás közben.\n")
 
     def _close_sim_by_index(self, side: str, idx: int, exit_px: float):
         lst = self._sim_pos_long if side == 'buy' else self._sim_pos_short
