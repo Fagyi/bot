@@ -4570,46 +4570,114 @@ class CryptoBotApp:
                     i = 0
                     while i < len(self._sim_pos_long):
                         pos = self._sim_pos_long[i]
-                        need_close = False
-                        if pos.get('mgmt') == 'atr' and atr_val is not None:
-                            need_close = _manage_atr_on_pos(pos, px_for_mgmt, atr_val)
-                        elif pos.get('mgmt') == 'fixed':
-                            need_close = _manage_fixed_on_pos(pos, px_for_mgmt)
-                        if need_close:
-                            if dry:
-                                self._close_sim_by_index('buy', i, px_for_mgmt)
-                            else:
-                                ok = self._live_close_pos('buy', pos, px_for_mgmt, symbol=symbol, mode=mode, lev=lev)
-                                if ok:
-                                    self._close_sim_by_index('buy', i, px_for_mgmt)
+                        try:
+                            need_close = False
+                            if pos.get('mgmt') == 'atr' and atr_val is not None:
+                                need_close = _manage_atr_on_pos(pos, px_for_mgmt, atr_val)
+                            elif pos.get('mgmt') == 'fixed':
+                                need_close = _manage_fixed_on_pos(pos, px_for_mgmt)
+
+                            if need_close:
+                                if dry:
+                                    # SIM zárás – külön guard, hogy ez se ölje meg a ciklust
+                                    try:
+                                        self._close_sim_by_index('buy', i, px_for_mgmt)
+                                    except Exception as e:
+                                        self._safe_log(f"❌ SIM long zárás hiba: {e}\n")
+                                        i += 1
+                                        continue
                                 else:
-                                    self._safe_log("❗ LIVE zárás sikertelen – a pozíció nyitva marad.\n")
-                                    i += 1
-                                    continue
+                                    # LIVE zárás – API/egyéb hiba itt is lokálisan kezelt
+                                    ok = False
+                                    try:
+                                        ok = self._live_close_pos(
+                                            'buy', pos, px_for_mgmt,
+                                            symbol=symbol, mode=mode, lev=lev
+                                        )
+                                    except Exception as e:
+                                        self._safe_log(f"❌ LIVE long zárás hiba: {e}\n")
+                                        ok = False
+
+                                    if ok:
+                                        # csak sikeres LIVE zárás után tükörzárunk SIM-ben
+                                        try:
+                                            self._close_sim_by_index('buy', i, px_for_mgmt)
+                                        except Exception as e:
+                                            self._safe_log(f"❌ SIM tükrözés hiba (long): {e}\n")
+                                            i += 1
+                                            continue
+                                    else:
+                                        self._safe_log(
+                                            "❗ LIVE zárás sikertelen – a long pozíció nyitva marad.\n"
+                                        )
+                                        i += 1
+                                        continue
+
+                                # sikeres zárásnál a lista rövidebb lett, ezért i-t nem növeljük
+                                continue
+
+                        except Exception as e:
+                            # bármilyen más hiba a menedzsmentben – ne dőljön el a teljes worker
+                            self._safe_log(f"❌ Long pozíció menedzsment hiba: {e}\n")
+                            i += 1
                             continue
+
+                        # ha nem kellett zárni és nem volt hiba → következő pozíció
                         i += 1
 
                     # SELL-ek kezelése
                     i = 0
                     while i < len(self._sim_pos_short):
                         pos = self._sim_pos_short[i]
-                        need_close = False
-                        if pos.get('mgmt') == 'atr' and atr_val is not None:
-                            need_close = _manage_atr_on_pos(pos, px_for_mgmt, atr_val)
-                        elif pos.get('mgmt') == 'fixed':
-                            need_close = _manage_fixed_on_pos(pos, px_for_mgmt)
-                        if need_close:
-                            if dry:
-                                self._close_sim_by_index('sell', i, px_for_mgmt)
-                            else:
-                                ok = self._live_close_pos('sell', pos, px_for_mgmt, symbol=symbol, mode=mode, lev=lev)
-                                if ok:
-                                    self._close_sim_by_index('sell', i, px_for_mgmt)
+                        try:
+                            need_close = False
+                            if pos.get('mgmt') == 'atr' and atr_val is not None:
+                                need_close = _manage_atr_on_pos(pos, px_for_mgmt, atr_val)
+                            elif pos.get('mgmt') == 'fixed':
+                                need_close = _manage_fixed_on_pos(pos, px_for_mgmt)
+
+                            if need_close:
+                                if dry:
+                                    # SIM zárás – külön guard
+                                    try:
+                                        self._close_sim_by_index('sell', i, px_for_mgmt)
+                                    except Exception as e:
+                                        self._safe_log(f"❌ SIM short zárás hiba: {e}\n")
+                                        i += 1
+                                        continue
                                 else:
-                                    self._safe_log("❗ LIVE zárás sikertelen – a pozíció nyitva marad.\n")
-                                    i += 1
-                                    continue
+                                    ok = False
+                                    try:
+                                        ok = self._live_close_pos(
+                                            'sell', pos, px_for_mgmt,
+                                            symbol=symbol, mode=mode, lev=lev
+                                        )
+                                    except Exception as e:
+                                        self._safe_log(f"❌ LIVE short zárás hiba: {e}\n")
+                                        ok = False
+
+                                    if ok:
+                                        try:
+                                            self._close_sim_by_index('sell', i, px_for_mgmt)
+                                        except Exception as e:
+                                            self._safe_log(f"❌ SIM tükrözés hiba (short): {e}\n")
+                                            i += 1
+                                            continue
+                                    else:
+                                        self._safe_log(
+                                            "❗ LIVE zárás sikertelen – a short pozíció nyitva marad.\n"
+                                        )
+                                        i += 1
+                                        continue
+
+                                # sikeres zárásnál itt is lista-rövidülés → i-t nem növeljük
+                                continue
+
+                        except Exception as e:
+                            self._safe_log(f"❌ Short pozíció menedzsment hiba: {e}\n")
+                            i += 1
                             continue
+
                         i += 1
 
                     # --- ÚJ NYITÁS (cooldown + pool limit) ---
