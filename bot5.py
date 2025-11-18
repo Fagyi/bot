@@ -3080,6 +3080,7 @@ class CryptoBotApp:
 
         # History segéd-struktúrák
         self._mb_hist_rows_by_oid = {}
+        self._mb_hist_tv.bind("<Button-3>", self._mb_hist_on_rclick)
 
         # 2) Bot napló fül
         tab_log = ttk.Frame(right_nb)
@@ -3491,6 +3492,215 @@ class CryptoBotApp:
             self._bg(fetch_rt, apply, fail)
         finally:
             self._mb_hist_pnl_job = self.root.after(5000, self._mb_hist_pnl_tick)
+
+    def _mb_hist_on_rclick(self, event):
+        """Jobb klikk a LIVE History táblán – kontextusmenü (csak a kattintott sorra)."""
+        tv = getattr(self, "_mb_hist_tv", None)
+        if tv is None:
+            return
+
+        row_id = tv.identify_row(event.y)
+        if not row_id:
+            return
+
+        # Jelöld ki a sort, amin jobb klikkeltél
+        tv.selection_set(row_id)
+
+        import tkinter as tk
+
+        vals = tv.item(row_id, "values") or ()
+        # Várjuk: (timestamp, side, entry, exit, size, lev, fee, pnl, orderId)
+        if len(vals) < 9:
+            return
+
+        ts, side, entry, exit_px, size, lev, fee, pnl, oid = vals
+        exit_px_s = str(exit_px or "").strip()
+        status = "open" if exit_px_s == "" else "closed"
+
+        menu = tk.Menu(tv, tearoff=0)
+        menu.add_command(
+            label="Részletek…",
+            command=lambda row_vals=vals: self._mb_hist_show_details(row_vals)
+        )
+
+        # Manuális zárás csak NYITOTT pozícióra legyen elérhető
+        if status == "open":
+            menu.add_command(
+                label="Manuális zárás (LIVE)",
+                command=lambda oid=str(oid): self._mb_hist_manual_close(oid)
+            )
+
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _mb_hist_show_details(self, row_vals):
+        """Részletek egy history sorhoz – közvetlenül a Treeview értékeiből."""
+        from tkinter import messagebox
+
+        try:
+            ts, side, entry, exit_px, size, lev, fee, pnl, oid = row_vals
+        except Exception:
+            messagebox.showinfo("Pozíció részletei", "Nem sikerült beolvasni a sor adatait.")
+            return
+
+        exit_s = str(exit_px or "").strip()
+        status = "open" if exit_s == "" else "closed"
+
+        lines = [
+            f"Időbélyeg: {ts}",
+            f"Irány: {side}",
+            f"Státusz: {status}",
+            f"Belépő ár: {entry}",
+            f"Kilépő ár: {exit_s or '-'}",
+            f"Méret: {size}",
+            f"Tőkeáttét: {lev}",
+            f"Díj: {fee}",
+            f"PNL: {pnl}",
+            f"Order ID: {oid}",
+        ]
+
+        messagebox.showinfo("Pozíció részletei", "\n".join(lines))
+
+    def _mb_hist_manual_close(self, oid: str):
+        """Manuális LIVE zárás a history táblából jobb klikkre (csak a kijelölt pozíció!)."""
+        from tkinter import messagebox
+
+        oid = str(oid)
+
+        # 1) History sorból kinyerünk infot (exit ár alapján eldöntjük, nyitott-e)
+        tv = getattr(self, "_mb_hist_tv", None)
+        if not tv:
+            return
+
+        # Find tree item by oid (orderId oszlop = index 8)
+        row_id = None
+        for rid in tv.get_children(""):
+            vals = tv.item(rid, "values") or ()
+            if len(vals) >= 9 and str(vals[8]) == oid:
+                row_id = rid
+                break
+
+        if not row_id:
+            messagebox.showerror("Manuális zárás", f"Nem találom a history sort ehhez az OID-hoz:\n{oid}")
+            return
+
+        vals = tv.item(row_id, "values") or ()
+        if len(vals) < 9:
+            messagebox.showerror("Manuális zárás", "A history sor formátuma nem megfelelő.")
+            return
+
+        ts, side_txt, entry_s, exit_s, size_s, lev_s, fee_s, pnl_s, oid_row = vals
+        exit_s = str(exit_s or "").strip()
+        status = "open" if exit_s == "" else "closed"
+
+        if status != "open":
+            messagebox.showinfo("Manuális zárás", "Ez a pozíció már zárva van a history szerint.")
+            return
+
+        # 2) Megkeressük a szimulált pozíciót OID alapján
+        sim_list = None
+        sim_index = None
+        sim_side_for_close = None  # 'buy' (long) vagy 'sell' (short) – az eredeti nyitó oldal
+        sim_pos = None
+
+        for lst_name, logical_side in [("_sim_pos_long", "buy"), ("_sim_pos_short", "sell")]:
+            lst = getattr(self, lst_name, [])
+            for i, pos in enumerate(lst):
+                if str(pos.get("oid")) == oid:
+                    sim_list = lst
+                    sim_index = i
+                    sim_side_for_close = logical_side
+                    sim_pos = pos
+                    break
+            if sim_list is not None:
+                break
+
+        if sim_list is None or sim_index is None or sim_pos is None:
+            messagebox.showerror("Manuális zárás", "Nem találom a szimulált pozíciót ehhez az OID-hoz.")
+            return
+
+        # 3) Megerősítés – méret/entry a szimulált poziból
+        qty = sim_pos.get("size")
+        entry = sim_pos.get("entry")
+
+        # Symbol: a MarginBot aktuális párja / cfg-je
+        try:
+            symbol = normalize_symbol(
+                self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL))
+            )
+        except Exception:
+            cfg = getattr(self, "_mb_cfg", {}) or {}
+            symbol = cfg.get("symbol") or DEFAULT_SYMBOL
+
+        if not messagebox.askyesno(
+            "Manuális zárás (LIVE)",
+            f"Biztosan zárod ezt a pozíciót?\n\n"
+            f"Symbol: {symbol}\n"
+            f"Irány: {sim_side_for_close.upper()}\n"
+            f"Méret: {qty}\n"
+            f"Entry: {entry}\n\n"
+            f"OID: {oid}"
+        ):
+            return
+
+        # 4) Aktuális ár (px_for_mgmt) – cache-ből vagy fetch_last_price-ból
+        try:
+            last_px = None
+            try:
+                # van-e cache-elt RT ár?
+                last_px = float((getattr(self, "_mb_last_rt_px", {}) or {}).get(symbol, float("nan")))
+            except Exception:
+                last_px = float("nan")
+
+            # ha nincs használható cache-elt ár → lekérdezzük a last price-t
+            if not last_px or not (last_px == last_px) or last_px <= 0:
+                with self._ex_lock:
+                    last_px = float(self.exchange.fetch_last_price(symbol))
+
+        except Exception as e:
+            self._safe_log(f"⚠ Manuális zárás – árlekérdezési hiba: {e}\n")
+            messagebox.showerror("Manuális zárás", f"Nem sikerült lekérni az aktuális árat:\n{e}")
+            return
+
+        # 5) Margin mód + leverage a cfg-ből
+        cfg = getattr(self, "_mb_cfg", {}) or {}
+        mode = cfg.get("mode", "isolated")
+        lev = int(cfg.get("leverage", 10))
+
+        # 6) LIVE zárás CSAK erre a pozícióra
+        ok_live = False
+        try:
+            ok_live = self._live_close_pos(
+                side=sim_side_for_close,  # a POZÍCIÓ eredeti nyitó iránya
+                pos=sim_pos,
+                close_px=last_px,
+                symbol=symbol,
+                mode=mode,
+                lev=lev,
+                is_sl_tp=False,
+                is_manual=True,
+            )
+        except Exception as e:
+            self._safe_log(f"❌ Manuális LIVE zárási hiba (history): {e}\n")
+
+        if not ok_live:
+            messagebox.showerror("Manuális zárás", "A LIVE zárás nem sikerült. Részletek a logban.")
+            return
+
+        # 7) SIM zárás – EGYETLEN pozícióra
+        try:
+            self._close_sim_by_index(
+                side=sim_side_for_close,
+                idx=sim_index,
+                close_px=last_px,
+                reason="manual_hist_close",
+            )
+        except Exception as e:
+            self._safe_log(f"⚠️ Manuális SIM zárás hiba (history): {e}\n")
+
+        messagebox.showinfo("Manuális zárás", "A pozíció zárási megbízása elküldve (LIVE + SIM).")
 
     # === ORDER SANITIZER: lot_step/price_step/minBase/minFunds + padlózás ===
     def _mb_sanitize_order(
