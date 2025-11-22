@@ -22,6 +22,7 @@ import threading
 # -------- 3rd party --------
 import requests
 import pandas as pd
+import websocket  # websocket-client
 
 # Tkinter
 import tkinter as tk
@@ -43,7 +44,6 @@ try:
     from kucoin_universal_sdk.api import DefaultClient as KucoinClient
     from kucoin_universal_sdk.model import ClientOptionBuilder, TransportOptionBuilder
     from kucoin_universal_sdk.model import GLOBAL_API_ENDPOINT, GLOBAL_FUTURES_API_ENDPOINT, GLOBAL_BROKER_API_ENDPOINT
-    import websocket  # websocket-client
 except Exception:
     SDK_AVAILABLE = False
 
@@ -114,6 +114,181 @@ def split_symbol(s: str) -> tuple[str, str]:
         raise ValueError(f"Érvénytelen symbol: '{s}' (várt forma: BASE-QUOTE)")
     base, quote = s.split("-", 1)
     return base, quote
+
+class KucoinTickerWS:
+    """
+    Egyszerű KuCoin public ticker websocket:
+      - /market/ticker:{symbol}
+      - csak last price-et cache-eli
+      - reconnectel, ha kapcsolat elszáll
+    """
+    def __init__(self, symbol: str, log_fn=None):
+        self.symbol = normalize_symbol(symbol)
+        self._log = log_fn or (lambda *_a, **_k: None)
+
+        self._last_price = 0.0
+        self._last_ts_ms = 0
+        self._lock = threading.RLock()
+
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._ws = None
+
+        # saját HTTP session a bullet-public tokenhez
+        import requests
+        self._http = requests.Session()
+        self._base_url = "https://api.kucoin.com"
+
+    # --- publikus API a GUI felé ---
+
+    def start(self):
+        """Háttérszál indítása (idempotens)."""
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(
+            target=self._run_loop,
+            name="KucoinTickerWS",
+            daemon=True
+        )
+        self._thread.start()
+
+    def stop(self):
+        """Szál leállítása + websocket lezárása."""
+        self._running = False
+        ws = self._ws
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+    def set_symbol(self, symbol: str):
+        """Aktív szimbólum váltása (pl. SOL-USDT → BTC-USDT)."""
+        sym = normalize_symbol(symbol)
+        with self._lock:
+            self.symbol = sym
+        # nem kötelező reconnect, a topicot a message.topic alapján szűrjük
+
+    def get_last_price(self) -> float:
+        """Legutóbbi last price (ha nincs, 0.0)."""
+        with self._lock:
+            return float(self._last_price or 0.0)
+
+    # --- belső segédek ---
+
+    def _run_loop(self):
+        """Reconnect loop – ha a kapcsolat elszáll, újraépítjük."""
+        import time as _t
+        while self._running:
+            try:
+                url, ping_int, ping_to = self._get_ws_url()
+                self._log(f"🌐 WS connect: {url}\n")
+
+                ws = websocket.WebSocketApp(
+                    url,
+                    on_open=self._on_open,
+                    on_message=self._on_message,
+                    on_error=self._on_error,
+                    on_close=self._on_close,
+                )
+                self._ws = ws
+
+                # ping_interval/timeout ms → s
+                pi = (ping_int or 20000) / 1000.0
+                pt = (ping_to or 10000) / 1000.0
+
+                ws.run_forever(ping_interval=pi, ping_timeout=pt)
+            except Exception as e:
+                self._log(f"❌ WS hiba (loop): {e}\n")
+            finally:
+                self._ws = None
+
+            if self._running:
+                self._log("🔁 WS reconnect 5s múlva…\n")
+                _t.sleep(5.0)
+
+    def _get_ws_url(self):
+        """
+        bullet-public token lehívása (public websocket).
+        POST https://api.kucoin.com/api/v1/bullet-public
+        """
+        r = self._http.post(self._base_url + "/api/v1/bullet-public", timeout=8)
+        r.raise_for_status()
+        data = (r.json() or {}).get("data", {}) or {}
+        token = data.get("token", "")
+        inst_list = data.get("instanceServers") or []
+        if not inst_list:
+            raise RuntimeError("Nincs instanceServers a bullet-public válaszban.")
+        inst = inst_list[0]
+        endpoint = inst.get("endpoint")
+        if not endpoint:
+            raise RuntimeError("Nincs endpoint a bullet-public válaszban.")
+        ping_interval = inst.get("pingInterval", 20000)
+        ping_timeout  = inst.get("pingTimeout", 10000)
+        url = f"{endpoint}?token={token}"
+        return url, ping_interval, ping_timeout
+
+    # --- websocket callbackek ---
+
+    def _on_open(self, ws):
+        try:
+            sym = None
+            with self._lock:
+                sym = self.symbol
+            topic = f"/market/ticker:{sym}"
+            msg = {
+                "id": str(int(time.time() * 1000)),
+                "type": "subscribe",
+                "topic": topic,
+                "privateChannel": False,
+                "response": True,
+            }
+            ws.send(json.dumps(msg))
+            self._log(f"✅ WS subscribed: {topic}\n")
+        except Exception as e:
+            self._log(f"❌ WS on_open hiba: {e}\n")
+
+    def _on_message(self, ws, message: str):
+        try:
+            data = json.loads(message)
+        except Exception:
+            return
+
+        if data.get("type") != "message":
+            return
+
+        topic = data.get("topic", "") or ""
+        # csak az aktuális symbolra figyelünk
+        with self._lock:
+            cur_sym = self.symbol
+        if not topic.endswith(cur_sym):
+            return
+
+        d = data.get("data") or {}
+        price_s = d.get("price") or d.get("lastPrice") or d.get("last")
+        if not price_s:
+            return
+
+        try:
+            px = float(price_s)
+        except Exception:
+            return
+
+        ts = d.get("Time") or d.get("time") or d.get("ts") or int(time.time() * 1000)
+
+        with self._lock:
+            self._last_price = px
+            try:
+                self._last_ts_ms = int(ts)
+            except Exception:
+                self._last_ts_ms = int(time.time() * 1000)
+
+    def _on_error(self, ws, error):
+        self._log(f"❌ WS error: {error}\n")
+
+    def _on_close(self, ws, *args):
+        self._log("⚠️ WS closed.\n")
 
 # ========= KuCoin Wrapper =========
 class KucoinSDKWrapper:
@@ -659,6 +834,10 @@ class CryptoBotApp:
         self.exchange: Optional[KucoinSDKWrapper] = None
         self.public_mode = tk.BooleanVar(value=PUBLIC_MODE_DEFAULT)
         self.symbols: list[str] = [DEFAULT_SYMBOL]
+
+        # --- Globális ticker websocket manager (KuCoin public) ---
+        self._ticker_ws: Optional[KucoinTickerWS] = None
+        self._ticker_ws_symbol: Optional[str] = None
 
         self._init_styles()
 
@@ -1531,6 +1710,37 @@ class CryptoBotApp:
         for parent, index, iid, values in inserts:
             tv.insert(parent, index, iid=iid, values=values)
 
+    # ---- WS ----
+    def _ensure_ticker_ws(self, symbol: str):
+        """
+        Gondoskodik arról, hogy fusson egy KucoinTickerWS az adott symbol-ra.
+        Egyetlen globális WS kapcsolat, az aktív symbol alapján.
+        """
+        try:
+            sym = normalize_symbol(symbol)
+        except Exception:
+            return
+
+        # Ha ugyanaz a symbol és már fut, nincs teendő
+        if getattr(self, "_ticker_ws", None) is not None and self._ticker_ws_symbol == sym:
+            return
+
+        if self._ticker_ws is None:
+            try:
+                self._ticker_ws = KucoinTickerWS(sym, log_fn=self._safe_log)
+                self._ticker_ws.start()
+                self._ticker_ws_symbol = sym
+                self._safe_log(f"🚀 Ticker WS elindítva: {sym}\n")
+            except Exception as e:
+                self._safe_log(f"❌ Ticker WS start hiba: {e}\n")
+        else:
+            try:
+                self._ticker_ws.set_symbol(sym)
+                self._ticker_ws_symbol = sym
+                self._safe_log(f"🔄 Ticker WS symbol váltás: {sym}\n")
+            except Exception as e:
+                self._safe_log(f"❌ Ticker WS symbol váltás hiba: {e}\n")
+
     # ---- price loop ----
     def _mt_start_price_loop(self):
         if self._mt_price_job:
@@ -1549,6 +1759,27 @@ class CryptoBotApp:
 
                 sym = normalize_symbol(self.mt_symbol.get())
 
+                # --- Websocket ár próba ---
+                try:
+                    self._ensure_ticker_ws(sym)
+                except Exception:
+                    pass
+
+                px_ws = 0.0
+                try:
+                    if getattr(self, "_ticker_ws", None) is not None:
+                        px_ws = float(self._ticker_ws.get_last_price() or 0.0)
+                except Exception:
+                    px_ws = 0.0
+
+                if px_ws > 0:
+                    # Ha van élő ár, REST hívás nélkül frissítünk
+                    self._mt_price_inflight = False
+                    self.mt_price_lbl.config(text=f"Ár: {px_ws:.6f}")
+                    self._mt_update_estimate(px_ws)
+                    return
+
+                # --- REST fallback, ha még nincs websocket ár ---
                 def fetch():
                     px = 0.0
                     if self.exchange:
@@ -1566,7 +1797,8 @@ class CryptoBotApp:
 
                 self._bg(fetch, apply, fail)
             finally:
-                self._mt_price_job = self.root.after(1000, _tick)  # kicsit sűrűbb, de nem akaszt
+                # 1s-enként polloljuk a websocket/REST kombót
+                self._mt_price_job = self.root.after(1000, _tick)
 
         self._mt_price_job = self.root.after(100, _tick)
 
@@ -3193,6 +3425,18 @@ class CryptoBotApp:
 
                 # EMA-k
                 close = df["c"].astype(float)
+
+                # --- Websocket élő ár integráció ---
+                try:
+                    if getattr(self, "_ticker_ws", None) is not None:
+                        rt = float(self._ticker_ws.get_last_price() or 0.0)
+                        if rt > 0:
+                            # utolsó gyertya záróárát kicseréljük az élő árra
+                            close.iloc[-1] = rt
+                            df.loc[df.index[-1], "c"] = rt
+                except Exception:
+                    pass
+
                 ema_f = close.ewm(span=fa, adjust=False).mean()
                 ema_s = close.ewm(span=slw, adjust=False).mean()
 
@@ -4476,6 +4720,7 @@ class CryptoBotApp:
 
         def _manage_atr_on_pos(pos: dict, last_px: float, atr_val: float) -> bool:
             side = pos['side']
+            # last_px itt px_for_mgmt, ami WS-alapú, ha elérhető  ### WS-PEAK
             if side == 'buy' and last_px > pos['peak']: pos['peak'] = last_px
             if side == 'sell' and last_px < pos['peak']: pos['peak'] = last_px
 
@@ -4502,6 +4747,7 @@ class CryptoBotApp:
             side  = pos['side']
             entry = float(pos['entry'])
             sz    = float(pos['size'])
+            # last_px itt is px_for_mgmt → WS-alapú, ha elérhető  ### WS-PEAK
             if side == 'buy' and last_px > pos['peak']: pos['peak'] = float(last_px)
             if side == 'sell' and last_px < pos['peak']: pos['peak'] = float(last_px)
 
@@ -4585,24 +4831,43 @@ class CryptoBotApp:
                     invert_ema     = bool(cfg.get("invert_ema", False))
                     ema_hyst_pct   = float(cfg.get("ema_hyst_pct", 1.0))
 
-                    # --- OHLCV ---
-                    with self._ex_lock:
-                        ohlcv = self.exchange.fetch_ohlcv(symbol, tf, limit=200)  # type: ignore[arg-type]
-                    if not ohlcv:
-                        self._safe_log("⚠️ Nincs candle adat.\n")
-                        time.sleep(2); continue
+                    # --- OHLCV frissítés csak ha új candle jött ---  ### WS-REST-OPT
+                    now_ts = int(time.time())
 
-                    df = pd.DataFrame(ohlcv, columns=['ts','o','h','l','c','v'])
-                    last_ts = int(df['ts'].iloc[-1])
+                    # gyertya hossza másodpercben
+                    tf_sec = {
+                        "1m":60, "3m":180, "5m":300, "15m":900, "30m":1800,
+                        "1h":3600, "2h":7200, "4h":14400, "6h":21600,
+                        "8h":28800, "12h":43200, "1d":86400
+                    }.get(tf, 60)
+
                     key = (symbol, tf)
-                    if getattr(self, "_mb_first_cycle", False):
-                        self._mb_first_cycle = False
+                    prev_ts = self._mb_last_bar_ts.get(key, 0)
+                    need_refresh = False
+
+                    if prev_ts == 0:
+                        # első kör ennél a symbol/tf-nél → kell egy teljes OHLCV
+                        need_refresh = True
                     else:
-                        if self._mb_last_bar_ts.get(key, 0) == last_ts:
+                        # ha túl vagyunk a candle végén → új candle
+                        if now_ts - prev_ts >= tf_sec:
+                            need_refresh = True
+
+                    if need_refresh or not hasattr(self, "_mb_last_df"):
+                        with self._ex_lock:
+                            ohlcv = self.exchange.fetch_ohlcv(symbol, tf, limit=200)
+                        if not ohlcv:
+                            self._safe_log("⚠️ Nincs candle adat.\n")
                             time.sleep(2)
                             continue
 
-                    self._mb_last_bar_ts[key] = last_ts
+                        df = pd.DataFrame(ohlcv, columns=['ts','o','h','l','c','v'])
+                        last_ts = int(df['ts'].iloc[-1])
+                        self._mb_last_bar_ts[key] = last_ts
+                        self._mb_last_df = df.copy()
+                    else:
+                        df = self._mb_last_df.copy()
+                        last_ts = int(df["ts"].iloc[-1])
 
                     closes = df['c'].astype(float).tolist()
                     last_px = float(closes[-1])
@@ -4613,18 +4878,56 @@ class CryptoBotApp:
                         self._safe_log("⚠️ Érvénytelen ár (0/NaN) – ciklus kihagyva.\n")
                         time.sleep(2)
                         continue
+
+                    used_ws_price = False  # ### WS-FLAG: jelezzük, ha a last_px_rt tényleg websocketből jött
+
+                    # --- Websocket ár preferált, REST csak fallbackként ---  ### WS-PRIMARY
                     try:
-                        with self._ex_lock:
-                            rt = float(self.exchange.fetch_last_price(symbol))
-                        if rt > 0:
-                            last_px_rt = rt
+                        self._ensure_ticker_ws(symbol)
                     except Exception:
                         pass
 
-                    px_for_mgmt = last_px_rt if (last_px_rt and last_px_rt > 0) else last_px
-
                     try:
-                        drift_pct = abs(last_px_rt - last_px) / max(last_px, 1e-12) * 100.0
+                        if getattr(self, "_ticker_ws", None) is not None:
+                            rt_ws = float(self._ticker_ws.get_last_price() or 0.0)
+                            if self._is_pos_num(rt_ws) and rt_ws > 0:
+                                last_px_rt = rt_ws
+                                used_ws_price = True
+                        # csak ha NINCS használható WS ár, akkor REST
+                        if (not used_ws_price) and self.exchange:
+                            with self._ex_lock:
+                                rt_rest = float(self.exchange.fetch_last_price(symbol))
+                            if self._is_pos_num(rt_rest) and rt_rest > 0:
+                                last_px_rt = rt_rest
+                    except Exception:
+                        pass
+
+                    # --- Élő high/low/close frissítés a legutóbbi gyertyára WS alapján ---  ### WS-HIGH/LOW
+                    try:
+                        if self._is_pos_num(last_px_rt) and last_px_rt > 0:
+                            idx_last = df.index[-1]
+                            h_last = float(df.loc[idx_last, 'h'])
+                            l_last = float(df.loc[idx_last, 'l'])
+                            if last_px_rt > h_last:
+                                df.loc[idx_last, 'h'] = last_px_rt
+                            if last_px_rt < l_last:
+                                df.loc[idx_last, 'l'] = last_px_rt
+                            # close is menjen a legutolsó tickre
+                            df.loc[idx_last, 'c'] = last_px_rt
+
+                        # cache frissítése, hogy a következő körben is a WS-sel módosított df-et kapjuk
+                        self._mb_last_df = df.copy()
+                    except Exception:
+                        pass
+
+                    px_for_mgmt = last_px_rt if (self._is_pos_num(last_px_rt) and last_px_rt > 0) else last_px
+
+                    # --- drift csak akkor, ha TÉNYLEG WS árunk van ---  ### WS-DRIFT
+                    try:
+                        if used_ws_price and self._is_pos_num(last_px):
+                            drift_pct = abs(last_px_rt - last_px) / max(last_px, 1e-12) * 100.0
+                        else:
+                            drift_pct = float("nan")
                     except Exception:
                         drift_pct = float("nan")
 
@@ -4669,6 +4972,7 @@ class CryptoBotApp:
 
                     brk_sig, hh, ll, up_lvl, dn_lvl = ("hold", float("nan"), float("nan"), float("nan"), float("nan"))
                     if use_brk:
+                        # _mb_breakout_signal már az élő high/low-val módosított df-et látja  ### WS-HIGH/LOW
                         brk_sig, hh, ll, up_lvl, dn_lvl = self._mb_breakout_signal(df, brk_n, brk_buf)
                         if brk_with_trend and use_htf:
                             if (brk_sig == 'buy' and trend_htf < 0) or (brk_sig == 'sell' and trend_htf > 0):
@@ -4680,13 +4984,16 @@ class CryptoBotApp:
                             shock_pct = max(0.0, live_shock_pct)
                             shock_atr_mul = max(0.0, live_shock_atr)
 
-                            try:
-                                with self._ex_lock:
-                                    rt_tmp = float(self.exchange.fetch_last_price(symbol))
-                                if rt_tmp > 0:
-                                    last_px_rt = rt_tmp
-                            except Exception:
-                                pass
+                            # Itt már a ciklus eleji last_px_rt-et használjuk.
+                            # Ha valamiért 0/NaN, végső fallback lehet REST:
+                            if not self._is_pos_num(last_px_rt) and self.exchange:
+                                try:
+                                    with self._ex_lock:
+                                        rt_tmp = float(self.exchange.fetch_last_price(symbol))
+                                    if rt_tmp > 0:
+                                        last_px_rt = rt_tmp
+                                except Exception:
+                                    pass
 
                             live_break_up = (use_brk and not math.isnan(up_lvl) and last_px_rt >= up_lvl)
                             live_break_dn = (use_brk and not math.isnan(dn_lvl) and last_px_rt <= dn_lvl)
@@ -4935,14 +5242,15 @@ class CryptoBotApp:
                             time.sleep(1)
                             continue
 
-                        # friss ticker csak nyitás előtt / vagy LIVE módban
-                        try:
-                            with self._ex_lock:
-                                rt = float(self.exchange.fetch_last_price(symbol))
-                            if rt > 0:
-                                last_px_rt = rt
-                        except Exception:
-                            pass
+                        # friss ticker: WS az első, REST csak ha nincs használható WS ár  ### WS-OPEN
+                        if (not self._is_pos_num(last_px_rt)) or last_px_rt <= 0:
+                            try:
+                                with self._ex_lock:
+                                    rt = float(self.exchange.fetch_last_price(symbol))
+                                if rt > 0:
+                                    last_px_rt = rt
+                            except:
+                                pass
 
                         free_pool = max(0.0, self._pool_balance_quote - self._pool_used_quote)
                         sizep_to_use = max(0.0, min(100.0, float(sizep)))
@@ -5168,6 +5476,7 @@ class CryptoBotApp:
 
                                             pnl_est = None
                                             try:
+                                                # itt is lehetne WS-first, de ez csak becsült PnL log  ### opcionális
                                                 with self._ex_lock:
                                                     rt_now = float(self.exchange.fetch_last_price(symbol))
                                                 if rt_now > 0:
@@ -5212,13 +5521,12 @@ class CryptoBotApp:
                     except Exception:
                         pass
 
-                    # --- TF-hez igazított alvás ---
-                    tf_sec = {
-                        "1m":60, "3m":180, "5m":300, "15m":900, "30m":1800,
-                        "1h":3600, "2h":7200, "4h":14400, "6h":21600,
-                        "8h":28800, "12h":43200, "1d":86400
-                    }.get(tf, 30)
-                    _sleep_total = max(2, min(30, tf_sec // 3))
+                    # --- TF-hez igazított alvás, websocket-tel gyorsítva ---  ### WS-SLEEP
+                    if getattr(self, "_ticker_ws", None) is not None:
+                        # ha él a realtime WS ár, tickeljünk gyorsabban
+                        _sleep_total = 1
+                    else:
+                        _sleep_total = max(2, min(30, tf_sec // 3))
                     for _ in range(int(_sleep_total)):
                         if not self._mb_running:
                             break
@@ -5903,7 +6211,7 @@ class CryptoBotApp:
     def on_close(self):
         """
         Piros X-re:
-          1) mindkét bot kulturált leállítása,
+          1) mindkét bot + WS kulturált leállítása,
           2) futó frissítések megvárása nem-blokkoló módon,
           3) végül ablak bezárása.
         """
@@ -5930,6 +6238,14 @@ class CryptoBotApp:
         except Exception as e:
             try: self._safe_log(f"⚠️ mb_stop hiba: {e}\n")
             except Exception: pass
+
+        try:
+            # Websocket ticker kulturált leállítása
+            ws = getattr(self, "_ticker_ws", None)
+            if ws is not None:
+                ws.stop()
+        except Exception:
+            pass
 
         # 2) nem-blokkoló poll amíg minden el nem állt
         try:
