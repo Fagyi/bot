@@ -290,6 +290,334 @@ class KucoinTickerWS:
     def _on_close(self, ws, *args):
         self._log("⚠️ WS closed.\n")
 
+class KucoinPrivateOrderWS:
+    """
+    Privát KuCoin Spot/Margin order WebSocket manager (/spotMarket/tradeOrdersV2).
+
+    - bullet-private tokennel csatlakozik
+    - /spotMarket/tradeOrdersV2 topicra iratkozik fel
+    - buffereli az érkező trade/order üzeneteket
+    - orderId -> összesített fee + filled size map-et tart fenn
+    - hibatűrő reconnect + ping_interval alapján heartbeat (run_forever pinggel)
+    """
+
+    def __init__(self, rest_post_func, log_func, max_buf: int = 1000):
+        """
+        rest_post_func: pl. self._rest_post  (path: str, data: dict|None) -> dict
+        log_func:       pl. self._safe_log  (msg: str) -> None
+        """
+        import collections
+
+        self._rest_post = rest_post_func
+        self._log = log_func
+
+        self._ws = None
+        self._running = False
+        self._thread = None
+
+        self._lock = threading.Lock()
+        self._msg_buf = collections.deque(maxlen=max_buf)
+        self._order_info = {}  # orderId -> {"fee": float, "filled": float, "symbol": str, "ts": int}
+
+        self._ws_url = None
+        self._ping_interval = 15.0
+        self._ping_timeout = 10.0
+
+        self._last_msg_ts = 0.0
+
+    # --- public API ---
+
+    def start(self):
+        if self._running:
+            return
+        self._running = True
+        t = threading.Thread(target=self._run, name="KucoinPrivateOrderWS", daemon=True)
+        self._thread = t
+        t.start()
+
+    def stop(self):
+        self._running = False
+        ws = self._ws
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+    def is_running(self) -> bool:
+        return bool(self._running)
+
+    def get_fee_for_order(self, order_id: str):
+        if not order_id:
+            return None
+        with self._lock:
+            info = self._order_info.get(str(order_id))
+            if not info:
+                return None
+            return float(info.get("fee", 0.0))
+
+    def wait_for_fee(self, order_id: str, timeout: float = 0.7, poll: float = 0.05):
+        """
+        Blokkoló, rövid várakozás: megpróbálja megvárni, hogy WS-en megjöjjön a fee.
+
+        timeout: összesen ennyit vár (sec)
+        poll:   két próbálkozás között ennyit alszik
+        """
+        import time as _t
+
+        if not order_id:
+            return None
+        order_id = str(order_id)
+
+        end_ts = _t.time() + max(0.0, timeout)
+        last_fee = None
+
+        while _t.time() < end_ts:
+            with self._lock:
+                info = self._order_info.get(order_id)
+            if info:
+                fee = float(info.get("fee", 0.0))
+                # ha 0, lehet, hogy még nem jött meg minden fill
+                last_fee = fee
+                if fee > 0:
+                    return fee
+            _t.sleep(max(0.0, poll))
+
+        return last_fee
+
+    def get_fill_agg(self, order_id: str, timeout: float = 0.7, poll: float = 0.05):
+        """
+        Egy adott order összesített filled/fee adata WS bufferből, KIS várakozással.
+
+        Visszatérés:
+          (filled_base, filled_quote, fee_quote)
+
+        - timeout: összesen ennyit várunk max (sec)
+        - poll:   két próbálkozás között ennyit alszunk
+
+        Logika:
+          1) Azonnal megnézzük, van-e már info az orderId-re.
+          2) Ha nincs vagy filled == 0, rövid ideig poll-oljuk az order buffert.
+          3) Ha jön adat (filled > 0 vagy fee > 0), azt adjuk vissza.
+          4) Ha semmi értelmes adat nem jön, (0,0,0)-t adunk vissza.
+        """
+        import time as _t
+
+        if not order_id:
+            return 0.0, 0.0, 0.0
+
+        oid = str(order_id)
+
+        # összesen eddig várunk
+        end_ts = _t.time() + max(0.0, float(timeout))
+        poll = max(0.0, float(poll))
+
+        last_fb = None
+        last_fq = None
+        last_fee = None
+
+        while _t.time() < end_ts:
+            with self._lock:
+                info = self._order_info.get(oid)
+
+            if info:
+                fb = float(info.get("filled", 0.0) or 0.0)
+                fq = float(info.get("filled_quote", 0.0) or 0.0)
+                fee = float(info.get("fee", 0.0) or 0.0)
+
+                # eltároljuk az utolsó látott értékeket
+                last_fb = fb
+                last_fq = fq
+                last_fee = fee
+
+                # ha már van érdemi filled (vagy fee), elég jó nekünk
+                if fb > 0.0 or fee > 0.0:
+                    return float(fb), float(fq), float(fee)
+
+            if poll > 0:
+                _t.sleep(poll)
+            else:
+                break  # poll=0 → csak egyszer nézünk rá
+
+        # timeout: ha láttunk már valamit, azt adjuk vissza, egyébként 0-kat
+        if last_fb is not None or last_fee is not None:
+            return float(last_fb or 0.0), float(last_fq or 0.0), float(last_fee or 0.0)
+
+        return 0.0, 0.0, 0.0
+
+    def get_last_messages(self, limit: int = 50):
+        with self._lock:
+            return list(self._msg_buf)[-limit:]
+
+    # --- belső rész: ws loop + üzenet feldolgozás ---
+
+    def _run(self):
+        import time as _t
+        backoff = 1.0
+
+        self._log("🔌 Private order WS worker indul...\n")
+
+        while self._running:
+            try:
+                url = self._get_ws_url()
+                if not url:
+                    self._log("❌ Private order WS URL nem elérhető (bullet-private). Újrapróbálás...\n")
+                    _t.sleep(backoff)
+                    backoff = min(backoff * 2.0, 60.0)
+                    continue
+
+                self._log(f"🔗 Private order WS connect: {url}\n")
+
+                self._ws = websocket.WebSocketApp(
+                    url,
+                    on_open=self._on_open,
+                    on_message=self._on_message,
+                    on_error=self._on_error,
+                    on_close=self._on_close,
+                )
+
+                # run_forever pinggel – a szerver bullet-private pingInterval-ját használjuk
+                self._ws.run_forever(
+                    ping_interval=self._ping_interval,
+                    ping_timeout=self._ping_timeout,
+                )
+
+            except Exception as e:
+                self._log(f"❌ Private order WS hiba: {e}\n")
+
+            finally:
+                self._ws = None
+
+            if not self._running:
+                break
+
+            self._log("ℹ️ Private order WS kapcsolat megszakadt, reconnect...\n")
+            _t.sleep(backoff)
+            backoff = min(backoff * 2.0, 60.0)
+
+        self._log("🔌 Private order WS worker leállt.\n")
+
+    def _get_ws_url(self):
+        """
+        bullet-private token lehívása, endpoint + pingInterval/pingTimeout kinyerése.
+        """
+        try:
+            # ugyanúgy, mint a ticker WS-nél, csak bullet-private
+            resp = self._rest_post("/api/v1/bullet-private", {})
+        except Exception as e:
+            self._log(f"❌ bullet-private hiba: {e}\n")
+            return None
+
+        if not isinstance(resp, dict):
+            self._log(f"⚠️ bullet-private válasz nem dict: {resp!r}\n")
+            return None
+
+        data = resp.get("data") or {}
+        token = data.get("token")
+        inst_servers = data.get("instanceServers") or []
+        if not token or not inst_servers:
+            self._log(f"⚠️ bullet-private hiányos válasz: {resp!r}\n")
+            return None
+
+        inst = inst_servers[0] or {}
+        endpoint = inst.get("endpoint")
+        if not endpoint:
+            self._log(f"⚠️ bullet-private endpoint hiányzik: {resp!r}\n")
+            return None
+
+        ping_interval_ms = inst.get("pingInterval", 20000)
+        ping_timeout_ms = inst.get("pingTimeout", 10000)
+        try:
+            self._ping_interval = max(5.0, float(ping_interval_ms) / 1000.0)
+        except Exception:
+            self._ping_interval = 15.0
+        try:
+            self._ping_timeout = max(3.0, float(ping_timeout_ms) / 1000.0)
+        except Exception:
+            self._ping_timeout = 10.0
+
+        # connectId opcionális, de tehetünk bele egy randomot
+        conn_id = str(uuid.uuid4())
+        url = f"{endpoint}?token={token}&connectId={conn_id}"
+        self._ws_url = url
+        return url
+
+    def _on_open(self, ws):
+        try:
+            sub = {
+                "id": str(int(time.time() * 1000)),
+                "type": "subscribe",
+                "topic": "/spotMarket/tradeOrdersV2",
+                "privateChannel": True,
+                "response": True,
+            }
+            ws.send(json.dumps(sub))
+            self._log("✅ Private order WS opened, feliratkozás: /spotMarket/tradeOrdersV2\n")
+        except Exception as e:
+            self._log(f"⚠️ Private order WS on_open hiba: {e}\n")
+
+    def _on_message(self, ws, message: str):
+        import time as _t
+        self._last_msg_ts = _t.time()
+
+        try:
+            msg = json.loads(message)
+        except Exception:
+            self._log(f"⚠️ Private order WS: JSON parse hiba: {message!r}\n")
+            return
+
+        with self._lock:
+            self._msg_buf.append(msg)
+
+        try:
+            if msg.get("type") != "message":
+                return
+            topic = msg.get("topic") or ""
+            if "/spotMarket/tradeOrdersV2" not in topic:
+                return
+
+            data = msg.get("data") or {}
+            order_id = str(data.get("orderId") or data.get("orderid") or "")
+            if not order_id:
+                return
+
+            fee_raw = data.get("fee", 0.0)
+            try:
+                fee = float(fee_raw or 0.0)
+            except Exception:
+                fee = 0.0
+
+            match_size_raw = data.get("matchSize", 0.0)
+            try:
+                match_size = float(match_size_raw or 0.0)
+            except Exception:
+                match_size = 0.0
+
+            symbol = data.get("symbol") or ""
+            ts = int(data.get("ts") or 0)
+
+            with self._lock:
+                info = self._order_info.get(order_id) or {
+                    "fee": 0.0,
+                    "filled": 0.0,
+                    "symbol": symbol,
+                    "ts": ts,
+                }
+                info["fee"] = float(info.get("fee", 0.0)) + fee
+                info["filled"] = float(info.get("filled", 0.0)) + match_size
+                info["symbol"] = symbol or info.get("symbol", "")
+                info["ts"] = ts or info.get("ts", 0)
+                self._order_info[order_id] = info
+
+        except Exception as e:
+            self._log(f"⚠️ Private order WS üzenet feldolgozás hiba: {e}\n")
+
+    def _on_error(self, ws, error):
+        self._log(f"❌ Private order WS error: {error}\n")
+
+    def _on_close(self, ws, status_code, msg):
+        self._log(f"ℹ️ Private order WS close: code={status_code} msg={msg}\n")
+
 # ========= KuCoin Wrapper =========
 class KucoinSDKWrapper:
     """
@@ -1148,6 +1476,7 @@ class CryptoBotApp:
         self._mt_price_job = None
         self._mt_start_price_loop()
         self._mt_on_input_change()
+        self._ensure_order_ws()
 
         # --- Margin Bot (auto) ---
         self._build_margin_bot_tab()
@@ -1407,22 +1736,70 @@ class CryptoBotApp:
 
                 self._balance_cache["isolated"] = iso_cache
 
-                # ---------- 4) Árfolyamok BULK ----------
-                to_fetch = [f"{ccy}-USDT" for ccy in unique_ccy if ccy.upper() != "USDT"]
-                prices_raw = {}
-                try:
-                    with self._ex_lock:
-                        prices_raw = self.exchange.fetch_last_prices_bulk(to_fetch)  # type: ignore[union-attr]
-                except Exception:
-                    prices_raw = {}
+                # ---------- 4) Árfolyamok – WS + cache + BULK REST ----------
+                import math
 
+                # alap: USDT = 1
                 prices: dict[str, float] = {"USDT": 1.0}
+
+                # 4/a) próbáljuk beemelni a margin bot szimbólumát WS-ből, ha lehetséges
+                try:
+                    mb_sym = normalize_symbol(
+                        self._mb_get_str("mb_symbol", self._mb_get_str("mt_symbol", DEFAULT_SYMBOL))
+                    )
+                except Exception:
+                    mb_sym = DEFAULT_SYMBOL
+
+                try:
+                    base_sym, quote_sym = split_symbol(mb_sym)
+                except Exception:
+                    base_sym, quote_sym = None, None
+
+                ws_px = None
+                # Ticker WS ár
+                try:
+                    tws = getattr(self, "_ticker_ws", None)
+                    if tws is not None:
+                        ws_px = float(tws.get_last_price() or 0.0)
+                        if not ws_px or math.isnan(ws_px) or ws_px <= 0:
+                            ws_px = None
+                except Exception:
+                    ws_px = None
+
+                # Worker cache (_mb_last_rt_px) fallback
+                if (ws_px is None or ws_px <= 0) and hasattr(self, "_mb_last_rt_px"):
+                    try:
+                        ws_px = float((self._mb_last_rt_px or {}).get(mb_sym, 0.0) or 0.0)
+                        if not ws_px or math.isnan(ws_px) or ws_px <= 0:
+                            ws_px = None
+                    except Exception:
+                        ws_px = None
+
+                # Ha a pár BASE-USDT formájú, tudjuk belőle a BASE árát
+                if ws_px and quote_sym == "USDT":
+                    prices[base_sym] = ws_px  # pl. SOL-USDT → SOL ára USDT-ben
+
+                # 4/b) BULK REST csak azoknak a CCY-knak, ahol még nincs ár
+                to_fetch = [f"{ccy}-USDT" for ccy in unique_ccy
+                            if ccy.upper() != "USDT" and ccy not in prices]
+
+                prices_raw = {}
+                if to_fetch:
+                    try:
+                        with self._ex_lock:
+                            prices_raw = self.exchange.fetch_last_prices_bulk(to_fetch)  # type: ignore[union-attr]
+                    except Exception:
+                        prices_raw = {}
+
                 for sym, px in (prices_raw or {}).items():
                     try:
                         ccy = sym.split("-")[0].upper()
-                        prices[ccy] = float(px or 0.0)
+                        prices.setdefault(ccy, float(px or 0.0))
                     except Exception:
                         continue
+
+                # 4/c) (opcionális) utolsó per-CCY REST fallback már nem nagyon szükséges:
+                # ha valami CCY-hez nincs ár, annak az értékét 0-nak vesszük.
 
                 # ---------- 5) USD értékek ----------
                 def _pair_key(rec):
@@ -1435,8 +1812,10 @@ class CryptoBotApp:
                 for row in all_rows:
                     ccy = row["ccy"]
                     px = float(prices.get(ccy, 0.0))
-                    value_usd = float(row["avail"]) * (px if px > 0 else 0.0)
-                    liab_usd  = float(row["liability"]) * (px if px > 0 else 0.0)
+                    if px <= 0:
+                        px = 0.0
+                    value_usd = float(row["avail"]) * px
+                    liab_usd  = float(row["liability"]) * px
                     pnl_usd   = value_usd - liab_usd
                     nrow = dict(row)
                     nrow.update({"value": value_usd, "pnl": pnl_usd})
@@ -1525,14 +1904,53 @@ class CryptoBotApp:
         assets = data.get('assets', []) or []
         lines = ["Isolated Margin – Részletes nézet", ""]
 
+        # --- Szimbólumok listája az árakhoz ---
         symbols = [a.get('symbol', '').upper() for a in assets if a.get('symbol')]
         prices: Dict[str, float] = {}
-        try:
-            with self._ex_lock:
-                prices = self.exchange.fetch_last_prices_bulk(symbols) if self.exchange else {}  # type: ignore[union-attr]
-        except Exception:
-            prices = {}
 
+        # 1) Először megpróbálunk minden szimbólumra Ticker WS árat
+        for sym in symbols:
+            px = None
+            # 1/a) Ticker WS
+            try:
+                tws = getattr(self, "_ticker_ws", None)
+                if tws is not None:
+                    px = float(tws.get_last_price() or 0.0)
+                    if px <= 0:
+                        px = None
+            except Exception:
+                px = None
+
+            # 1/b) Worker cache (_mb_last_rt_px)
+            if (px is None or px <= 0) and hasattr(self, "_mb_last_rt_px"):
+                try:
+                    px = float((self._mb_last_rt_px or {}).get(sym, 0.0) or 0.0)
+                    if px <= 0:
+                        px = None
+                except Exception:
+                    px = None
+
+            # ideiglenesen None-t rakunk, REST bulk majd tölti
+            prices[sym] = px or 0.0
+
+        # 2) Bulk REST árlekérés — CSAK azoknak, ahol nincs WS ár
+        need_rest = [s for s, px in prices.items() if px <= 0]
+        if need_rest and self.exchange:
+            try:
+                with self._ex_lock:
+                    bulk_rest = self.exchange.fetch_last_prices_bulk(need_rest)  # type: ignore[union-attr]
+                for s in need_rest:
+                    if s in bulk_rest:
+                        try:
+                            prices[s] = float(bulk_rest[s] or 0.0)
+                        except:
+                            pass
+            except Exception:
+                pass
+
+        # Most mindegyik sym-hez van WS → cache → bulkREST ára (0, ha nem sikerült)
+
+        # --- Formázott sorok generálása ---
         for a in assets:
             sym = a.get('symbol', 'N/A').upper()
             status = a.get('status', '')
@@ -1551,7 +1969,10 @@ class CryptoBotApp:
             quote_av  = float(quote.get('available', 0) or 0)
             quote_li  = float(quote.get('liability', 0) or 0)
 
-            last = float(prices.get(sym, 0.0))
+            #  ---- WS / cache / REST ár használata ----
+            last = float(prices.get(sym, 0.0) or 0.0)
+
+            # 3) Ha sem WS, sem bulk REST nem sikerült → REST fallback (1 szimbólumos)
             if last <= 0 and self.exchange:
                 try:
                     with self._ex_lock:
@@ -1559,22 +1980,25 @@ class CryptoBotApp:
                 except Exception:
                     last = 0.0
 
+            # Nettó érték számítás
             net_quote = base_tot * last + quote_tot - quote_li if last > 0 else None
 
+            # Sorok összeállítása
             if (base_tot > 0) or (quote_tot > 0) or (quote_li > 0) or (debt_ratio > 0):
                 lines.append(f"── {sym}  [{status}]")
                 lines.append(f"   Risk: {self._risk_label(debt_ratio)}")
                 if last > 0:
                     lines.append(f"   Last Price: {last:,.6f} {quote_ccy}")
                 lines.append(f"   {base_ccy}: total {base_tot:,.6f}  |  available {base_av:,.6f}  |  liability {base_li:,.6f}")
-                lines.append(f"   {quote_ccy}: total {quote_tot:,.6f}  |  available {quote_av:,.6f}  |  liability {quote_li:,.6f}")
+                lines.append(f"   {quote_ccy}: total {quote_tot:,.6f} |  available {quote_av:,.6f} | liability {quote_li:,.6f}")
+
                 if net_quote is not None:
                     lines.append(f"   Net Value (≈): {net_quote:,.2f} {quote_ccy}")
                     side_txt = None; closable = None
                     if base_li > 0:
                         side_txt = "SHORT"; closable = base_li
                     elif base_tot > 0:
-                        side_txt = "LONG";  closable = base_tot
+                        side_txt = "LONG"; closable = base_tot
                     if side_txt and closable is not None:
                         lines.append(f"   Position: {side_txt}  |  Closable size (≈): {closable:,.6f} {base_ccy}")
                 lines.append("")
@@ -1675,19 +2099,54 @@ class CryptoBotApp:
             return "Cross Margin – nincs releváns kitettség."
 
         symbols = [r["symbol"] for r in rows]
-        prices = {}
-        try:
-            with self._ex_lock:
-                prices = self.exchange.fetch_last_prices_bulk(symbols) if self.exchange else {}  # type: ignore[union-attr]
-        except Exception:
-            prices = {}
+        prices: dict[str, float] = {}
+
+        # 1) Ticker WS + worker cache
+        for sym in symbols:
+            px = None
+            # 1/a) Ticker WS
+            try:
+                tws = getattr(self, "_ticker_ws", None)
+                if tws is not None:
+                    px = float(tws.get_last_price() or 0.0)
+                    if px <= 0:
+                        px = None
+            except Exception:
+                px = None
+
+            # 1/b) margin worker cache (_mb_last_rt_px)
+            if (px is None or px <= 0) and hasattr(self, "_mb_last_rt_px"):
+                try:
+                    px = float((self._mb_last_rt_px or {}).get(sym, 0.0) or 0.0)
+                    if px <= 0:
+                        px = None
+                except Exception:
+                    px = None
+
+            prices[sym] = px or 0.0
+
+        # 2) REST bulk fallback azoknak, ahol nem volt WS/cache ár
+        need_rest = [s for s, px in prices.items() if px <= 0]
+        if need_rest and self.exchange:
+            try:
+                with self._ex_lock:
+                    bulk_rest = self.exchange.fetch_last_prices_bulk(need_rest)  # type: ignore[union-attr]
+                for s in need_rest:
+                    if s in bulk_rest:
+                        try:
+                            prices[s] = float(bulk_rest[s] or 0.0)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
         lines = [f"Cross Margin – Részletes nézet (QUOTE: {default_quote.upper()})", ""]
         for r in rows:
             sym = r["symbol"]; side = r["side"]; closable = r["closable"]
             base_ccy = sym.split("-")[0]; quote_ccy = sym.split("-")[1]
-            last = float(prices.get(sym, 0.0))
+            last = float(prices.get(sym, 0.0) or 0.0)
             est_val = f"{closable*last:,.2f} {quote_ccy}" if last > 0 else "n/a"
+
             lines.append(f"── {sym}  [{side}]")
             if last > 0:
                 lines.append(f"   Last Price: {last:,.6f} {quote_ccy}  |  Closable≈ {closable:,.6f} {base_ccy}  (~{est_val})")
@@ -1740,6 +2199,40 @@ class CryptoBotApp:
                 self._safe_log(f"🔄 Ticker WS symbol váltás: {sym}\n")
             except Exception as e:
                 self._safe_log(f"❌ Ticker WS symbol váltás hiba: {e}\n")
+
+    def _ensure_order_ws(self):
+        """
+        Privát order WebSocket lusta init.
+        Csak KuCoin Spot/Margin esetén van értelme.
+        """
+        # már van és fut
+        if getattr(self, "_order_ws", None) is not None:
+            try:
+                if self._order_ws.is_running():
+                    return
+            except Exception:
+                # ha valamiért nincs ilyen metódus, újrainitializáljuk
+                pass
+
+        try:
+            # REST POST a KucoinSDKWrapper-ből jön!
+            if self.exchange is None:
+                with self._ex_lock:
+                    # >>> ITT LEGYEN PÉLDÁNYOSÍTÁS, NEM OSZTÁLY HOZZÁRENDELÉS <<<
+                    self.exchange = KucoinSDKWrapper(
+                        public_mode=self.public_mode.get(),
+                        log_fn=self.log,
+                    )
+
+            self._order_ws = KucoinPrivateOrderWS(
+                rest_post_func=self.exchange._rest_post,
+                log_func=self._safe_log,
+            )
+            self._order_ws.start()
+            self._safe_log("🔌 Privát order WS elindítva.\n")
+        except Exception as e:
+            self._safe_log(f"⚠️ Privát order WS init hiba: {e}\n")
+            self._order_ws = None
 
     # ---- price loop ----
     def _mt_start_price_loop(self):
@@ -1862,15 +2355,34 @@ class CryptoBotApp:
             # 1. Adatgyűjtés (ez a lassú rész)
             sym = normalize_symbol(self.mt_symbol.get())
             base, quote = split_symbol(sym)
+
+            # --- Élő ár: 1) Ticker WS  2) _mb_last_rt_px cache  3) REST fallback ---
             px = 0.0
-            if self.exchange:
+
+            # 1) Ticker WS ár (public, mehet public módban is)
+            try:
+                tws = getattr(self, "_ticker_ws", None)
+                if tws is not None:
+                    px = float(tws.get_last_price() or 0.0)
+            except Exception:
+                px = 0.0
+
+            # 2) Worker által cache-elt RT ár (ha van ilyen dict)
+            if (not px or px <= 0) and hasattr(self, "_mb_last_rt_px"):
+                try:
+                    px = float((self._mb_last_rt_px or {}).get(sym, 0.0) or 0.0)
+                except Exception:
+                    pass
+
+            # 3) REST fallback (csak ha van exchange példány)
+            if (not px or px <= 0) and self.exchange:
                 try:
                     with self._ex_lock:
                         px = float(self.exchange.fetch_last_price(sym))  # type: ignore[union-attr]
                 except Exception:
                     px = 0.0
             
-            # Ez a leglassabb hívás
+            # Ez a leglassabb hívás – egyenleg lekérés
             avail_base, avail_quote = self._mt_available(base, quote)
 
             # 2. Értékek számítása
@@ -1881,7 +2393,7 @@ class CryptoBotApp:
                 pct = int(value)
                 if input_mode == 'base':
                     new_size = f"{(avail_base * pct / 100.0):.6f}"
-                else: # 'quote'
+                else:  # 'quote'
                     new_funds = f"{(avail_quote * pct / 100.0):.2f}"
             
             elif action_type == 'max':
@@ -1889,8 +2401,8 @@ class CryptoBotApp:
                 if side == 'sell':
                     input_mode = 'base'  # Eladásnál mindig a BASE-t akarjuk kitölteni
                     new_size = f"{avail_base:.6f}"
-                else: # 'buy'
-                    input_mode = 'quote' # Vételnél mindig a QUOTE-t
+                else:  # 'buy'
+                    input_mode = 'quote'  # Vételnél mindig a QUOTE-t
                     new_funds = f"{avail_quote:.2f}"
 
             # 3. GUI frissítése a fő szálon (self.root.after)
@@ -1899,8 +2411,8 @@ class CryptoBotApp:
                     # 'Max' gomb esetén átváltjuk a beviteli módot
                     if action_type == 'max':
                         self.mt_input_mode.set(input_mode)
-                        self._mt_on_input_change() # Ez engedélyezi/letiltja a mezőket
-                        self.mt_pct.set(100)       # <-- EZT A SORT ADD HOZZÁ
+                        self._mt_on_input_change()  # Ez engedélyezi/letiltja a mezőket
+                        self.mt_pct.set(100)
                     # Mindig engedélyezzük a mezőket írásra, kitöltjük, majd visszaállítjuk
                     self.mt_size.config(state=tk.NORMAL)
                     self.mt_funds.config(state=tk.NORMAL)
@@ -1915,12 +2427,13 @@ class CryptoBotApp:
                     # Visszaállítjuk a mezők állapotát az input mód alapján
                     self._mt_on_input_change()
                     
-                    # Becslés frissítése
+                    # Becslés frissítése (itt már a WS/REST kombinált px megy be)
                     self._mt_update_estimate(px)
                 except Exception as e:
-                    self.margin_log.insert(tk.END, f"❌ GUI frissítési hiba: {e}\n"); self.margin_log.see(tk.END)
+                    self.margin_log.insert(tk.END, f"❌ GUI frissítési hiba: {e}\n")
+                    self.margin_log.see(tk.END)
                 finally:
-                    self.root.config(cursor="") # Kurzor visszaállítása itt
+                    self.root.config(cursor="")  # Kurzor visszaállítása itt
 
             self.root.after(0, update_ui)
 
@@ -2371,25 +2884,45 @@ class CryptoBotApp:
                 # BUY: funds az elsődleges; ha csak size van → átszámít funds-ra (last price alapján)
                 # SELL: size az elsődleges; ha csak funds van → átszámít size-ra (last price alapján)
 
-                # 1) Élő ár és (opcionális) sanitize előkészítés _ex_lock alatt
+                # 1) Élő ár előkészítése – WS → cache → REST fallback
                 last_px = None
-                lot_step = price_step = min_base = min_funds = quote_step = None
+
+                # 1/a) Ticker WS (public, mehet public módban is – de itt úgyis privátban vagyunk)
                 try:
-                    with self._ex_lock:
-                        # élő ár
-                        try:
+                    tws = getattr(self, "_ticker_ws", None)
+                    if tws is not None:
+                        last_px = float(tws.get_last_price() or 0.0)
+                        if not last_px or math.isnan(last_px) or last_px <= 0:
+                            last_px = None
+                except Exception:
+                    last_px = None
+
+                # 1/b) Worker cache (_mb_last_rt_px), ha van
+                if (last_px is None or last_px <= 0) and hasattr(self, "_mb_last_rt_px"):
+                    try:
+                        last_px = float((self._mb_last_rt_px or {}).get(p_symbol, 0.0) or 0.0)
+                        if not last_px or math.isnan(last_px) or last_px <= 0:
+                            last_px = None
+                    except Exception:
+                        last_px = None
+
+                # 1/c) REST fallback – csak ha tényleg nem volt használható WS ár
+                if last_px is None or last_px <= 0:
+                    try:
+                        with self._ex_lock:
                             last_px = float(self.exchange.fetch_last_price(p_symbol))
                             if not last_px or math.isnan(last_px) or last_px <= 0:
                                 last_px = None
-                        except Exception:
-                            last_px = None
-                        # lépésközök (ha van szanitered és használni akarod)
-                        try:
-                            lot_step, price_step, min_base, min_funds, quote_step = self._mb_get_market_steps(p_symbol)  # type: ignore[attr-defined]
-                        except Exception:
-                            lot_step = price_step = min_base = min_funds = quote_step = None
+                    except Exception:
+                        last_px = None
+
+                # 1/d) lépésközök (opcionális sanitizerhez) – ha elérhető, külön próbálkozás
+                lot_step = price_step = min_base = min_funds = quote_step = None
+                try:
+                    if hasattr(self, "_mb_get_market_steps"):
+                        lot_step, price_step, min_base, min_funds, quote_step = self._mb_get_market_steps(p_symbol)  # type: ignore[attr-defined]
                 except Exception:
-                    pass
+                    lot_step = price_step = min_base = min_funds = quote_step = None
 
                 # 2) Side-aware paraméter választás
                 #    - ha mindkettő meg van adva, a side szerinti preferált mezőt választjuk, a másikat ignoráljuk és logoljuk
@@ -2432,7 +2965,6 @@ class CryptoBotApp:
                         raise ValueError("Adj meg legalább Size (BASE) értéket SELL-hez, vagy Funds-ot konverzióval.")
 
                 # 3) (Opcionális) SZANITER – ha már van kész és szeretnéd SPOT-nál is használni
-                #    BUY-nál: price kell a funds→méret ellenőrzéshez; SELL-nél: size padlózás/guard
                 try:
                     if hasattr(self, "_mb_sanitize_order"):
                         if p_side.lower() == "buy":
@@ -2718,12 +3250,39 @@ class CryptoBotApp:
         else:
             raise RuntimeError("Nincs zárható isolated pozíció.")
 
-        # 3) Utolsó ár BUY funds-becsléshez (ha nem sikerül, None maradhat – a szaniter kezelni fogja)
+        # 3) Utolsó ár BUY funds-becsléshez
+        #    1) Ticker WS  2) _mb_last_rt_px cache  3) REST fallback
+        import math
+        last_px = None
+
+        # 3/a) Ticker WS
         try:
-            with self._ex_lock:
-                last_px = float(self.exchange.fetch_last_price(symbol)) or None
+            tws = getattr(self, "_ticker_ws", None)
+            if tws is not None:
+                last_px = float(tws.get_last_price() or 0.0)
+                if not last_px or math.isnan(last_px) or last_px <= 0:
+                    last_px = None
         except Exception:
             last_px = None
+
+        # 3/b) worker cache (_mb_last_rt_px), ha van ilyen dict
+        if (last_px is None or last_px <= 0) and hasattr(self, "_mb_last_rt_px"):
+            try:
+                last_px = float((self._mb_last_rt_px or {}).get(symbol, 0.0) or 0.0)
+                if not last_px or math.isnan(last_px) or last_px <= 0:
+                    last_px = None
+            except Exception:
+                last_px = None
+
+        # 3/c) REST fallback – csak ha nincs használható WS ár
+        if last_px is None or last_px <= 0:
+            try:
+                with self._ex_lock:
+                    last_px = float(self.exchange.fetch_last_price(symbol)) or None
+                    if not last_px or math.isnan(last_px) or last_px <= 0:
+                        last_px = None
+            except Exception:
+                last_px = None
 
         # 4) Szaniter hívása – egységes minimumok/lépésközök
         sb = fq = None
@@ -2731,7 +3290,7 @@ class CryptoBotApp:
             sb, fq = self._mb_sanitize_order(
                 symbol=symbol,
                 side=side,
-                price=last_px,
+                price=last_px,          # lehet None is, a szaniter ezt bírja
                 size_base=float(raw_size),
                 funds_quote=None
             )
@@ -3688,20 +4247,52 @@ class CryptoBotApp:
 
     def _mb_hist_pnl_tick(self):
         try:
-            if self._mb_hist_pnl_inflight:
+            if getattr(self, "_mb_hist_pnl_inflight", False):
                 return
             self._mb_hist_pnl_inflight = True
 
             try:
-                symbol = normalize_symbol(self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)))
+                symbol = normalize_symbol(
+                    self._mb_get_str("mb_symbol", self._mb_get_str("mt_symbol", DEFAULT_SYMBOL))
+                )
             except Exception:
                 symbol = None
 
             def fetch_rt():
+                """Utolsó ár a history PnL-hez:
+                1) Ticker WS
+                2) _mb_last_rt_px cache
+                3) REST fetch_last_price
+                """
                 if not symbol:
                     return None
-                with self._ex_lock:
-                    return float(self.exchange.fetch_last_price(symbol))
+
+                rt = None
+
+                # 1) Ticker WS ár
+                try:
+                    tws = getattr(self, "_ticker_ws", None)
+                    if tws is not None:
+                        rt = float(tws.get_last_price() or 0.0)
+                except Exception:
+                    rt = None
+
+                # 2) Worker által cache-elt RT ár (ha van ilyen dict)
+                if (not rt or rt <= 0) and hasattr(self, "_mb_last_rt_px"):
+                    try:
+                        rt = float((self._mb_last_rt_px or {}).get(symbol, 0.0) or 0.0)
+                    except Exception:
+                        pass
+
+                # 3) REST fallback (thread-safe, lock alatt)
+                if not rt or rt <= 0:
+                    try:
+                        with self._ex_lock:
+                            rt = float(self.exchange.fetch_last_price(symbol))
+                    except Exception:
+                        rt = None
+
+                return rt
 
             def apply(rt):
                 self._mb_hist_pnl_inflight = False
@@ -3716,12 +4307,14 @@ class CryptoBotApp:
                 for iid in self._mb_hist_tv.get_children(""):
                     vals = list(self._mb_hist_tv.item(iid, "values"))
                     try:
+                        # zárt pozícióra nem számolunk floating PnL-t
                         if vals[EXIT_IDX]:
                             continue
+
                         entry = float(vals[ENTRY_IDX] or "0")
                         size  = float(vals[SIZE_IDX]  or "0")
                         side  = str(vals[SIDE_IDX]).strip().upper()
-                        fee_s = vals[FEE_IDX].strip()
+                        fee_s = (vals[FEE_IDX] or "").strip()
                         fee_est = float(fee_s) if fee_s not in ("", None) else 0.0
 
                         gross = (rt - entry) * size * (1 if side == "BUY" else -1)
@@ -3735,6 +4328,7 @@ class CryptoBotApp:
 
             self._bg(fetch_rt, apply, fail)
         finally:
+            # 5 mp múlva újrafrissítjük a floating PnL-t
             self._mb_hist_pnl_job = self.root.after(5000, self._mb_hist_pnl_tick)
 
     def _mb_hist_on_rclick(self, event):
@@ -4187,15 +4781,25 @@ class CryptoBotApp:
             lev   = self._mb_get_int("mb_leverage", 10)
             mode  = self._mb_get_str("mb_mode", "isolated")
 
-            # Utolsó ismert élő ár – _ex_lock alatt kérjük le
+            # Utolsó ismert élő ár – először Ticker WS, csak utána REST
             last_px = None
+
+            # 1) próbáljuk a websocket ticker árát
             try:
-                with self._ex_lock:
-                    last_px = float(self.exchange.fetch_last_price(sym))
+                if getattr(self, "_ticker_ws", None) is not None:
+                    last_px = float(self._ticker_ws.get_last_price() or 0.0)
             except Exception:
                 last_px = None
-                self._safe_log("⚠️ Ár lekérés nem sikerült, fallback az entry/peak alapján.\n")
 
+            # 2) ha nincs használható WS ár, REST fallback _ex_lock alatt
+            if not last_px or last_px <= 0:
+                try:
+                    with self._ex_lock:
+                        last_px = float(self.exchange.fetch_last_price(sym))
+                except Exception:
+                    last_px = None
+                    self._safe_log("⚠️ Ár lekérés nem sikerült, fallback az entry/peak alapján.\n")
+ 
             # Mindkét oldal zárása egységesen
             for side in ("buy", "sell"):
                 # lokális lista snapshot (nyitott SIM pozik)
@@ -4336,65 +4940,53 @@ class CryptoBotApp:
                         lev: int,
                         is_sl_tp: bool = False,
                         is_manual: bool = False) -> bool:
+
         """
         Piacon keresztül zárja a margin pozíciót.
-
-        FONTOS: A függvény szemlélete:
-          - Ha a CLOSE order SIKERESEN ELMENT és van orderId, akkor a függvény
-            *logikai értelemben* sikeresnek tekinti a pozíciózárást → True-t ad.
-          - A fee lekérdezés, PnL-számítás, history frissítés hibái NEM
-            változtatják meg a visszatérési értéket, csak logolva lesznek.
+        A CLOSE order sikeres elküldése (van orderId) → logikai True.
+        Fee, PnL, history hibák NEM állítják hamisra a visszatérési értéket.
         """
-        from typing import Optional, Literal
-        import time
 
-        sent_ok = False         # csak az order küldés sikerességét jelöli
+        import time
+        from typing import Optional, Literal
+
+        sent_ok = False
         oid: Optional[str] = None
 
-        # --- 1. ORDER ELŐKÉSZÍTÉS + KÜLDÉS (kritikus rész) ---
+        # === 1) ORDER KÜLDÉS (kritikus rész) ===========================================
         try:
-            # A 'side' a *pozíció* nyitó oldala. A záró oldal az ellenkezője.
-            close_side: Literal["buy", "sell"] = "sell" if side == "buy" else "buy"
+            close_side: Literal["buy","sell"] = "sell" if side == "buy" else "buy"
 
-            # Pozícióadatok
-            pos_size = float(pos.get('size', 0.0))
-            pos_px   = float(pos.get('entry', 0.0))
-            pos_id   = str(pos.get('oid', 'N/A'))
+            pos_size = float(pos.get("size", 0.0))
+            pos_px   = float(pos.get("entry", 0.0))
+            pos_id   = str(pos.get("oid", "N/A"))
 
             if pos_size <= 0:
-                self._safe_log(
-                    f"⚠️ LIVE zárási hiba: A pozíció ({pos_id}) mérete nulla. Átugorva.\n"
-                )
-                return False  # nincs mit zárni, de nem tekintjük végzetes hibának
+                self._safe_log(f"⚠️ LIVE zárási hiba: A pozíció ({pos_id}) mérete nulla. Átugorva.\n")
+                return False
 
-            base_ccy, quote_ccy = split_symbol(symbol)
-
-            # --- Sanitizer: a küldendő size/funds kiszámítása ---
             sb, fq = self._mb_sanitize_order(
                 symbol=symbol,
-                side=close_side,       # a *záró* oldalt adjuk át
+                side=close_side,
                 price=close_px,
-                size_base=pos_size,    # nyers base méret
+                size_base=pos_size,
                 funds_quote=None
             )
 
-            # --- Küldendő paraméterek ellenőrzése ---
-            size_to_send: Optional[str] = None
-            funds_to_send: Optional[str] = None
+            size_to_send = None
+            funds_to_send = None
 
-            if close_side == "sell":  # long zárása
+            if close_side == "sell":
                 if not sb or sb <= 0:
                     self._safe_log(
-                        f"❌ LIVE zárási hiba (SELL): A sanitizer 0 vagy None 'size'-t adott vissza "
-                        f"(min/step). Nyers méret: {pos_size}\n"
+                        f"❌ LIVE zárási hiba (SELL): sanitizer 0 méretet adott vissza. Nyers={pos_size}\n"
                     )
                     return False
                 size_to_send = str(sb)
-            else:  # "buy" – short zárása
+            else:
                 if not fq or fq <= 0:
                     self._safe_log(
-                        f"❌ LIVE zárási hiba (BUY): A sanitizer 0 vagy None 'funds'-ot adott vissza "
-                        f"(min/step). Nyers méret: {pos_size} @ {close_px}\n"
+                        f"❌ LIVE zárási hiba (BUY): sanitizer 0 funds-ot adott vissza. Nyers={pos_size} @ {close_px}\n"
                     )
                     return False
                 funds_to_send = str(fq)
@@ -4411,15 +5003,13 @@ class CryptoBotApp:
                 "auto_borrow": closing_a_short,
                 "auto_repay": True,
             }
+
             log_prefix = "🐞 SEND"
-            if is_sl_tp:
-                log_prefix += " [SL/TP]"
-            if is_manual:
-                log_prefix += " [MANUAL]"
+            if is_sl_tp: log_prefix += " [SL/TP]"
+            if is_manual: log_prefix += " [MANUAL]"
 
             self._safe_log(f"{log_prefix} CLOSE: {self._mb_pp(_payload_dbg)}\n")
 
-            # --- API hívás: ORDER KÜLDÉS ---
             try:
                 with self._ex_lock:
                     resp = self.exchange.place_margin_market_order(
@@ -4428,104 +5018,81 @@ class CryptoBotApp:
                         funds_quote=funds_to_send,
                         leverage=lev,
                         auto_borrow=closing_a_short,
-                        auto_repay=True,
+                        auto_repay=True
                     )
             except Exception as e:
-                # API hiba → ténylegesen nem ment el a záró order
                 self._safe_log(f"❌ LIVE zárási API hiba: {e}\n")
                 return False
 
             self._safe_log(f"🐞 RECV CLOSE: {self._mb_pp(resp)}\n")
 
-            # --- Válaszból az orderId kinyerése ---
+            # --- orderId kiolvasás ---
             try:
                 if hasattr(resp, "orderId"):
                     oid = str(getattr(resp, "orderId"))
                 else:
                     data = resp.get("data") if isinstance(resp, dict) else None
-                    oid = (
-                        (data or {}).get("orderId")
-                        or (resp.get("orderId") if isinstance(resp, dict) else None)
-                    )
-                    if oid is not None:
-                        oid = str(oid)
+                    if isinstance(data, dict):
+                        oid = data.get("orderId") or data.get("orderid")
+                    if not oid and isinstance(resp, dict):
+                        oid = resp.get("orderId")
+                if oid:
+                    oid = str(oid)
             except Exception:
                 oid = None
 
             if not oid:
-                self._safe_log(
-                    f"❌ LIVE zárási hiba: Nincs 'orderId' a válaszban. "
-                    f"Resp: {self._mb_pp(resp)}\n"
-                )
+                self._safe_log("❌ LIVE zárási hiba: nincs orderId a válaszban.\n")
                 return False
 
-            self._safe_log(f"✅ LIVE zárás elküldve (ID: {oid})\n")
+            self._safe_log(f"✅ LIVE záró order elküldve (ID: {oid})\n")
             sent_ok = True
 
         except Exception as e:
-            # Ide csak az ORDER előkészítés / küldés közben keletkező váratlan hibák esnek be
-            self._safe_log(
-                f"❌ Végzetes hiba a _live_close_pos függvényben (order küldés közben): {e}\n"
-            )
+            self._safe_log(f"❌ Kivétel _live_close_pos order küldés közben: {e}\n")
             return False
 
-        # --- 2. POST-PROCESSING: fee lekérdezés, PnL, history (NEM befolyásolja a sent_ok-ot) ---
-
         if not sent_ok or not oid:
-            # Logikailag nem kéne idáig eljutni ilyen állapotban, de biztos, ami biztos:
             return bool(sent_ok)
 
+        # === 2) POST-PROCESSING: FEE + PNL + HISTORY ===============================
         fee_close = 0.0
 
-        # 1) első próbálkozás – csak logoljuk a hibát
+        # --- ÚJ: Private Order WS first, várakozással! ---
         try:
-            fee_close = float(self._mb_try_fetch_close_fee(str(oid)) or 0.0)
+            fee_close = float(self._mb_try_fetch_close_fee(str(oid), wait_ws=True) or 0.0)
         except Exception as e:
-            self._safe_log(f"⚠️ Close fee lekérdezési hiba (1): {e}\n")
-
-        # 2) ha még 0, még egyszer próbálkozunk kis várakozás után
-        if fee_close <= 0.0:
-            time.sleep(0.5)
-            try:
-                fee_close = float(self._mb_try_fetch_close_fee(str(oid)) or 0.0)
-            except Exception as e:
-                self._safe_log(f"⚠️ Close fee lekérdezési hiba (2): {e}\n")
+            self._safe_log(f"⚠️ Fee lekérés WS/REST hiba: {e}\n")
 
         total_fee = None
         pnl_final = None
 
-        # Fee + PnL számítás – HIBA esetén CSAK log, no return False
         try:
-            if fee_close > 0.0:
+            if fee_close > 0:
                 pos["fee_close_actual"] = float(fee_close)
 
                 fee_rate = self._mb_get_taker_fee()
-                f_open, f_close, _ = self._mb_sum_fee_actual_or_est(
-                    pos,
-                    close_px,
-                    fee_rate,
-                )
+                f_open, f_close, _ = self._mb_sum_fee_actual_or_est(pos, close_px, fee_rate)
                 total_fee = float(f_open + f_close)
 
-                sz    = float(pos.get("size", 0.0))
+                sz = float(pos.get("size", 0.0))
                 entry = float(pos.get("entry", 0.0))
                 gross = (close_px - entry) * sz * (1 if side == "buy" else -1)
                 pnl_final = float(gross - total_fee)
+
         except Exception as e:
             self._safe_log(f"⚠️ Fee/PnL számítási hiba: {e}\n")
 
-        # History frissítés – ez is best-effort
         try:
             self._mb_hist_update_exit(
                 pos.get("oid") or pos.get("order_id") or pos.get("id") or str(oid),
                 close_px,
                 fee_total=total_fee,
-                pnl_final=pnl_final,
+                pnl_final=pnl_final
             )
         except Exception as e:
-            self._safe_log(f"⚠️ Hiba a history frissítésekor: {e}\n")
+            self._safe_log(f"⚠️ History frissítés hiba: {e}\n")
 
-        # FONTOS: ha idáig eljutottunk, a záró order elment és van orderId → logikailag sikeres zárás
         return True
 
     # === MarginBot – fő ciklus, HTF-filter + ATR menedzsment + RSI szűrő === 
@@ -4540,6 +5107,7 @@ class CryptoBotApp:
         if not hasattr(self, "_mb_last_bar_ts"): self._mb_last_bar_ts = {}
         if not hasattr(self, "_mb_last_cross_ts"): self._mb_last_cross_ts = 0
         if not hasattr(self, "_mb_last_signal"):   self._mb_last_signal   = "hold"
+        if not hasattr(self, "_mb_last_rt_px"):   self._mb_last_rt_px = {}
 
         # Dinamikus keret (pool) – induláskor felépítjük
         if not hasattr(self, "_pool_balance_quote") or not hasattr(self, "_pool_used_quote"):
@@ -4831,6 +5399,12 @@ class CryptoBotApp:
                     invert_ema     = bool(cfg.get("invert_ema", False))
                     ema_hyst_pct   = float(cfg.get("ema_hyst_pct", 1.0))
 
+                    # --- Privát order WS biztosítása (KuCoin) ---
+                    try:
+                        self._ensure_order_ws()
+                    except Exception:
+                        pass
+
                     # --- OHLCV frissítés csak ha új candle jött ---  ### WS-REST-OPT
                     now_ts = int(time.time())
 
@@ -4917,6 +5491,15 @@ class CryptoBotApp:
 
                         # cache frissítése, hogy a következő körben is a WS-sel módosított df-et kapjuk
                         self._mb_last_df = df.copy()
+                    except Exception:
+                        pass
+
+                    # --- cache-eljük a realtime árakat más funkcióknak is (manual close / PnL / history) ---
+                    try:
+                        if self._is_pos_num(last_px_rt) and last_px_rt > 0:
+                            if not hasattr(self, "_mb_last_rt_px"):
+                                self._mb_last_rt_px = {}
+                            self._mb_last_rt_px[symbol] = float(last_px_rt)
                     except Exception:
                         pass
 
@@ -5440,46 +6023,79 @@ class CryptoBotApp:
                                             except Exception:
                                                 lot_step_now = 0.0
 
-                                            if funds_to_send is not None:
-                                                commit_real = float(funds_to_send) / max(lev, 1)
-                                                size_now = self._sdiv(float(funds_to_send), last_px_rt, 0.0)
-                                                size_now = self._mb_floor_to_step_dec(size_now, float(lot_step_now or 0.0))
-                                            else:
-                                                size_now = float(size_to_send)
-                                                commit_real = self._sdiv(size_now * float(last_px_rt), lev, 0.0)
+                                            # --- 1) Realtime partial fill + fee (WS + REST) ---
+                                            size_req = float(size_to_send) if size_to_send is not None else None
+                                            funds_req = float(funds_to_send) if funds_to_send is not None else None
 
+                                            fb, commit_real_ws, fee_open_actual = self._mb_resolve_open_fill(
+                                                order_id=str(order_key),
+                                                side=combined_sig,
+                                                req_price=last_px_rt,
+                                                req_size=size_req,
+                                                req_funds=funds_req,
+                                                lev=lev,
+                                                lot_step=float(lot_step_now or 0.0),
+                                            )
+
+                                            size_now = None
+                                            commit_used = None
+
+                                            if fb > 0.0:
+                                                # WS/REST szerinti tényleges filled méret
+                                                size_now = float(fb)
+                                                commit_used = float(commit_real_ws or 0.0)
+                                            else:
+                                                # --- 2) Fallback: régi becslés a sanitizer output alapján ---
+                                                if funds_to_send is not None:
+                                                    commit_used = float(funds_to_send) / max(lev, 1)
+                                                    size_now = self._sdiv(float(funds_to_send), last_px_rt, 0.0)
+                                                    size_now = self._mb_floor_to_step_dec(size_now, float(lot_step_now or 0.0))
+                                                else:
+                                                    size_now = float(size_to_send)
+                                                    commit_used = self._sdiv(size_now * float(last_px_rt), lev, 0.0)
+
+                                            if commit_used is None or commit_used <= 0:
+                                                # végső fallback: marad az eredeti commit_usdt
+                                                commit_used = float(commit_usdt)
+
+                                            # --- Fee becslés / tényleges ---
                                             _fee_rate = self._mb_get_taker_fee()
                                             _fee_open_est = self._mb_est_fee_quote(last_px_rt, size_now, _fee_rate)
 
-                                            # --- TÉNYLEGES nyitási díj kinyerése (fills alapján, 2 lépcsőben) ---
-                                            _fee_open_actual = 0.0
+                                            fee_open_actual = float(fee_open_actual or 0.0)
+                                            _fee_for_pnl = fee_open_actual if fee_open_actual > 0.0 else _fee_open_est
 
-                                            # 1) első próbálkozás – azonnal a nyitás után
-                                            try:
-                                                _fee_open_actual = float(
-                                                    self._mb_try_fetch_close_fee(str(order_key)) or 0.0
-                                                )
-                                            except Exception as e:
-                                                self._safe_log(f"⚠️ Nyitási fee lekérdezési hiba (1): {e}\n")
-
-                                            # 2) ha még 0, várunk kicsit, hogy a fill-ek megjelenjenek, majd újra próbáljuk
-                                            if _fee_open_actual <= 0.0:
-                                                time.sleep(0.5)  # nyugodtan állíthatod 0.3–1.0 között
-                                                try:
-                                                    _fee_open_actual = float(
-                                                        self._mb_try_fetch_close_fee(str(order_key)) or 0.0
-                                                    )
-                                                except Exception as e:
-                                                    self._safe_log(f"⚠️ Nyitási fee lekérdezési hiba (2): {e}\n")
-
-                                            _fee_for_pnl = _fee_open_actual if _fee_open_actual > 0.0 else _fee_open_est
-
+                                            # --- PnL becslés: WS → fallback cache → végül REST ---
                                             pnl_est = None
                                             try:
-                                                # itt is lehetne WS-first, de ez csak becsült PnL log  ### opcionális
-                                                with self._ex_lock:
-                                                    rt_now = float(self.exchange.fetch_last_price(symbol))
-                                                if rt_now > 0:
+                                                rt_now = last_px_rt
+
+                                                # ha nem jó, próbáljuk közvetlen WS-t
+                                                if (not self._is_pos_num(rt_now)) or rt_now <= 0:
+                                                    try:
+                                                        if getattr(self, "_ticker_ws", None) is not None:
+                                                            rt_ws_now = float(self._ticker_ws.get_last_price() or 0.0)
+                                                            if self._is_pos_num(rt_ws_now) and rt_ws_now > 0:
+                                                                rt_now = rt_ws_now
+                                                    except Exception:
+                                                        pass
+
+                                                # fallback: cache (ha worker már beírta)
+                                                if (not self._is_pos_num(rt_now)) or rt_now <= 0:
+                                                    try:
+                                                        rt_cache = float((self._mb_last_rt_px or {}).get(symbol, 0.0))
+                                                        if self._is_pos_num(rt_cache) and rt_cache > 0:
+                                                            rt_now = rt_cache
+                                                    except Exception:
+                                                        pass
+
+                                                # végső fallback: REST
+                                                if ((not self._is_pos_num(rt_now)) or rt_now <= 0) and self.exchange:
+                                                    with self._ex_lock:
+                                                        rt_now = float(self.exchange.fetch_last_price(symbol))
+
+                                                # ha végre van értelmes ár → becslés
+                                                if self._is_pos_num(rt_now) and rt_now > 0:
                                                     gross = (rt_now - last_px_rt) * size_now * (1 if combined_sig == 'buy' else -1)
                                                     pnl_est = gross - float(_fee_for_pnl)
                                             except Exception:
@@ -5494,15 +6110,13 @@ class CryptoBotApp:
                                                 pnl_est=pnl_est
                                             )
 
-                                            # SIM pool/pozíció: fee_open_actual + fee_reserved override-dal
+                                            # SIM pool/pozíció: commit_used + fee_open_actual/becslés
                                             _open_sim(
                                                 combined_sig, last_px_rt,
-                                                size_now, commit_real,
+                                                size_now, commit_used,
                                                 atr_pack=(mul_sl, mul_tp1, mul_tp2, mul_tr, atr_val) if (use_atr and atr_val is not None) else None,
                                                 fixed_pack=(tpct, spct, trpct) if use_fixed else None,
-                                                fee_open_actual_override=(
-                                                    _fee_open_actual if _fee_open_actual > 0.0 else 0.0
-                                                ),
+                                                fee_open_actual_override=fee_open_actual if fee_open_actual > 0.0 else 0.0,
                                                 fee_reserved_override=_fee_for_pnl,
                                                 oid=str(order_key),
                                             )
@@ -6338,34 +6952,237 @@ class CryptoBotApp:
         close_fee = f_close_act if f_close_act > 0 else self._mb_est_fee_quote(exit_px, sz, fee_rate)
         return (open_fee, close_fee, open_fee + close_fee)
 
-    def _mb_try_fetch_close_fee(self, close_order_id: str) -> float:
+    def _mb_try_fetch_close_fee(self, close_order_id: str, wait_ws: bool = False) -> float:
         """
-        Megpróbáljuk kinyerni a TÉNYLEGES díjat a close order-ből / fill-ekből.
-        Ha nincs API támogatás, 0.0-t ad vissza (ilyenkor marad az estimate).
+        Order fee összeszedése:
+
+        1) Ha van privát order WS, akkor először onnan próbáljuk kiolvasni (wait_ws=True esetén
+           rövid ideig várunk is rá).
+        2) Ha onnan nem jön értelmes fee, fallback REST alapú fills-lekérésre.
+
+        close_order_id: KuCoin orderId (vagy clientOid, ha az alapján kérsz le).
         """
-        try:
-            ex = getattr(self, "exchange", None)
-            if not ex or not close_order_id:
-                return 0.0
-            # próbálkozások wrapper függvényekkel
-            # 1) közvetlen trade-fills by order
-            if hasattr(ex, "get_margin_fills_by_order"):
-                fills = ex.get_margin_fills_by_order(close_order_id) or []
-            elif hasattr(ex, "get_order_fills"):
-                fills = ex.get_order_fills(close_order_id) or []
-            elif hasattr(ex, "fetch_order_trades"):
-                # egyes ccxt-s wrapper-ek
-                fills = ex.fetch_order_trades(close_order_id) or []
-            else:
-                fills = []
-            fee_sum = 0.0
-            for f in (fills or []):
-                # kucoin: feeCurrency, fee
-                val = f.get("fee") or f.get("feeCost") or 0
-                fee_sum += float(val)
-            return max(0.0, float(fee_sum))
-        except Exception:
+        if not close_order_id:
             return 0.0
+
+        oid = str(close_order_id)
+        fee_ws = 0.0
+
+        # --- 1) Private WS próbálkozás ---
+        try:
+            ws = getattr(self, "_order_ws", None)
+            if ws is not None:
+                if wait_ws:
+                    r = ws.wait_for_fee(oid, timeout=0.7, poll=0.05)
+                else:
+                    r = ws.get_fee_for_order(oid)
+                if r is not None:
+                    fee_ws = float(r or 0.0)
+        except Exception as e:
+            self._safe_log(f"⚠️ WS fee lekérés hiba ({oid}): {e}\n")
+            fee_ws = 0.0
+
+        if fee_ws > 0.0:
+            return fee_ws
+
+        # --- 2) REST fallback (fills lekérés) ---
+        ex = getattr(self, "exchange", None)
+        if ex is None:
+            return fee_ws
+
+        fills = []
+        try:
+            # KucoinMarginTrader specifikus helper
+            if hasattr(ex, "get_margin_fills_by_order"):
+                try:
+                    fills = ex.get_margin_fills_by_order(oid) or []
+                except Exception:
+                    fills = []
+            # Általánosabb spot/margin helper
+            if (not fills) and hasattr(ex, "get_order_fills"):
+                try:
+                    fills = ex.get_order_fills(oid) or []
+                except Exception:
+                    fills = []
+            # ccxt-s fetch_order_trades fallback
+            if (not fills) and hasattr(ex, "fetch_order_trades"):
+                try:
+                    fills = ex.fetch_order_trades(oid) or []
+                except Exception:
+                    fills = []
+        except Exception as e:
+            self._safe_log(f"⚠️ REST fills lekérés hiba ({oid}): {e}\n")
+            fills = []
+
+        if not fills:
+            return fee_ws
+
+        total_fee = 0.0
+        for f in fills:
+            if not isinstance(f, dict):
+                continue
+            fee_val = None
+            if "fee" in f:
+                fee_val = f.get("fee")
+            elif "fees" in f:
+                fee_val = f.get("fees")
+            elif "feeCost" in f:
+                fee_val = f.get("feeCost")
+
+            if isinstance(fee_val, (int, float, str)):
+                try:
+                    total_fee += float(fee_val)
+                except Exception:
+                    pass
+
+        return total_fee if total_fee > 0.0 else fee_ws
+
+    def _mb_resolve_open_fill(self,
+                              *,
+                              order_id: str,
+                              side: str,
+                              req_price: float,
+                              req_size,
+                              req_funds,
+                              lev: int,
+                              lot_step: float = 0.0) -> tuple[float, float, float]:
+        """
+        Open-order realtime fill / fee feloldása.
+
+        Visszatérés:
+          (size_now_base, commit_real_quote, fee_open_actual_quote)
+
+        Priority:
+          1) Private Order WS manager (self._order_ws.get_fill_agg) – KIS VÁRAKOZÁSSAL
+          2) REST fills (get_margin_fills_by_order / get_fills_by_order / fetch_order_trades)
+          3) Ha semmi adat → (0,0,0), a hívó fallback-el a régi becslésre.
+        """
+        filled_base = 0.0    # tényleges teljesült BASE mennyiség
+        filled_quote = 0.0   # opcionális: tényleges QUOTE nominális (ha van)
+        fee = 0.0            # tényleges fee QUOTE-ban
+
+        # 1) WS – ha van Private Order WS manager és tud aggregált fillt adni
+        try:
+            ord_ws = getattr(self, "_order_ws", None)
+            if ord_ws is not None and hasattr(ord_ws, "get_fill_agg"):
+                try:
+                    # új, várakozó verzió – hagyunk időt a fill üzenetnek
+                    fb, fq, ff = ord_ws.get_fill_agg(str(order_id), timeout=0.7, poll=0.05)
+                except TypeError:
+                    # ha valamiért régi szignóval futna
+                    fb, fq, ff = ord_ws.get_fill_agg(str(order_id))
+
+                if fb is not None and float(fb) > 0.0:
+                    filled_base = float(fb)
+                    filled_quote = float(fq or 0.0)
+                    fee = float(ff or 0.0)
+        except Exception as e:
+            self._safe_log(f"⚠️ WS open-fill agg hiba: {e}\n")
+
+        # 2) Ha WS nem adott semmit, próbáljuk REST-ből
+        if filled_base <= 0.0 and getattr(self, "exchange", None) is not None:
+            try:
+                ex = self.exchange
+                fills = None
+
+                # KuCoin margin specific
+                if hasattr(ex, "get_margin_fills_by_order"):
+                    fills = ex.get_margin_fills_by_order(order_id)
+                # KuCoin spot / alt wrapper
+                elif hasattr(ex, "get_fills_by_order"):
+                    fills = ex.get_fills_by_order(order_id)
+                # ccxt-s stílusú wrapper
+                elif hasattr(ex, "fetch_order_trades"):
+                    try:
+                        fills = ex.fetch_order_trades(order_id)
+                    except TypeError:
+                        # egyes ccxt wrapper-ek symbol-t is várnak
+                        fills = ex.fetch_order_trades(order_id, None)
+
+                if fills:
+                    fb = fq = ff = 0.0
+
+                    for f in fills:
+                        if not isinstance(f, dict):
+                            continue
+
+                        # base mennyiség
+                        sz = (
+                            f.get("size")
+                            or f.get("amount")
+                            or f.get("filledSize")
+                            or f.get("filled")
+                            or f.get("dealSize")
+                        )
+                        try:
+                            szv = float(sz or 0.0)
+                            if szv > 0:
+                                fb += szv
+                        except Exception:
+                            pass
+
+                        # quote nominális (funds / cost / quoteQty / dealFunds / filledValue stb.)
+                        fq_raw = (
+                            f.get("funds")
+                            or f.get("fundsValue")
+                            or f.get("cost")
+                            or f.get("quoteQty")
+                            or f.get("dealFunds")
+                            or f.get("filledValue")
+                        )
+                        try:
+                            fqv = float(fq_raw or 0.0)
+                            if fqv > 0:
+                                fq += fqv
+                        except Exception:
+                            pass
+
+                        # fee – dict vagy plain value
+                        fee_val = 0.0
+                        fee_obj = f.get("fee")
+                        if isinstance(fee_obj, dict):
+                            fee_val = (
+                                fee_obj.get("cost")
+                                or fee_obj.get("fee")
+                                or fee_obj.get("amount")
+                                or 0.0
+                            )
+                        elif fee_obj is not None:
+                            fee_val = fee_obj
+
+                        # plusz fallback mezők, ha vannak
+                        if not fee_val:
+                            for key in ("feeCost", "feeAmount", "feeValue", "takerFee", "makerFee"):
+                                if key in f and f.get(key) is not None:
+                                    fee_val = f.get(key)
+                                    break
+
+                        try:
+                            fv = float(fee_val or 0.0)
+                            if fv > 0:
+                                ff += fv
+                        except Exception:
+                            pass
+
+                    filled_base = float(fb)
+                    filled_quote = float(fq)
+                    fee = float(ff)
+            except Exception as e:
+                self._safe_log(f"⚠️ REST open-fill agg hiba: {e}\n")
+
+        # 3) Ha sikerült bármennyi fillt szerezni → normalizálás
+        if filled_base > 0.0:
+            if lot_step:
+                filled_base = self._mb_floor_to_step_dec(filled_base, float(lot_step or 0.0))
+
+            px = float(req_price) if req_price and req_price > 0 else 1.0
+            nominal = filled_quote if filled_quote > 0 else filled_base * px
+            commit_real = nominal / max(lev, 1)
+
+            return float(filled_base), float(commit_real), float(fee or 0.0)
+
+        # 4) sem WS, sem REST nem adott értelmes fillt → 0,0,0
+        return 0.0, 0.0, 0.0
 
     ###---    BEÁLLÍTÁSOK FÜL     ---###
     def _build_settings_tab(self):
