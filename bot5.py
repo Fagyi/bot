@@ -6366,7 +6366,13 @@ class CryptoBotApp:
         except Exception:
             pass
 
-    # ---------- Jel-generátor: KIZÁRÓLAG EMA KERESZTEZÉS (Refaktorált) ----------
+    # ---------- Segédfüggvény: Wilder's Smoothing (RMA) ----------
+    # A TradingView és a standard technikai elemzés ezt használja RSI-hez és ATR-hez.
+    def _rma(self, series, n: int):
+        import pandas as pd
+        return series.ewm(alpha=1.0 / n, adjust=False).mean()
+
+    # ---------- Jel-generátor: EMA KERESZTEZÉS + SLOPE SZŰRÉS ----------
     def _mb_signal_from_ema_live(
         self,
         series,
@@ -6375,75 +6381,143 @@ class CryptoBotApp:
         last_px_rt: float | None,
         atr_eps_mult: float | None = None,
         invert: bool | None = None,
+        slope_threshold: float = 0.0,  # ÚJ: Meredekség küszöb (pl. 1e-6)
     ) -> tuple[str, float, float]:
         """
-        Optimalizált EMA jel: Kizárólag KERESZTEZÉS alapján (edge-trigger),
-        a hiszterézis sáv (zajszűrő) tiszteletben tartásával.
-        Eltávolítva a "meredekség" (slope) alapú jelzés a zaj csökkentése érdekében.
-
-        Visszaad: (sig, ema_fast_last, ema_slow_last)
+        Professzionális EMA jelgenerátor:
+        1. Keresztezés detektálása (Crossover).
+        2. Hysteresis sáv (ATR alapú zajszűrés).
+        3. Opcionális: Slope (meredekség) ellenőrzés a hamis jelek ellen oldalazáskor.
         """
         import pandas as pd
+        import numpy as np
 
+        # Biztonsági másolat és típusellenőrzés
         s = pd.Series(series, dtype="float64").copy()
-        if len(s) < max(fast, slow) + 2:
+        
+        # Adathossz ellenőrzés: Kell elég adat a beálláshoz
+        if len(s) < max(fast, slow) + 5:
             return "hold", float("nan"), float("nan")
 
-        # élő (intrabar) ár beégetése (opcionális, de a jelenlegi logikában benne volt)
+        # Élő ár beégetése (Intrabar update)
         if last_px_rt is not None and last_px_rt > 0:
             s.iloc[-1] = float(last_px_rt)
 
+        # Számítás
         ema_f = s.ewm(span=fast, adjust=False).mean()
         ema_s = s.ewm(span=slow, adjust=False).mean()
 
+        # Utolsó két érték kinyerése
         ef_p, ef_l = float(ema_f.iloc[-2]), float(ema_f.iloc[-1])
         es_p, es_l = float(ema_s.iloc[-2]), float(ema_s.iloc[-1])
 
-        diff_prev = ef_p - es_p                 # előző diff (EF-ES)
-        diff_now  = ef_l - es_l                 # aktuális diff
+        diff_prev = ef_p - es_p
+        diff_now  = ef_l - es_l
 
-        # ---- Hysteresis (Zajszűrő sáv) ----
+        # ---- 1. Hysteresis (Zajszűrő sáv) ----
         if atr_eps_mult is None:
             try:
-                # Az "EMA filter Hyst %" értéket olvassuk a GUI-ból
-                ui_pct = float(self.mb_ema_hyst_pct.get())
+                # GUI thread-safe olvasása (vagy default)
+                ui_pct = float(getattr(self, "mb_ema_hyst_pct", 0.0).get())
                 atr_eps_mult = max(0.0, ui_pct) / 100.0
             except Exception:
-                atr_eps_mult = 0.0 # Alapértelmezett 0, ha nincs UI
+                atr_eps_mult = 0.0
 
+        # ATR érték biztonságos olvasása
         atr_last = float(getattr(self, "_mb_last_atr_val", 0.0))
-        px_last  = float(s.iloc[-1])
+        
+        # Sáv számítása
+        band = 0.0
+        if atr_last > 0 and atr_eps_mult > 0:
+            band = atr_last * atr_eps_mult
+        
+        up_th =  band
+        dn_th = -band
 
-        # Hysteresis sáv diff-hez (ár egységben): ATR * ui%
-        band = (atr_last * atr_eps_mult) if (atr_last > 0 and atr_eps_mult > 0 and px_last > 0) else 0.0
-        up_th =  +band
-        dn_th =  -band
-
-        # Keresztezés detektálás (edge-trigger)
-        # Szigorúbb keresztezés: az előző értéknek a sáv TÚLOLDALÁN kellett lennie.
+        # ---- 2. Keresztezés logikája ----
+        # Long: Előzőleg a sáv alatt/benne volt, most a sáv felett van
         crossed_up   = (diff_prev <= dn_th) and (diff_now > up_th)
+        
+        # Short: Előzőleg a sáv felett/benne volt, most a sáv alatt van
         crossed_down = (diff_prev >= up_th) and (diff_now < dn_th)
 
-        # Döntés: Kizárólag keresztezés alapján
+        # ---- 3. Slope (Meredekség) Szűrés (Opcionális PRO funkció) ----
+        # Ha a lassú mozgóátlag "lapos", akkor oldalazunk -> veszélyes a jel.
+        # slope = (jelenlegi - előző) / előző
+        slope_ok = True
+        if slope_threshold > 0:
+            slow_slope = (es_l - es_p) / es_p if es_p != 0 else 0
+            if crossed_up and slow_slope < -slope_threshold:
+                slope_ok = False # Ne vegyünk, ha a trend még mindig erősen esik
+            elif crossed_down and slow_slope > slope_threshold:
+                slope_ok = False # Ne adjunk el, ha a trend még mindig erősen emelkedik
+
+        # Döntés
         sig = "hold"
-        if crossed_up:
+        if crossed_up and slope_ok:
             sig = "buy"
-        elif crossed_down:
+        elif crossed_down and slope_ok:
             sig = "sell"
-        # Ha nincs keresztezés, a 'sig' marad "hold"
-        
-        # Opcionális invertálás
+
+        # Invertálás
         if invert is None:
             try:
                 invert = bool(self.mb_invert_ema.get())
             except Exception:
                 invert = False
+        
         if invert:
-            sig = "buy" if sig == "sell" else ("sell" if sig == "buy" else "hold")
+            if sig == "buy": sig = "sell"
+            elif sig == "sell": sig = "buy"
 
         return sig, ef_l, es_l
 
-    # ---------- HTF trend filter (GYORS fölötte = bull) ----------
+    # ---------- ATR számítás (Javítva: Wilder's Smoothing) ----------
+    def _mb_atr(self, df, n: int = 14):
+        """
+        Valódi ATR számítás (Wilder's Smoothing).
+        Ez pontosabb és jobban egyezik a TradingView értékeivel.
+        """
+        import pandas as pd
+        
+        h = df['h'].astype(float)
+        l = df['l'].astype(float)
+        c = df['c'].astype(float)
+        prev_c = c.shift(1)
+
+        # True Range vektorizált számítása
+        tr1 = h - l
+        tr2 = (h - prev_c).abs()
+        tr3 = (l - prev_c).abs()
+        
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        
+        # Sima EMA (ewm span) helyett RMA (alpha = 1/n)
+        atr = self._rma(tr, n)
+        return atr
+
+    # ---------- RSI Képlet (Javítva: Wilder's Smoothing) ----------
+    def _mb_rsi(self, series, n: int = 14):
+        """
+        Valódi RSI számítás (Wilder's Smoothing).
+        Ez pontosabb és jobban egyezik a TradingView értékeivel.
+        """
+        import pandas as pd
+        s = pd.Series(series, dtype='float64')
+        delta = s.diff()
+
+        gain = delta.clip(lower=0.0)
+        loss = -delta.clip(upper=0.0)
+
+        # EMA helyett Wilder's Smoothing (RMA)
+        avg_gain = self._rma(gain, n)
+        avg_loss = self._rma(loss, n)
+
+        rs = avg_gain / avg_loss.replace(0, 1e-12) # Nullával osztás védelem
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+
+    # ---------- HTF trend filter (Biztonságosabb) ----------
     def _mb_trend_filter(
         self,
         symbol: str,
@@ -6452,73 +6526,51 @@ class CryptoBotApp:
         slow: int = 50,
         invert: bool | None = None,
     ) -> int:
-        """+1 bull, -1 bear, 0 semleges – magasabb idősík trendje a GYORS EMA SZERINT.
-           Ha be van kapcsolva az EMA INVERT, akkor a trend értelmezése is felcserélődik.
+        """
+        HTF Filter: +1 (Bull), -1 (Bear), 0 (Semleges/Hiba).
+        FONTOS: Ha ezt ciklusban hívod, a hálózati kérés (fetch_ohlcv) lassíthatja a botot!
         """
         try:
+            # Adatlekérés (csak ha muszáj)
             with self._ex_lock:
-                ohlcv = self.exchange.fetch_ohlcv(symbol, tf, limit=max(slow*2, 120))  # type: ignore[arg-type]
+                # Limit optimalizálás: nem kell 500 gyertya, elég a slow EMA beállásához kb 2-3x
+                ohlcv = self.exchange.fetch_ohlcv(symbol, tf, limit=max(slow * 3, 100))
+            
             if not ohlcv:
                 return 0
+                
             import pandas as pd
-            df = pd.DataFrame(ohlcv, columns=['ts','o','h','l','c','v'])
-            s = df['c'].astype(float)
+            # Csak a Close árak kellenek, ne építsünk teljes DataFrame-et feleslegesen
+            closes = [x[4] for x in ohlcv] 
+            s = pd.Series(closes, dtype='float64')
+            
+            if len(s) < slow + 5:
+                return 0
+
             ema_f = s.ewm(span=fast, adjust=False).mean().iloc[-1]
             ema_s = s.ewm(span=slow, adjust=False).mean().iloc[-1]
 
             # Alap trend irány
+            trend = 0
             if ema_f > ema_s:
                 trend = +1
             elif ema_f < ema_s:
                 trend = -1
-            else:
-                trend = 0
 
-            # Invert flag: ha nincs paraméter, *fő szálon* még olvashatunk widgetet
+            # Invertálás
             if invert is None:
                 try:
-                    if hasattr(self, "mb_invert_ema"):
-                        invert = bool(self.mb_invert_ema.get())
-                    else:
-                        invert = False
+                    # Biztonságos hozzáférés
+                    invert = bool(getattr(self, "mb_invert_ema", False).get())
                 except Exception:
                     invert = False
 
-            if invert:
-                trend = -trend
+            return -trend if invert else trend
 
-            return trend
-
-        except Exception:
+        except Exception as e:
+            # Opcionális: logolhatod a hibát, ha debuggolsz
+            # print(f"Trend filter error: {e}")
             return 0
-
-    # ---------- ATR számítás ----------
-    def _mb_atr(self, df, n: int = 14):
-        """Classic ATR pandas-szal: True Range -> EMA."""
-        import pandas as pd
-        h = df['h'].astype(float); l = df['l'].astype(float); c = df['c'].astype(float)
-        prev_c = c.shift(1)
-        tr = pd.concat([(h-l).abs(), (h-prev_c).abs(), (l-prev_c).abs()], axis=1).max(axis=1)
-        atr = tr.ewm(span=n, adjust=False).mean()
-        return atr
-
-    # ---------- RSI Képlet ----------
-    def _mb_rsi(self, series, n: int = 14):
-        """RSI klasszikus képlettel (EMA-s simítással). Visszaad: pandas Series."""
-        import pandas as pd
-        s = pd.Series(series, dtype='float64')
-        delta = s.diff()
-
-        gain = delta.clip(lower=0.0)
-        loss = -delta.clip(upper=0.0)
-
-        # EMA-s átlagok – stabilabb, mint a sima SMA
-        avg_gain = gain.ewm(alpha=1.0/n, adjust=False).mean()
-        avg_loss = loss.ewm(alpha=1.0/n, adjust=False).mean()
-
-        rs = avg_gain / avg_loss.replace(0, 1e-12)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
 
     # ---------- Méret-számítás (budget támogatással) ----------
     def _mb_compute_size(
