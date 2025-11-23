@@ -1333,6 +1333,14 @@ class CryptoBotApp:
         btn_refresh = ttk.Button(bf, text="Összes egyenleg frissítése", command=self.refresh_all_funds_balances)
         btn_refresh.pack(pady=5)
 
+        # Margin "beragadt" kötelezettségek célzott rendezése
+        btn_repay = ttk.Button(
+            bf,
+            text="Beragadt margin kötelezettségek rendezése",
+            command=self.repay_stuck_margin
+        )
+        btn_repay.pack(pady=(0, 5))
+
         # 2. Transfers (Átvezetési vezérlők, a régi logika megtartásával)
         ff = ttk.Labelframe(self.tab_funds, text="Átvezetés", padding=10); ff.pack(fill=tk.X, padx=10, pady=5)
 
@@ -4163,6 +4171,184 @@ class CryptoBotApp:
 
             # 7. A worker indítása háttérszálon
             threading.Thread(target=worker, daemon=True).start()
+
+    # ---- Margin "beragadt" kötelezettségek rendezése (cross margin, KuCoin szerinti maxRepayAmount alapján) ----
+    def repay_stuck_margin(self):
+        """
+        Funds fülön lévő 'Repay' gombhoz.
+
+        Ahelyett, hogy saját magunk számolnánk a törleszthető összeget cross/isolated
+        account view-ból, közvetlenül a KuCoin margin account endpointját kérdezzük le:
+
+            GET /api/v3/margin/account
+
+        Ez tartalmazza devizánként:
+            - liability        (tartozás)
+            - maxRepayAmount   (mennyi törlesztés ENGEDÉLYEZETT)
+
+        A repay hívás pedig:
+            POST /api/v3/margin/repay  body = {"currency": "...", "size": "..."}
+
+        => Így elkerüljük a 130203 (Insufficient balance / max borrowing exceeded) hibákat,
+           mert csak a maxRepayAmount-ig próbálunk törleszteni.
+        """
+        if self.public_mode.get():
+            messagebox.showwarning(
+                "Privát mód szükséges",
+                "Kapcsold ki a publikus módot és állítsd be az API kulcsokat."
+            )
+            return
+
+        def worker():
+            import math
+
+            try:
+                ex = self.exchange
+                if not ex:
+                    raise RuntimeError("Nincs aktív exchange kliens.")
+
+                # 1) KuCoin margin account – ez adja a liabilityList + maxRepayAmount mezőket
+                with self._ex_lock:
+                    acc_raw = ex._rest_get("/api/v3/margin/account", {})  # type: ignore[union-attr]
+
+                if not isinstance(acc_raw, dict) or str(acc_raw.get("code", "")) != "200000":
+                    raise RuntimeError(f"Margin account hívás hiba / nem 200000: {acc_raw!r}")
+
+                data = acc_raw.get("data", {}) or {}
+                liab_list = data.get("liabilityList", []) or []
+
+                # 2) Devizánként kigyűjtjük a liability + maxRepayAmount adatokat
+                repay_ops: list[tuple[str, float, float, float]] = []
+                # (ccy, liability, max_repay, safe_amt)
+
+                for item in liab_list:
+                    ccy  = (item.get("currency") or "").upper()
+                    if not ccy:
+                        continue
+
+                    try:
+                        liab = float(item.get("liability") or 0.0)
+                        max_r = float(item.get("maxRepayAmount") or 0.0)
+                    except Exception:
+                        continue
+
+                    # Csak akkor érdekes, ha tényleg van tartozás
+                    if liab <= 0:
+                        continue
+
+                    # Ha a KuCoin szerint maxRepayAmount == 0 → semmit nem enged törleszteni
+                    if max_r <= 0:
+                        # Logoljuk, hogy értsd miért nincs repay kísérlet
+                        self.root.after(0, lambda c=ccy, l=liab: (
+                            self.funds_log.insert(
+                                tk.END,
+                                f"ℹ️ {c}: liability={l:.8f}, de maxRepayAmount=0 – KuCoin jelenleg nem enged repay-t erre a devizára.\n"
+                            ),
+                            self.funds_log.see(tk.END)
+                        ))
+                        continue
+
+                    # Alapelv: sose próbáljunk többet törleszteni, mint a liability
+                    raw_repay = min(liab, max_r)
+
+                    # Biztonsági margin:
+                    # - pici epsilon kivonása (float hibák ellen)
+                    # - 0.999 faktor, hogy biztosan a maxRepay alatt maradjunk
+                    eps = 1e-8
+                    safe_amt = max(0.0, raw_repay - eps) * 0.999
+
+                    # Lefelé kerekítés 8 tizedesre (KuCoin USDT/általános pattern)
+                    safe_amt = math.floor(safe_amt * 1e8) / 1e8
+
+                    if safe_amt <= 0:
+                        # Ha a biztonságos összeg gyakorlatilag 0-ra kerekedik, akkor ezt a devizát kihagyjuk
+                        self.root.after(0, lambda c=ccy, l=liab, mr=max_r: (
+                            self.funds_log.insert(
+                                tk.END,
+                                f"ℹ️ {c}: liability={l:.8f}, maxRepayAmount={mr:.8f}, "
+                                f"de a biztonságos repay összeg túl kicsi – kihagyva.\n"
+                            ),
+                            self.funds_log.see(tk.END)
+                        ))
+                        continue
+
+                    repay_ops.append((ccy, liab, max_r, safe_amt))
+
+                if not repay_ops:
+                    # Semmi olyat nem találtunk, amire KuCoin szerint van törleszthető összeg
+                    self.root.after(0, lambda: (
+                        self.funds_log.insert(
+                            tk.END,
+                            "ℹ️ Nem találtam olyan devizát, amelyre a KuCoin maxRepayAmount > 0 lett volna. "
+                            "Nincs automatikusan törleszthető margin kötelezettség.\n"
+                        ),
+                        self.funds_log.see(tk.END)
+                    ))
+                    return
+
+                # 3) Devizánként repay hívás a KuCoin által engedett safe_amt értékkel
+                for ccy, liab, max_r, safe_amt in repay_ops:
+                    body = {
+                        "currency": ccy,
+                        "size": f"{safe_amt:.8f}",
+                    }
+
+                    try:
+                        with self._ex_lock:
+                            resp = ex._rest_post("/api/v3/margin/repay", body)  # type: ignore[union-attr]
+
+                        def _log_repay(c=ccy, l=liab, mr=max_r, a=safe_amt, r=resp):
+                            # Diagnosztika: megmutatjuk a liability, maxRepayAmount és küldött összeget
+                            self.funds_log.insert(
+                                tk.END,
+                                f"↪ Repay próbálkozás {c}: liability={l:.8f}, maxRepayAmount={mr:.8f}, küldött={a:.8f}\n"
+                            )
+
+                            if isinstance(r, dict):
+                                code = str(r.get("code", "?"))
+                                msg  = str(r.get("msg", "")) if r.get("msg") is not None else ""
+
+                                if code == "200000":
+                                    self.funds_log.insert(
+                                        tk.END,
+                                        f"✅ Repay sikeres: {c} {a:.8f} – code={code}\n"
+                                    )
+                                elif code == "130203":
+                                    # Insufficient account balance / max borrowing exceeded
+                                    self.funds_log.insert(
+                                        tk.END,
+                                        f"❌ Repay elutasítva {c} {a:.8f}: 130203 – "
+                                        f"Nincs elég margin egyenleg ehhez a törlesztéshez (KuCoin szerint). msg='{msg}'\n"
+                                    )
+                                else:
+                                    self.funds_log.insert(
+                                        tk.END,
+                                        f"❌ Repay elutasítva {c} {a:.8f}: code={code} msg='{msg}'\n"
+                                    )
+                            else:
+                                # nem dict válasz – best-effort log
+                                self.funds_log.insert(
+                                    tk.END,
+                                    f"✅ Repay elküldve (nem standard válasz): {c} {a:.8f}\n"
+                                )
+
+                            self.funds_log.see(tk.END)
+
+                        self.root.after(0, _log_repay)
+
+                    except Exception as e:
+                        self.root.after(0, lambda c=ccy, e=e: (
+                            self.funds_log.insert(tk.END, f"❌ Repay hiba {c}: {e}\n"),
+                            self.funds_log.see(tk.END)
+                        ))
+
+                # 4) Sikeres kör után frissítjük az összes egyenleget is (Funds táblázat + cache)
+                self.root.after(0, self.refresh_all_funds_balances)
+
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror("Repay hiba", str(e)))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # --- Thread-safe logoló segéd ---
     def _safe_log(self, text: str):
