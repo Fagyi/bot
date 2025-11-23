@@ -5680,7 +5680,8 @@ class CryptoBotApp:
                         df = pd.DataFrame(ohlcv, columns=['ts','o','h','l','c','v'])
                         last_ts = int(df['ts'].iloc[-1])
                         self._mb_last_bar_ts[key] = last_ts
-                        self._mb_last_df = df.copy()
+                        # fontos: itt MÉG nem cache-eljük self._mb_last_df-et,
+                        # előbb ráengedjük a realtime (WS) árat a legutóbbi gyertyára
                     else:
                         df = self._mb_last_df.copy()
                         last_ts = int(df["ts"].iloc[-1])
@@ -5719,6 +5720,8 @@ class CryptoBotApp:
                         pass
 
                     # --- Élő high/low/close frissítés a legutóbbi gyertyára WS alapján ---  ### WS-HIGH/LOW
+                    # Ez MINDEN ciklusban lefut: akár volt REST refresh, akár nem.
+                    # Így az indikátorok (EMA/RSI/ATR/BRK) mindig a WS-sel frissített utolsó gyertyára számolódnak.
                     try:
                         if self._is_pos_num(last_px_rt) and last_px_rt > 0:
                             idx_last = df.index[-1]
