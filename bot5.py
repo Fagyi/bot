@@ -4623,29 +4623,28 @@ class CryptoBotApp:
             messagebox.showinfo("Manuális zárás", "Ez a pozíció már zárva van a history szerint.")
             return
 
-        # 2) Megkeressük a szimulált pozíciót OID alapján
-        sim_list = None
+        # 2) Megkeressük a szimulált pozíciót OID alapján – LOCK alatt keressük a listában
         sim_index = None
-        sim_side_for_close = None  # 'buy' (long) vagy 'sell' (short) – az eredeti nyitó oldal
+        sim_side_for_close = None  # 'buy' (long) vagy 'sell' (short)
         sim_pos = None
 
-        for lst_name, logical_side in [("_sim_pos_long", "buy"), ("_sim_pos_short", "sell")]:
-            lst = getattr(self, lst_name, [])
-            for i, pos in enumerate(lst):
-                if str(pos.get("oid")) == oid:
-                    sim_list = lst
-                    sim_index = i
-                    sim_side_for_close = logical_side
-                    sim_pos = pos
+        with self._mb_lock:
+            for lst_name, logical_side in [("_sim_pos_long", "buy"), ("_sim_pos_short", "sell")]:
+                lst = getattr(self, lst_name, [])
+                for i, pos in enumerate(lst):
+                    if str(pos.get("oid")) == oid:
+                        sim_index = i
+                        sim_side_for_close = logical_side
+                        sim_pos = pos
+                        break
+                if sim_pos is not None:
                     break
-            if sim_list is not None:
-                break
 
-        if sim_list is None or sim_index is None or sim_pos is None:
+        if sim_index is None or sim_side_for_close is None or sim_pos is None:
             messagebox.showerror("Manuális zárás", "Nem találom a szimulált pozíciót ehhez az OID-hoz.")
             return
 
-        # 3) Megerősítés – méret/entry a szimulált poziból
+        # 3) Megerősítés – méret/entry a szimulált poziból (ez már lockon kívül olvasható snapshotként)
         qty = sim_pos.get("size")
         entry = sim_pos.get("entry")
 
@@ -4718,7 +4717,7 @@ class CryptoBotApp:
             self._close_sim_by_index(
                 side=sim_side_for_close,
                 idx=sim_index,
-                close_px=last_px,
+                exit_px=last_px,
                 reason="manual_hist_close",
             )
         except Exception as e:
@@ -5059,62 +5058,119 @@ class CryptoBotApp:
         if not silent:
             self._safe_log("♻️ MarginBot cfg frissítve futás közben.\n")
 
-    def _close_sim_by_index(self, side: str, idx: int, exit_px: float):
-        lst = self._sim_pos_long if side == 'buy' else self._sim_pos_short
-        if idx < 0 or idx >= len(lst):
-            return
-
-        pos   = lst[idx]
-        entry = float(pos.get('entry', 0.0))
-        sz    = float(pos.get('size', 0.0))
-
-        gross = (exit_px - entry) * sz * (1 if side == 'buy' else -1)
-
-        fee_rate = self._mb_get_taker_fee()
-        f_open, f_close, f_total = self._mb_sum_fee_actual_or_est(pos, exit_px, fee_rate)
-
-        pnl = gross - f_total
-
+    def _close_sim_by_index(self, side: str, idx: int, exit_px: float, reason: str = "", pos_obj=None):
+        """
+        Egy szimulált pozíció lezárása index alapján.
+        - side: 'buy' → _sim_pos_long, 'sell' → _sim_pos_short
+        - MINDEN lista- és pool/pnl művelet self._mb_lock alatt történik.
+        - pos_obj: ha meg van adva, identity alapján ellenőrizzük, hogy tényleg azt a
+          pozíciót zárjuk, amit a hívó oldalán kezeltünk. Ha közben a lista
+          eltolódott vagy a pozíció már kikerült, akkor csendben return.
+        """
         with self._mb_lock:
-            self._sim_pnl_usdt   += pnl
+            lst = self._sim_pos_long if side == 'buy' else self._sim_pos_short
+
+            if idx < 0 or idx >= len(lst):
+                return
+
+            # Ha a hívó adott konkrét pos_obj-ot, ellenőrizzük, hogy még mindig ugyanaz ül-e ott.
+            pos = lst[idx]
+            if pos_obj is not None and pos is not pos_obj:
+                # Próbáljuk megkeresni identity alapján
+                real_idx = None
+                for j, p in enumerate(lst):
+                    if p is pos_obj:
+                        real_idx = j
+                        break
+                if real_idx is None:
+                    # már kikerült a listából → nincs teendő
+                    return
+                idx = real_idx
+                pos = lst[idx]
+
+            entry = float(pos.get('entry', 0.0))
+            sz    = float(pos.get('size', 0.0))
+
+            gross = (exit_px - entry) * sz * (1 if side == 'buy' else -1)
+
+            fee_rate = self._mb_get_taker_fee()
+            f_open, f_close, f_total = self._mb_sum_fee_actual_or_est(pos, exit_px, fee_rate)
+
+            pnl = gross - f_total
+
+            # pool + összesített PnL frissítése
+            self._sim_pnl_usdt       += pnl
             self._pool_balance_quote += pnl
-            self._pool_used_quote -= (float(pos.get('commit_usdt', 0.0)) + float(pos.get('fee_reserved', 0.0)))
-            self._pool_used_quote  = max(0.0, self._pool_used_quote)
+            self._pool_used_quote    -= (float(pos.get('commit_usdt', 0.0)) +
+                                         float(pos.get('fee_reserved', 0.0)))
+            self._pool_used_quote     = max(0.0, self._pool_used_quote)
 
-        try:
-            symbol_safe = normalize_symbol(self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL)))
-        except Exception:
-            symbol_safe = "UNKNOWN"
-        try:
-            import time as _t
-            self._sim_history.append({
-                "partial": False,
-                "symbol": symbol_safe,
-                "side": side,
-                "entry": float(entry),
-                "exit": float(exit_px),
-                "size_closed": float(sz),
-                "pnl": float(pnl),
-                "ts": _t.time()
-            })
-        except Exception:
-            pass
+            total_pnl    = float(self._sim_pnl_usdt)
+            pool_used    = float(self._pool_used_quote)
+            pool_balance = float(self._pool_balance_quote)
 
+            try:
+                symbol_safe = normalize_symbol(
+                    self._mb_get_str('mb_symbol', self._mb_get_str('mt_symbol', DEFAULT_SYMBOL))
+                )
+            except Exception:
+                symbol_safe = "UNKNOWN"
+
+            try:
+                import time as _t
+                self._sim_history.append({
+                    "partial": False,
+                    "symbol": symbol_safe,
+                    "side": side,
+                    "entry": float(entry),
+                    "exit": float(exit_px),
+                    "size_closed": float(sz),
+                    "pnl": float(pnl),
+                    "ts": _t.time(),
+                    "reason": reason or "",
+                })
+            except Exception:
+                pass
+
+            try:
+                open_oid = str(pos.get('oid')) if pos.get('oid') else None
+            except Exception:
+                open_oid = None
+
+            # végül töröljük a pozíciót a listából
+            del lst[idx]
+
+        # --- lockon kívül: log + history exit update ---
         self._safe_log(
             f"🔚 SIM CLOSE {side.upper()} | entry={entry:.6f} → exit={exit_px:.6f} | "
             f"sz={sz:.6f} | GROSS={gross:+.6f} | fee_tot≈{f_total:.6f} | "
-            f"PNL={pnl:+.6f} | Total={self._sim_pnl_usdt:+.2f} | "
-            f"pool used={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f}\n"
+            f"PNL={pnl:+.6f} | Total={total_pnl:+.2f} | "
+            f"pool used={pool_used:.2f}/{pool_balance:.2f}"
+            + (f" | reason={reason}" if reason else "")
+            + "\n"
         )
 
-        try:
-            open_oid = str(pos.get('oid')) if pos.get('oid') else None
-            if open_oid:
+        if open_oid:
+            try:
                 self._mb_hist_update_exit(open_oid, exit_px, fee_total=f_total, pnl_final=pnl)
-        except Exception:
-            pass
+            except Exception:
+                pass
 
-        del lst[idx]
+        # --- lockon kívül: log + history exit update (itt már nem piszkáljuk a sim listát) ---
+        self._safe_log(
+            f"🔚 SIM CLOSE {side.upper()} | entry={entry:.6f} → exit={exit_px:.6f} | "
+            f"sz={sz:.6f} | GROSS={gross:+.6f} | fee_tot≈{f_total:.6f} | "
+            f"PNL={pnl:+.6f} | Total={total_pnl:+.2f} | "
+            f"pool used={pool_used:.2f}/{pool_balance:.2f}"
+            + (f" | reason={reason}" if reason else "")
+            + "\n"
+        )
+
+        if open_oid:
+            try:
+                self._mb_hist_update_exit(open_oid, exit_px, fee_total=f_total, pnl_final=pnl)
+            except Exception:
+                pass
 
     def _live_close_pos(self,
                         side: str,           # A pozíció nyitó iránya ('buy' = long, 'sell' = short)
@@ -5883,20 +5939,33 @@ class CryptoBotApp:
 
                     # BUY-ok kezelése
                     i = 0
-                    while i < len(self._sim_pos_long):
-                        pos = self._sim_pos_long[i]
+                    while True:
+                        # Pozíció snapshot lock alatt, de a menedzsment / API hívás már lock nélkül
+                        with self._mb_lock:
+                            if i >= len(self._sim_pos_long):
+                                break
+                            pos = self._sim_pos_long[i]
+
                         try:
                             need_close = False
                             if pos.get('mgmt') == 'atr' and atr_val is not None:
                                 need_close = _manage_atr_on_pos(pos, px_for_mgmt, atr_val)
+                                close_reason = "atr_mgmt"
                             elif pos.get('mgmt') == 'fixed':
                                 need_close = _manage_fixed_on_pos(pos, px_for_mgmt)
+                                close_reason = "fixed_mgmt"
+                            else:
+                                close_reason = "other_mgmt"
 
                             if need_close:
                                 if dry:
                                     # SIM zárás – külön guard, hogy ez se ölje meg a ciklust
                                     try:
-                                        self._close_sim_by_index('buy', i, px_for_mgmt)
+                                        self._close_sim_by_index(
+                                            'buy', i, px_for_mgmt,
+                                            reason=close_reason,
+                                            pos_obj=pos,
+                                        )
                                     except Exception as e:
                                         self._safe_log(f"❌ SIM long zárás hiba: {e}\n")
                                         i += 1
@@ -5916,7 +5985,11 @@ class CryptoBotApp:
                                     if ok:
                                         # csak sikeres LIVE zárás után tükörzárunk SIM-ben
                                         try:
-                                            self._close_sim_by_index('buy', i, px_for_mgmt)
+                                            self._close_sim_by_index(
+                                                'buy', i, px_for_mgmt,
+                                                reason=close_reason,
+                                                pos_obj=pos,
+                                            )
                                         except Exception as e:
                                             self._safe_log(f"❌ SIM tükrözés hiba (long): {e}\n")
                                             i += 1
@@ -5942,20 +6015,33 @@ class CryptoBotApp:
 
                     # SELL-ek kezelése
                     i = 0
-                    while i < len(self._sim_pos_short):
-                        pos = self._sim_pos_short[i]
+                    while True:
+                        # Snapshot lock alatt
+                        with self._mb_lock:
+                            if i >= len(self._sim_pos_short):
+                                break
+                            pos = self._sim_pos_short[i]
+
                         try:
                             need_close = False
                             if pos.get('mgmt') == 'atr' and atr_val is not None:
                                 need_close = _manage_atr_on_pos(pos, px_for_mgmt, atr_val)
+                                close_reason = "atr_mgmt"
                             elif pos.get('mgmt') == 'fixed':
                                 need_close = _manage_fixed_on_pos(pos, px_for_mgmt)
+                                close_reason = "fixed_mgmt"
+                            else:
+                                close_reason = "other_mgmt"
 
                             if need_close:
                                 if dry:
                                     # SIM zárás – külön guard
                                     try:
-                                        self._close_sim_by_index('sell', i, px_for_mgmt)
+                                        self._close_sim_by_index(
+                                            'sell', i, px_for_mgmt,
+                                            reason=close_reason,
+                                            pos_obj=pos,
+                                        )
                                     except Exception as e:
                                         self._safe_log(f"❌ SIM short zárás hiba: {e}\n")
                                         i += 1
@@ -5973,7 +6059,11 @@ class CryptoBotApp:
 
                                     if ok:
                                         try:
-                                            self._close_sim_by_index('sell', i, px_for_mgmt)
+                                            self._close_sim_by_index(
+                                                'sell', i, px_for_mgmt,
+                                                reason=close_reason,
+                                                pos_obj=pos,
+                                            )
                                         except Exception as e:
                                             self._safe_log(f"❌ SIM tükrözés hiba (short): {e}\n")
                                             i += 1
