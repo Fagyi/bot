@@ -1630,7 +1630,8 @@ class CryptoBotApp:
                 unique_ccy: set[str] = set()
 
                 # ---------- 1) SPOT ----------
-                r = ex._rest_get("/api/v1/accounts", {})  # type: ignore[union-attr]
+                with self._ex_lock:
+                    r = ex._rest_get("/api/v1/accounts", {})
                 spot_accounts = r.get("data", []) if isinstance(r, dict) else []
 
                 # cache: spot[CCY] = {"main": {...}, "trade": {...}, "futures": {...}}
@@ -1659,7 +1660,8 @@ class CryptoBotApp:
                 self._balance_cache["spot"] = spot_cache
 
                 # ---------- 2) CROSS ----------
-                cross_resp = ex.fetch_cross_accounts()  # type: ignore[union-attr]
+                with self._ex_lock:
+                    cross_resp = ex.fetch_cross_accounts()  # type: ignore[union-attr]
                 cdata = cross_resp.get("data", {}) if isinstance(cross_resp, dict) else {}
                 accounts = cdata.get("accounts", []) or cdata.get("accountList", []) or []
 
@@ -1694,7 +1696,8 @@ class CryptoBotApp:
                 self._balance_cache["cross"] = cross_cache
 
                 # ---------- 3) ISOLATED ----------
-                iso_resp = ex.fetch_isolated_accounts()  # type: ignore[union-attr]
+                with self._ex_lock:
+                    iso_resp = ex.fetch_isolated_accounts()  # type: ignore[union-attr]
                 idata = iso_resp.get("data", {}) if isinstance(iso_resp, dict) else getattr(iso_resp, "data", {}) or {}
                 assets = idata.get("assets", []) or []
 
@@ -1744,66 +1747,21 @@ class CryptoBotApp:
 
                 self._balance_cache["isolated"] = iso_cache
 
-                # ---------- 4) Árfolyamok – WS + cache + BULK REST ----------
-                import math
+                # ---------- 4) Árfolyamok – get_best_price használatával ----------
 
-                # alap: USDT = 1
                 prices: dict[str, float] = {"USDT": 1.0}
 
-                # 4/a) próbáljuk beemelni a margin bot szimbólumát WS-ből, ha lehetséges
-                try:
-                    mb_sym = normalize_symbol(
-                        self._mb_get_str("mb_symbol", self._mb_get_str("mt_symbol", DEFAULT_SYMBOL))
-                    )
-                except Exception:
-                    mb_sym = DEFAULT_SYMBOL
-
-                try:
-                    base_sym, quote_sym = split_symbol(mb_sym)
-                except Exception:
-                    base_sym, quote_sym = None, None
-
-                ws_px = None
-                # Ticker WS ár
-                try:
-                    tws = getattr(self, "_ticker_ws", None)
-                    if tws is not None:
-                        ws_px = float(tws.get_last_price() or 0.0)
-                        if not ws_px or math.isnan(ws_px) or ws_px <= 0:
-                            ws_px = None
-                except Exception:
-                    ws_px = None
-
-                # Worker cache (_mb_last_rt_px) fallback
-                if (ws_px is None or ws_px <= 0) and hasattr(self, "_mb_last_rt_px"):
+                for ccy in unique_ccy:
+                    # USDT alapértelmezésben 1
+                    if ccy.upper() == "USDT":
+                        continue
                     try:
-                        ws_px = float((self._mb_last_rt_px or {}).get(mb_sym, 0.0) or 0.0)
-                        if not ws_px or math.isnan(ws_px) or ws_px <= 0:
-                            ws_px = None
+                        sym = f"{ccy}-USDT"
+                        px = self.get_best_price(sym)
+                        if self._is_pos_num(px) and px > 0:
+                            prices[ccy] = float(px)
                     except Exception:
-                        ws_px = None
-
-                # Ha a pár BASE-USDT formájú, tudjuk belőle a BASE árát
-                if ws_px and quote_sym == "USDT":
-                    prices[base_sym] = ws_px  # pl. SOL-USDT → SOL ára USDT-ben
-
-                # 4/b) BULK REST csak azoknak a CCY-knak, ahol még nincs ár
-                to_fetch = [f"{ccy}-USDT" for ccy in unique_ccy
-                            if ccy.upper() != "USDT" and ccy not in prices]
-
-                prices_raw = {}
-                if to_fetch:
-                    try:
-                        with self._ex_lock:
-                            prices_raw = self.exchange.fetch_last_prices_bulk(to_fetch)  # type: ignore[union-attr]
-                    except Exception:
-                        prices_raw = {}
-
-                for sym, px in (prices_raw or {}).items():
-                    try:
-                        ccy = sym.split("-")[0].upper()
-                        prices.setdefault(ccy, float(px or 0.0))
-                    except Exception:
+                        # ha bármi gond van az adott devizával, egyszerűen kihagyjuk
                         continue
 
                 # 4/c) (opcionális) utolsó per-CCY REST fallback már nem nagyon szükséges:
@@ -1906,57 +1864,22 @@ class CryptoBotApp:
                 # Csendes hiba, ha a combobox még nem létezik (pl. tesztelés alatt)
                 pass
 
-    # ---- pretty isolated view ----
     def pretty_isolated_accounts(self, payload: dict) -> str:
         data = payload.get('data', payload)
         assets = data.get('assets', []) or []
         lines = ["Isolated Margin – Részletes nézet", ""]
 
-        # --- Szimbólumok listája az árakhoz ---
+        # --- Szimbólumok listája az árlekéréshez ---
         symbols = [a.get('symbol', '').upper() for a in assets if a.get('symbol')]
         prices: Dict[str, float] = {}
 
-        # 1) Először megpróbálunk minden szimbólumra Ticker WS árat
+        # Minden szimbólumhoz get_best_price
         for sym in symbols:
-            px = None
-            # 1/a) Ticker WS
             try:
-                tws = getattr(self, "_ticker_ws", None)
-                if tws is not None:
-                    px = float(tws.get_last_price() or 0.0)
-                    if px <= 0:
-                        px = None
+                px = self.get_best_price(sym)
+                prices[sym] = float(px if (self._is_pos_num(px) and px > 0) else 0.0)
             except Exception:
-                px = None
-
-            # 1/b) Worker cache (_mb_last_rt_px)
-            if (px is None or px <= 0) and hasattr(self, "_mb_last_rt_px"):
-                try:
-                    px = float((self._mb_last_rt_px or {}).get(sym, 0.0) or 0.0)
-                    if px <= 0:
-                        px = None
-                except Exception:
-                    px = None
-
-            # ideiglenesen None-t rakunk, REST bulk majd tölti
-            prices[sym] = px or 0.0
-
-        # 2) Bulk REST árlekérés — CSAK azoknak, ahol nincs WS ár
-        need_rest = [s for s, px in prices.items() if px <= 0]
-        if need_rest and self.exchange:
-            try:
-                with self._ex_lock:
-                    bulk_rest = self.exchange.fetch_last_prices_bulk(need_rest)  # type: ignore[union-attr]
-                for s in need_rest:
-                    if s in bulk_rest:
-                        try:
-                            prices[s] = float(bulk_rest[s] or 0.0)
-                        except:
-                            pass
-            except Exception:
-                pass
-
-        # Most mindegyik sym-hez van WS → cache → bulkREST ára (0, ha nem sikerült)
+                prices[sym] = 0.0
 
         # --- Formázott sorok generálása ---
         for a in assets:
@@ -1977,42 +1900,49 @@ class CryptoBotApp:
             quote_av  = float(quote.get('available', 0) or 0)
             quote_li  = float(quote.get('liability', 0) or 0)
 
-            #  ---- WS / cache / REST ár használata ----
-            last = float(prices.get(sym, 0.0) or 0.0)
+            # ---- Ár = CSUPÁN self.get_best_price ----
+            last = float(prices.get(sym, 0.0))
 
-            # 3) Ha sem WS, sem bulk REST nem sikerült → REST fallback (1 szimbólumos)
-            if last <= 0 and self.exchange:
-                try:
-                    with self._ex_lock:
-                        last = float(self.exchange.fetch_last_price(sym))  # type: ignore[union-attr]
-                except Exception:
-                    last = 0.0
-
-            # Nettó érték számítás
+            # Nettó érték számítás (ha van ár)
             net_quote = base_tot * last + quote_tot - quote_li if last > 0 else None
 
-            # Sorok összeállítása
             if (base_tot > 0) or (quote_tot > 0) or (quote_li > 0) or (debt_ratio > 0):
                 lines.append(f"── {sym}  [{status}]")
                 lines.append(f"   Risk: {self._risk_label(debt_ratio)}")
+
                 if last > 0:
                     lines.append(f"   Last Price: {last:,.6f} {quote_ccy}")
-                lines.append(f"   {base_ccy}: total {base_tot:,.6f}  |  available {base_av:,.6f}  |  liability {base_li:,.6f}")
-                lines.append(f"   {quote_ccy}: total {quote_tot:,.6f} |  available {quote_av:,.6f} | liability {quote_li:,.6f}")
+
+                lines.append(
+                    f"   {base_ccy}: total {base_tot:,.6f}  |  available {base_av:,.6f}  |  liability {base_li:,.6f}"
+                )
+                lines.append(
+                    f"   {quote_ccy}: total {quote_tot:,.6f} |  available {quote_av:,.6f} | liability {quote_li:,.6f}"
+                )
 
                 if net_quote is not None:
                     lines.append(f"   Net Value (≈): {net_quote:,.2f} {quote_ccy}")
-                    side_txt = None; closable = None
+
+                    # Pozíció irány és zárható méret
+                    side_txt = None
+                    closable = None
                     if base_li > 0:
-                        side_txt = "SHORT"; closable = base_li
+                        side_txt = "SHORT"
+                        closable = base_li
                     elif base_tot > 0:
-                        side_txt = "LONG"; closable = base_tot
+                        side_txt = "LONG"
+                        closable = base_tot
+
                     if side_txt and closable is not None:
-                        lines.append(f"   Position: {side_txt}  |  Closable size (≈): {closable:,.6f} {base_ccy}")
+                        lines.append(
+                            f"   Position: {side_txt}  |  Closable size (≈): {closable:,.6f} {base_ccy}"
+                        )
+
                 lines.append("")
 
         if len(lines) <= 2:
             lines.append("Nincs releváns izolált eszköz/pozíció.")
+
         return "\n".join(lines)
 
     def _parse_isolated_rows(self, payload: dict) -> list[dict]:
@@ -2109,61 +2039,37 @@ class CryptoBotApp:
         symbols = [r["symbol"] for r in rows]
         prices: dict[str, float] = {}
 
-        # 1) Ticker WS + worker cache
+        # Egységes árlekérés minden szimbólumra: get_best_price (WS → cache → REST)
         for sym in symbols:
-            px = None
-            # 1/a) Ticker WS
             try:
-                tws = getattr(self, "_ticker_ws", None)
-                if tws is not None:
-                    px = float(tws.get_last_price() or 0.0)
-                    if px <= 0:
-                        px = None
+                px = self.get_best_price(sym)
+                prices[sym] = float(px if (self._is_pos_num(px) and px > 0) else 0.0)
             except Exception:
-                px = None
-
-            # 1/b) margin worker cache (_mb_last_rt_px)
-            if (px is None or px <= 0) and hasattr(self, "_mb_last_rt_px"):
-                try:
-                    px = float((self._mb_last_rt_px or {}).get(sym, 0.0) or 0.0)
-                    if px <= 0:
-                        px = None
-                except Exception:
-                    px = None
-
-            prices[sym] = px or 0.0
-
-        # 2) REST bulk fallback azoknak, ahol nem volt WS/cache ár
-        need_rest = [s for s, px in prices.items() if px <= 0]
-        if need_rest and self.exchange:
-            try:
-                with self._ex_lock:
-                    bulk_rest = self.exchange.fetch_last_prices_bulk(need_rest)  # type: ignore[union-attr]
-                for s in need_rest:
-                    if s in bulk_rest:
-                        try:
-                            prices[s] = float(bulk_rest[s] or 0.0)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+                prices[sym] = 0.0
 
         lines = [f"Cross Margin – Részletes nézet (QUOTE: {default_quote.upper()})", ""]
         for r in rows:
-            sym = r["symbol"]; side = r["side"]; closable = r["closable"]
-            base_ccy = sym.split("-")[0]; quote_ccy = sym.split("-")[1]
+            sym = r["symbol"]
+            side = r["side"]
+            closable = r["closable"]
+            base_ccy, quote_ccy = sym.split("-")[0], sym.split("-")[1]
+
             last = float(prices.get(sym, 0.0) or 0.0)
             est_val = f"{closable*last:,.2f} {quote_ccy}" if last > 0 else "n/a"
 
             lines.append(f"── {sym}  [{side}]")
             if last > 0:
-                lines.append(f"   Last Price: {last:,.6f} {quote_ccy}  |  Closable≈ {closable:,.6f} {base_ccy}  (~{est_val})")
+                lines.append(
+                    f"   Last Price: {last:,.6f} {quote_ccy}  |  "
+                    f"Closable≈ {closable:,.6f} {base_ccy}  (~{est_val})"
+                )
             else:
                 lines.append(f"   Closable≈ {closable:,.6f} {base_ccy}")
             lines.append(f"   {r['base']}")
             lines.append(f"   {r['quote']}")
             lines.append(f"   Risk: {r['risk']}")
             lines.append("")
+
         return "\n".join(lines)
 
     def _fill_isolated_table(self, rows: list[dict]):
@@ -2242,7 +2148,6 @@ class CryptoBotApp:
             self._safe_log(f"⚠️ Privát order WS init hiba: {e}\n")
             self._order_ws = None
 
-    # ---- price loop ----
     def _mt_start_price_loop(self):
         if self._mt_price_job:
             self.root.after_cancel(self._mt_price_job)
@@ -2259,46 +2164,30 @@ class CryptoBotApp:
                 self._mt_price_inflight = True
 
                 sym = normalize_symbol(self.mt_symbol.get())
-
-                # --- Websocket ár próba ---
                 try:
                     self._ensure_ticker_ws(sym)
                 except Exception:
                     pass
-
-                px_ws = 0.0
+                # ---- egységes árlekérés: WS → cache → REST ----
                 try:
-                    if getattr(self, "_ticker_ws", None) is not None:
-                        px_ws = float(self._ticker_ws.get_last_price() or 0.0)
+                    px = self.get_best_price(sym)
+                    if not self._is_pos_num(px) or px <= 0:
+                        px = 0.0
                 except Exception:
-                    px_ws = 0.0
-
-                if px_ws > 0:
-                    # Ha van élő ár, REST hívás nélkül frissítünk
-                    self._mt_price_inflight = False
-                    self.mt_price_lbl.config(text=f"Ár: {px_ws:.6f}")
-                    self._mt_update_estimate(px_ws)
-                    return
-
-                # --- REST fallback, ha még nincs websocket ár ---
-                def fetch():
                     px = 0.0
-                    if self.exchange:
-                        with self._ex_lock:
-                            px = float(self.exchange.fetch_last_price(sym))  # SDK/REST saját fallbackkel
-                    return px
 
-                def apply(px):
-                    self._mt_price_inflight = False
-                    self.mt_price_lbl.config(text=f"Ár: {px:.6f}" if px > 0 else "Ár: –")
-                    self._mt_update_estimate(px)
+                # ---- UI update ----
+                self._mt_price_inflight = False
+                if px > 0:
+                    self.mt_price_lbl.config(text=f"Ár: {px:.6f}")
+                else:
+                    self.mt_price_lbl.config(text="Ár: –")
 
-                def fail(_e):
-                    self._mt_price_inflight = False
+                # becslések frissítése
+                self._mt_update_estimate(px)
 
-                self._bg(fetch, apply, fail)
             finally:
-                # 1s-enként polloljuk a websocket/REST kombót
+                # 1s-enként polloljuk a websocket/REST kombót (most már get_best_price)
                 self._mt_price_job = self.root.after(1000, _tick)
 
         self._mt_price_job = self.root.after(100, _tick)
@@ -2364,31 +2253,13 @@ class CryptoBotApp:
             sym = normalize_symbol(self.mt_symbol.get())
             base, quote = split_symbol(sym)
 
-            # --- Élő ár: 1) Ticker WS  2) _mb_last_rt_px cache  3) REST fallback ---
-            px = 0.0
-
-            # 1) Ticker WS ár (public, mehet public módban is)
+            # --- Egységes élő ár: get_best_price (WS → cache → REST) ---
             try:
-                tws = getattr(self, "_ticker_ws", None)
-                if tws is not None:
-                    px = float(tws.get_last_price() or 0.0)
+                px = self.get_best_price(sym)
+                if not self._is_pos_num(px) or px <= 0:
+                    px = 0.0
             except Exception:
                 px = 0.0
-
-            # 2) Worker által cache-elt RT ár (ha van ilyen dict)
-            if (not px or px <= 0) and hasattr(self, "_mb_last_rt_px"):
-                try:
-                    px = float((self._mb_last_rt_px or {}).get(sym, 0.0) or 0.0)
-                except Exception:
-                    pass
-
-            # 3) REST fallback (csak ha van exchange példány)
-            if (not px or px <= 0) and self.exchange:
-                try:
-                    with self._ex_lock:
-                        px = float(self.exchange.fetch_last_price(sym))  # type: ignore[union-attr]
-                except Exception:
-                    px = 0.0
             
             # Ez a leglassabb hívás – egyenleg lekérés
             avail_base, avail_quote = self._mt_available(base, quote)
@@ -2435,7 +2306,7 @@ class CryptoBotApp:
                     # Visszaállítjuk a mezők állapotát az input mód alapján
                     self._mt_on_input_change()
                     
-                    # Becslés frissítése (itt már a WS/REST kombinált px megy be)
+                    # Becslés frissítése (itt már a get_best_price-ből jövő px megy be)
                     self._mt_update_estimate(px)
                 except Exception as e:
                     self.margin_log.insert(tk.END, f"❌ GUI frissítési hiba: {e}\n")
@@ -2578,14 +2449,18 @@ class CryptoBotApp:
         def worker(p_sym, p_side, p_typ, p_px_ui, p_size, p_funds, p_lev, p_auto, p_mode):
             try:
                 import math
-                # Ha market BUY-hoz csak size van → kell egy ár a sanitizer konverzióhoz
+
+                # Ár előkészítése:
+                # - Limitnél KÖTELEZŐ, a usertől jön (p_px_ui)
+                # - Marketnél, ha nincs megadva ár, akkor get_best_price (WS → cache → REST)
                 px = p_px_ui
-                if p_typ == "market" and p_side == "buy" and px is None:
+                if p_typ == "market" and (px is None or px <= 0):
                     try:
-                        with self._ex_lock:
-                            last = float(self.exchange.fetch_last_price(p_sym))
-                        if last > 0:
-                            px = last
+                        px_best = self.get_best_price(p_sym)
+                        if self._is_pos_num(px_best) and px_best > 0:
+                            px = px_best
+                        else:
+                            px = None
                     except Exception:
                         px = None
 
@@ -2631,10 +2506,7 @@ class CryptoBotApp:
                         )
 
                 else:
-                    # LIMIT rendelés – ha van külön limit hívásod, itt használd:
-                    #   resp = self.exchange.place_margin_limit_order(...)
-                    # Ha nincs, továbbra is marketet használsz? (nem ideális)
-                    # Itt konzisztensen előkészítjük a méretet:
+                    # LIMIT rendelés
                     if p_side == "buy":
                         # ha funds jön, számoljunk belőle size-t (lépésközre padlózva), majd szaniter
                         if p_size is None and (p_funds and p_funds > 0) and (px and px > 0):
@@ -2647,7 +2519,6 @@ class CryptoBotApp:
                         )
                         if sb is None or sb <= 0:
                             raise ValueError("Limit BUY: a számolt/kért méret a minimum alatt van.")
-                        # Küldd el a saját limit API-don (ha van). Itt demo: market helyett NEM ideális fallback.
                         with self._ex_lock:
                             resp = self.exchange.place_margin_limit_order(  # type: ignore[attr-defined]
                                 p_mode, p_sym, p_side, price=str(px),
@@ -2798,7 +2669,7 @@ class CryptoBotApp:
             self.log("⏳ Frissítés már folyamatban…\n")
             return
         self._tick_busy = True
-        self.log("🔄 Frissítés indul…")
+        self.log("🔄 Frissítés indul…\n")
 
         try:
             symbol = normalize_symbol(self.e_symbol.get())
@@ -2817,33 +2688,74 @@ class CryptoBotApp:
                 if getattr(self, "exchange", None) is None:
                     self.exchange = KucoinSDKWrapper(public_mode=True, log_fn=self.log)
 
-                with self._ex_lock:
-                    ohlcv = self.exchange.fetch_ohlcv(p_symbol, p_tf, limit=200)
+                df = None
+                use_cache_df = False
 
-                if not ohlcv:
-                    def _no_data():
-                        self.log("⚠ Nincs adat a szervertől.\n")
-                        self._tick_busy = False
-                    self.root.after(0, _no_data)
-                    return
+                # --- 1) Ha a MarginBot fut ugyanazon a páron/TF-en, használjuk a cache-elt df-et ---
+                try:
+                    if getattr(self, "_mb_running", False):
+                        mb_cfg = getattr(self, "_mb_cfg", {}) or {}
+                        mb_sym = normalize_symbol(mb_cfg.get("symbol", DEFAULT_SYMBOL))
+                        mb_tf  = mb_cfg.get("tf", "1m")
+                        if (
+                            mb_sym == p_symbol
+                            and mb_tf == p_tf
+                            and hasattr(self, "_mb_last_df")
+                        ):
+                            base_df = getattr(self, "_mb_last_df", None)
+                            if base_df is not None:
+                                df = base_df.copy()
+                                use_cache_df = True
+                except Exception:
+                    pass
 
-                df = pd.DataFrame(ohlcv, columns=['ts','o','h','l','c','v'])
+                # --- 2) Ha nincs használható cache, akkor REST-ből töltjük az OHLCV-t ---
+                if not use_cache_df:
+                    with self._ex_lock:
+                        ohlcv = self.exchange.fetch_ohlcv(p_symbol, p_tf, limit=200)
+
+                    if not ohlcv:
+                        def _no_data():
+                            self.log("⚠ Nincs adat a szervertől.\n")
+                            self._tick_busy = False
+                        self.root.after(0, _no_data)
+                        return
+
+                    df = pd.DataFrame(ohlcv, columns=['ts','o','h','l','c','v'])
+
+                # --- 3) Győződjünk meg róla, hogy float a close, majd számoljuk az MA-kat ---
+                try:
+                    df['c'] = df['c'].astype(float)
+                except Exception:
+                    pass
                 df['short'] = df['c'].rolling(p_short, min_periods=1).mean()
                 df['long']  = df['c'].rolling(p_long,  min_periods=1).mean()
 
+                # --- 4) UI frissítés főszálon ---
                 def _update_ui():
                     try:
                         last = df.iloc[-1]
-                        self.log(f"[{p_symbol} {p_tf}] close={last['c']:.6f}, short={last['short']:.6f}, long={last['long']:.6f}\n")
+                        self.log(
+                            f"[{p_symbol} {p_tf}] close={last['c']:.6f}, "
+                            f"short={last['short']:.6f}, long={last['long']:.6f}\n"
+                        )
                         self.draw_chart(df, p_symbol, p_tf)
                     finally:
                         self._tick_busy = False
+
                 self.root.after(0, _update_ui)
 
             except Exception as e:
-                self.root.after(0, lambda: (self.log(f"❌ tick_once hiba: {e}\n"), setattr(self, "_tick_busy", False)))
+                def _err():
+                    self.log(f"❌ tick_once hiba: {e}\n")
+                    self._tick_busy = False
+                self.root.after(0, _err)
 
-        threading.Thread(target=_work, args=(symbol, tf, short, long), daemon=True).start()
+        threading.Thread(
+            target=_work,
+            args=(symbol, tf, short, long),
+            daemon=True
+        ).start()
 
     # ---- diagram ----
     def draw_chart(self, df: pd.DataFrame, symbol: str, tf: str):
@@ -2892,45 +2804,13 @@ class CryptoBotApp:
                 # BUY: funds az elsődleges; ha csak size van → átszámít funds-ra (last price alapján)
                 # SELL: size az elsődleges; ha csak funds van → átszámít size-ra (last price alapján)
 
-                # 1) Élő ár előkészítése – WS → cache → REST fallback
-                last_px = None
-
-                # 1/a) Ticker WS (public, mehet public módban is – de itt úgyis privátban vagyunk)
+                # 1) Élő ár előkészítése – egységes helperrel (WS → cache → REST)
                 try:
-                    tws = getattr(self, "_ticker_ws", None)
-                    if tws is not None:
-                        last_px = float(tws.get_last_price() or 0.0)
-                        if not last_px or math.isnan(last_px) or last_px <= 0:
-                            last_px = None
+                    last_px = float(self.get_best_price(p_symbol))
+                    if (not self._is_pos_num(last_px)) or last_px <= 0:
+                        last_px = None
                 except Exception:
                     last_px = None
-
-                # 1/b) Worker cache (_mb_last_rt_px), ha van
-                if (last_px is None or last_px <= 0) and hasattr(self, "_mb_last_rt_px"):
-                    try:
-                        last_px = float((self._mb_last_rt_px or {}).get(p_symbol, 0.0) or 0.0)
-                        if not last_px or math.isnan(last_px) or last_px <= 0:
-                            last_px = None
-                    except Exception:
-                        last_px = None
-
-                # 1/c) REST fallback – csak ha tényleg nem volt használható WS ár
-                if last_px is None or last_px <= 0:
-                    try:
-                        with self._ex_lock:
-                            last_px = float(self.exchange.fetch_last_price(p_symbol))
-                            if not last_px or math.isnan(last_px) or last_px <= 0:
-                                last_px = None
-                    except Exception:
-                        last_px = None
-
-                # 1/d) lépésközök (opcionális sanitizerhez) – ha elérhető, külön próbálkozás
-                lot_step = price_step = min_base = min_funds = quote_step = None
-                try:
-                    if hasattr(self, "_mb_get_market_steps"):
-                        lot_step, price_step, min_base, min_funds, quote_step = self._mb_get_market_steps(p_symbol)  # type: ignore[attr-defined]
-                except Exception:
-                    lot_step = price_step = min_base = min_funds = quote_step = None
 
                 # 2) Side-aware paraméter választás
                 #    - ha mindkettő meg van adva, a side szerinti preferált mezőt választjuk, a másikat ignoráljuk és logoljuk
@@ -3258,42 +3138,15 @@ class CryptoBotApp:
         else:
             raise RuntimeError("Nincs zárható isolated pozíció.")
 
-        # 3) Utolsó ár BUY funds-becsléshez
-        #    1) Ticker WS  2) _mb_last_rt_px cache  3) REST fallback
-        import math
-        last_px = None
-
-        # 3/a) Ticker WS
+        # 3) Utolsó ár BUY funds-becsléshez – egységes helperrel (WS → cache → REST)
         try:
-            tws = getattr(self, "_ticker_ws", None)
-            if tws is not None:
-                last_px = float(tws.get_last_price() or 0.0)
-                if not last_px or math.isnan(last_px) or last_px <= 0:
-                    last_px = None
+            last_px = float(self.get_best_price(symbol))
+            if (not self._is_pos_num(last_px)) or last_px <= 0:
+                last_px = None
         except Exception:
             last_px = None
 
-        # 3/b) worker cache (_mb_last_rt_px), ha van ilyen dict
-        if (last_px is None or last_px <= 0) and hasattr(self, "_mb_last_rt_px"):
-            try:
-                last_px = float((self._mb_last_rt_px or {}).get(symbol, 0.0) or 0.0)
-                if not last_px or math.isnan(last_px) or last_px <= 0:
-                    last_px = None
-            except Exception:
-                last_px = None
-
-        # 3/c) REST fallback – csak ha nincs használható WS ár
-        if last_px is None or last_px <= 0:
-            try:
-                with self._ex_lock:
-                    last_px = float(self.exchange.fetch_last_price(symbol)) or None
-                    if not last_px or math.isnan(last_px) or last_px <= 0:
-                        last_px = None
-            except Exception:
-                last_px = None
-
         # 4) Szaniter hívása – egységes minimumok/lépésközök
-        sb = fq = None
         try:
             sb, fq = self._mb_sanitize_order(
                 symbol=symbol,
@@ -4445,40 +4298,18 @@ class CryptoBotApp:
                 symbol = None
 
             def fetch_rt():
-                """Utolsó ár a history PnL-hez:
-                1) Ticker WS
-                2) _mb_last_rt_px cache
-                3) REST fetch_last_price
+                """Utolsó ár a history PnL-hez – egységes helperrel:
+                get_best_price: WS → cache → REST.
                 """
                 if not symbol:
                     return None
-
-                rt = None
-
-                # 1) Ticker WS ár
                 try:
-                    tws = getattr(self, "_ticker_ws", None)
-                    if tws is not None:
-                        rt = float(tws.get_last_price() or 0.0)
+                    rt = float(self.get_best_price(symbol))
+                    if (not self._is_pos_num(rt)) or rt <= 0:
+                        return None
+                    return rt
                 except Exception:
-                    rt = None
-
-                # 2) Worker által cache-elt RT ár (ha van ilyen dict)
-                if (not rt or rt <= 0) and hasattr(self, "_mb_last_rt_px"):
-                    try:
-                        rt = float((self._mb_last_rt_px or {}).get(symbol, 0.0) or 0.0)
-                    except Exception:
-                        pass
-
-                # 3) REST fallback (thread-safe, lock alatt)
-                if not rt or rt <= 0:
-                    try:
-                        with self._ex_lock:
-                            rt = float(self.exchange.fetch_last_price(symbol))
-                    except Exception:
-                        rt = None
-
-                return rt
+                    return None
 
             def apply(rt):
                 self._mb_hist_pnl_inflight = False
@@ -4668,23 +4499,17 @@ class CryptoBotApp:
         ):
             return
 
-        # 4) Aktuális ár (px_for_mgmt) – cache-ből vagy fetch_last_price-ból
+        # 4) Aktuális ár (px_for_mgmt) – egységes árlekérdezés (WS → cache → REST)
         try:
-            last_px = None
-            try:
-                # van-e cache-elt RT ár?
-                last_px = float((getattr(self, "_mb_last_rt_px", {}) or {}).get(symbol, float("nan")))
-            except Exception:
-                last_px = float("nan")
-
-            # ha nincs használható cache-elt ár → lekérdezzük a last price-t
-            if not last_px or not (last_px == last_px) or last_px <= 0:
-                with self._ex_lock:
-                    last_px = float(self.exchange.fetch_last_price(symbol))
-
+            last_px = float(self.get_best_price(symbol))
         except Exception as e:
             self._safe_log(f"⚠ Manuális zárás – árlekérdezési hiba: {e}\n")
             messagebox.showerror("Manuális zárás", f"Nem sikerült lekérni az aktuális árat:\n{e}")
+            return
+
+        if (not last_px) or not (last_px == last_px) or last_px <= 0:
+            self._safe_log("⚠ Manuális zárás – érvénytelen ár (get_best_price 0/NaN).\n")
+            messagebox.showerror("Manuális zárás", "Nem sikerült értelmes aktuális árat lekérni.")
             return
 
         # 5) Margin mód + leverage a cfg-ből
@@ -4966,63 +4791,91 @@ class CryptoBotApp:
             lev   = self._mb_get_int("mb_leverage", 10)
             mode  = self._mb_get_str("mb_mode", "isolated")
 
-            # Utolsó ismert élő ár – először Ticker WS, csak utána REST
+            # Utolsó ismert élő ár – egységes helperrel: WS → cache → REST
             last_px = None
-
-            # 1) próbáljuk a websocket ticker árát
             try:
-                if getattr(self, "_ticker_ws", None) is not None:
-                    last_px = float(self._ticker_ws.get_last_price() or 0.0)
+                rt = float(self.get_best_price(sym))
+                if self._is_pos_num(rt) and rt > 0:
+                    last_px = rt
             except Exception:
                 last_px = None
 
-            # 2) ha nincs használható WS ár, REST fallback _ex_lock alatt
-            if not last_px or last_px <= 0:
-                try:
-                    with self._ex_lock:
-                        last_px = float(self.exchange.fetch_last_price(sym))
-                except Exception:
-                    last_px = None
-                    self._safe_log("⚠️ Ár lekérés nem sikerült, fallback az entry/peak alapján.\n")
- 
-            # Mindkét oldal zárása egységesen
-            for side in ("buy", "sell"):
-                # lokális lista snapshot (nyitott SIM pozik)
-                lst = self._sim_pos_long if side == "buy" else self._sim_pos_short
-                i = 0
-                while i < len(lst):
-                    pos = lst[i]
-                    # ár fallback: last_px -> peak -> entry
-                    px = float(
-                        last_px
-                        if last_px is not None and last_px > 0
-                        else pos.get("peak", pos.get("entry", 0.0))
-                    )
-                    close_side = "sell" if side == "buy" else "buy"
-                    self._safe_log(f"🔻 Pozíció zárása ({close_side.upper()}) @ {px:.6f} | dry={dry}\n")
+            if last_px is None or last_px <= 0:
+                self._safe_log("⚠️ Ár lekérés nem sikerült, fallback az entry/peak alapján.\n")
 
-                    if dry:
-                        # SIM: központi záró helperrel (history/pool/fee konzisztensek)
-                        self._close_sim_by_index(side, i, px)
-                        continue  # lista rövidült
+            # Mindkét oldal zárása egységesen, SNAPSHOT segítségével (race condition elkerülése)
+            for side in ("buy", "sell"):
+                # snapshot a SIM pozíciókról lock alatt
+                with self._mb_lock:
+                    if side == "buy":
+                        snapshot = list(self._sim_pos_long)
                     else:
-                        # LIVE: KIZÁRÓLAG a központi _live_close_pos → siker esetén tükrözés SIM-ben
+                        snapshot = list(self._sim_pos_short)
+
+                for pos in snapshot:
+                    try:
+                        # ár fallback: last_px -> peak -> entry
+                        px = float(
+                            last_px
+                            if last_px is not None and last_px > 0
+                            else pos.get("peak", pos.get("entry", 0.0))
+                        )
+
+                        close_side = "sell" if side == "buy" else "buy"
+                        self._safe_log(
+                            f"🔻 Pozíció zárása ({close_side.upper()}) @ {px:.6f} | dry={dry}\n"
+                        )
+
+                        if dry:
+                            # SIM: központi záró helperrel (history/pool/fee konzisztensek),
+                            # pos_obj alapján keresi meg az aktuális indexet, így nem zavarja a GUI-s törlés
+                            try:
+                                self._close_sim_by_index(
+                                    side=side,
+                                    idx=-1,
+                                    exit_px=px,
+                                    reason="mb_stop",
+                                    pos_obj=pos,
+                                )
+                            except Exception as e:
+                                self._safe_log(f"⚠️ SIM stop zárás hiba: {e}\n")
+                            continue
+
+                        # LIVE eset – KIZÁRÓLAG a központi _live_close_pos hívódik
                         ok = False
                         try:
-                            with self._ex_lock:
-                                ok = self._live_close_pos(side, pos, px, symbol=sym, mode=mode, lev=lev)
+                            ok = self._live_close_pos(
+                                side=side,
+                                pos=pos,
+                                close_px=px,
+                                symbol=sym,
+                                mode=mode,
+                                lev=lev,
+                                is_sl_tp=False,
+                                is_manual=True,
+                            )
                         except Exception as e:
                             self._safe_log(f"❌ LIVE zárási hiba (stop): {e}\n")
                             ok = False
 
                         if ok:
                             # csak sikeres LIVE zárás után tükörzárunk a SIM-ben
-                            self._close_sim_by_index(side, i, px)
-                            continue  # lista rövidült, i nem növekszik
+                            try:
+                                self._close_sim_by_index(
+                                    side=side,
+                                    idx=-1,
+                                    exit_px=px,
+                                    reason="mb_stop",
+                                    pos_obj=pos,
+                                )
+                            except Exception as e:
+                                self._safe_log(f"⚠️ SIM tükrözés hiba (stop): {e}\n")
                         else:
                             self._safe_log("❗ LIVE zárás sikertelen – a pozíció nyitva marad.\n")
-                            i += 1
-                            continue
+
+                    except Exception as e:
+                        self._safe_log(f"❌ Stop loop hiba (side={side}): {e}\n")
+                        continue
 
             # összegzés (egyszer)
             try:
@@ -5336,6 +5189,48 @@ class CryptoBotApp:
             self._safe_log(f"⚠️ History frissítés hiba: {e}\n")
 
         return True
+
+    def get_best_price(self, symbol: str) -> float:
+        """Egységes árlekérdezés: Ticker WS → worker cache → REST fallback.
+
+        Mindig normalizált szimbólummal dolgozik, és 0.0-t ad vissza, ha semmilyen
+        forrásból nem sikerül értelmes árat szerezni.
+        """
+        try:
+            sym = normalize_symbol(symbol)
+        except Exception:
+            sym = symbol
+
+        # 1) Ticker WS – ha ugyanarra a párra van feliratkozva
+        try:
+            tws = getattr(self, "_ticker_ws", None)
+            if tws is not None and getattr(self, "_ticker_ws_symbol", None) == sym:
+                p = float(tws.get_last_price() or 0.0)
+                if self._is_pos_num(p) and p > 0:
+                    return p
+        except Exception:
+            pass
+
+        # 2) MarginBot worker cache (realtime ár)
+        try:
+            last_rt = float((getattr(self, "_mb_last_rt_px", {}) or {}).get(sym, 0.0))
+            if self._is_pos_num(last_rt) and last_rt > 0:
+                return last_rt
+        except Exception:
+            pass
+
+        # 3) REST fallback – csak ha minden más kudarcot vallott
+        try:
+            ex = getattr(self, "exchange", None)
+            if ex is not None:
+                with self._ex_lock:
+                    p = float(ex.fetch_last_price(sym))
+                if self._is_pos_num(p) and p > 0:
+                    return p
+        except Exception:
+            pass
+
+        return 0.0
 
     # === MarginBot – fő ciklus, HTF-filter + ATR menedzsment + RSI szűrő === 
     def _mb_worker(self):
@@ -5698,24 +5593,26 @@ class CryptoBotApp:
 
                     used_ws_price = False  # ### WS-FLAG: jelezzük, ha a last_px_rt tényleg websocketből jött
 
-                    # --- Websocket ár preferált, REST csak fallbackként ---  ### WS-PRIMARY
+                    # --- Websocket ár preferált, get_best_price csak fallbackként ---  ### WS-PRIMARY
                     try:
                         self._ensure_ticker_ws(symbol)
                     except Exception:
                         pass
 
                     try:
-                        if getattr(self, "_ticker_ws", None) is not None:
-                            rt_ws = float(self._ticker_ws.get_last_price() or 0.0)
+                        # 1) Ticker WS közvetlenül
+                        tws = getattr(self, "_ticker_ws", None)
+                        if tws is not None:
+                            rt_ws = float(tws.get_last_price() or 0.0)
                             if self._is_pos_num(rt_ws) and rt_ws > 0:
                                 last_px_rt = rt_ws
                                 used_ws_price = True
-                        # csak ha NINCS használható WS ár, akkor REST
-                        if (not used_ws_price) and self.exchange:
-                            with self._ex_lock:
-                                rt_rest = float(self.exchange.fetch_last_price(symbol))
-                            if self._is_pos_num(rt_rest) and rt_rest > 0:
-                                last_px_rt = rt_rest
+
+                        # 2) Ha nincs használható WS ár → egységes helper (WS/cache/REST kombó)
+                        if not used_ws_price:
+                            rt_best = float(self.get_best_price(symbol))
+                            if self._is_pos_num(rt_best) and rt_best > 0:
+                                last_px_rt = rt_best
                     except Exception:
                         pass
 
@@ -5813,12 +5710,11 @@ class CryptoBotApp:
                             shock_atr_mul = max(0.0, live_shock_atr)
 
                             # Itt már a ciklus eleji last_px_rt-et használjuk.
-                            # Ha valamiért 0/NaN, végső fallback lehet REST:
-                            if not self._is_pos_num(last_px_rt) and self.exchange:
+                            # Ha valamiért 0/NaN → egységes helper-rel pótoljuk (WS/cache/REST).
+                            if not self._is_pos_num(last_px_rt):
                                 try:
-                                    with self._ex_lock:
-                                        rt_tmp = float(self.exchange.fetch_last_price(symbol))
-                                    if rt_tmp > 0:
+                                    rt_tmp = float(self.get_best_price(symbol))
+                                    if self._is_pos_num(rt_tmp) and rt_tmp > 0:
                                         last_px_rt = rt_tmp
                                 except Exception:
                                     pass
@@ -5848,6 +5744,7 @@ class CryptoBotApp:
                                     + (f", ATRx≈{abs(chg)/max(atr_val,1e-12):.2f}" if atr_val else "")
                                     + ")\n"
                                 )
+
                             elif (live_break_dn or shock_dn) and can_sell:
                                 brk_sig = 'sell'
                                 self._safe_log(
@@ -5935,43 +5832,57 @@ class CryptoBotApp:
                         log_line += f" drift={drift_pct:.2f}%"
                     log_line += f" | POOL used/bal={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f}"
                     log_line += f" | OPEN={open_now}/{('∞' if max_open==0 else max_open)}"
-                    self._safe_log(log_line.rstrip() + f"  → {combined_sig} | {filters_line}\n")
 
-                    if combined_sig in (None, "", "hold") and reasons:
-                        self._safe_log("  ↳ hold reasons: " + ",".join(reasons) + "\n")
+                    # Naplózás ritkítása: csak akkor írunk, ha eltelt néhány másodperc,
+                    # vagy új BUY/SELL jel érkezett.
+                    should_log = True
+                    try:
+                        now_ts_log = int(time.time())
+                        last_ts_log = getattr(self, "_mb_last_status_log_ts", 0)
+                        if combined_sig not in ("buy", "sell") and (now_ts_log - last_ts_log) < 3:
+                            should_log = False
+                        else:
+                            self._mb_last_status_log_ts = now_ts_log
+                    except Exception:
+                        should_log = True
 
-                    # BUY-ok kezelése
-                    i = 0
-                    while True:
-                        # Pozíció snapshot lock alatt, de a menedzsment / API hívás már lock nélkül
-                        with self._mb_lock:
-                            if i >= len(self._sim_pos_long):
-                                break
-                            pos = self._sim_pos_long[i]
+                    if should_log:
+                        self._safe_log(log_line.rstrip() + f"  → {combined_sig} | {filters_line}\n")
+                        if combined_sig in (None, "", "hold") and reasons:
+                            self._safe_log("  ↳ hold reasons: " + ",".join(reasons) + "\n")
 
+                    # BUY-ok kezelése – snapshot + lock-olt módosítás, hogy elkerüljük a race condition-t
+                    with self._mb_lock:
+                        long_positions_snapshot = list(self._sim_pos_long)
+
+                    for pos in long_positions_snapshot:
                         try:
+                            # ha közben (GUI-ból) már törölték ezt a pozíciót, ugorjunk
+                            with self._mb_lock:
+                                if pos not in self._sim_pos_long:
+                                    continue
+
                             need_close = False
+                            close_reason = "mgmt_auto"
+
                             if pos.get('mgmt') == 'atr' and atr_val is not None:
                                 need_close = _manage_atr_on_pos(pos, px_for_mgmt, atr_val)
-                                close_reason = "atr_mgmt"
                             elif pos.get('mgmt') == 'fixed':
                                 need_close = _manage_fixed_on_pos(pos, px_for_mgmt)
-                                close_reason = "fixed_mgmt"
-                            else:
-                                close_reason = "other_mgmt"
 
                             if need_close:
                                 if dry:
-                                    # SIM zárás – külön guard, hogy ez se ölje meg a ciklust
+                                    # SIM zárás – csak akkor, ha a pozíció még benne van a listában
                                     try:
-                                        self._close_sim_by_index(
-                                            'buy', i, px_for_mgmt,
-                                            reason=close_reason,
-                                            pos_obj=pos,
-                                        )
+                                        with self._mb_lock:
+                                            try:
+                                                idx = self._sim_pos_long.index(pos)
+                                            except ValueError:
+                                                idx = -1
+                                        if idx >= 0:
+                                            self._close_sim_by_index('buy', idx, px_for_mgmt, reason=close_reason, pos_obj=pos)
                                     except Exception as e:
                                         self._safe_log(f"❌ SIM long zárás hiba: {e}\n")
-                                        i += 1
                                         continue
                                 else:
                                     # LIVE zárás – API/egyéb hiba itt is lokálisan kezelt
@@ -5986,68 +5897,62 @@ class CryptoBotApp:
                                         ok = False
 
                                     if ok:
-                                        # csak sikeres LIVE zárás után tükörzárunk SIM-ben
+                                        # csak sikeres LIVE zárás után tükörzárunk SIM-ben,
+                                        # de előbb ellenőrizzük, hogy a pozíció még létezik-e
                                         try:
-                                            self._close_sim_by_index(
-                                                'buy', i, px_for_mgmt,
-                                                reason=close_reason,
-                                                pos_obj=pos,
-                                            )
+                                            with self._mb_lock:
+                                                try:
+                                                    idx = self._sim_pos_long.index(pos)
+                                                except ValueError:
+                                                    idx = -1
+                                            if idx >= 0:
+                                                self._close_sim_by_index('buy', idx, px_for_mgmt, reason=close_reason, pos_obj=pos)
                                         except Exception as e:
                                             self._safe_log(f"❌ SIM tükrözés hiba (long): {e}\n")
-                                            i += 1
                                             continue
                                     else:
                                         self._safe_log(
                                             "❗ LIVE zárás sikertelen – a long pozíció nyitva marad.\n"
                                         )
-                                        i += 1
                                         continue
-
-                                # sikeres zárásnál a lista rövidebb lett, ezért i-t nem növeljük
-                                continue
 
                         except Exception as e:
                             # bármilyen más hiba a menedzsmentben – ne dőljön el a teljes worker
                             self._safe_log(f"❌ Long pozíció menedzsment hiba: {e}\n")
-                            i += 1
                             continue
 
-                        # ha nem kellett zárni és nem volt hiba → következő pozíció
-                        i += 1
+                    # SELL-ek kezelése – snapshot + lock-olt módosítás, hogy elkerüljük a race condition-t
+                    with self._mb_lock:
+                        short_positions_snapshot = list(self._sim_pos_short)
 
-                    # SELL-ek kezelése
-                    i = 0
-                    while True:
-                        # Snapshot lock alatt
-                        with self._mb_lock:
-                            if i >= len(self._sim_pos_short):
-                                break
-                            pos = self._sim_pos_short[i]
-
+                    for pos in short_positions_snapshot:
                         try:
+                            # ha közben (GUI-ból) már törölték ezt a pozíciót, ugorjunk
+                            with self._mb_lock:
+                                if pos not in self._sim_pos_short:
+                                    continue
+
                             need_close = False
+                            close_reason = "mgmt_auto"
+
                             if pos.get('mgmt') == 'atr' and atr_val is not None:
                                 need_close = _manage_atr_on_pos(pos, px_for_mgmt, atr_val)
-                                close_reason = "atr_mgmt"
                             elif pos.get('mgmt') == 'fixed':
                                 need_close = _manage_fixed_on_pos(pos, px_for_mgmt)
-                                close_reason = "fixed_mgmt"
-                            else:
-                                close_reason = "other_mgmt"
 
                             if need_close:
                                 if dry:
-                                    # SIM zárás – külön guard
+                                    # SIM zárás – csak akkor, ha a pozíció még benne van a listában
                                     try:
-                                        self._close_sim_by_index(
-                                            'sell', i, px_for_mgmt,
-                                            reason=close_reason,
-                                            pos_obj=pos,
-                                        )
+                                        with self._mb_lock:
+                                            try:
+                                                idx = self._sim_pos_short.index(pos)
+                                            except ValueError:
+                                                idx = -1
+                                        if idx >= 0:
+                                            self._close_sim_by_index('sell', idx, px_for_mgmt, reason=close_reason, pos_obj=pos)
                                     except Exception as e:
                                         self._safe_log(f"❌ SIM short zárás hiba: {e}\n")
-                                        i += 1
                                         continue
                                 else:
                                     ok = False
@@ -6062,31 +5967,25 @@ class CryptoBotApp:
 
                                     if ok:
                                         try:
-                                            self._close_sim_by_index(
-                                                'sell', i, px_for_mgmt,
-                                                reason=close_reason,
-                                                pos_obj=pos,
-                                            )
+                                            with self._mb_lock:
+                                                try:
+                                                    idx = self._sim_pos_short.index(pos)
+                                                except ValueError:
+                                                    idx = -1
+                                            if idx >= 0:
+                                                self._close_sim_by_index('sell', idx, px_for_mgmt, reason=close_reason, pos_obj=pos)
                                         except Exception as e:
                                             self._safe_log(f"❌ SIM tükrözés hiba (short): {e}\n")
-                                            i += 1
                                             continue
                                     else:
                                         self._safe_log(
                                             "❗ LIVE zárás sikertelen – a short pozíció nyitva marad.\n"
                                         )
-                                        i += 1
                                         continue
-
-                                # sikeres zárásnál itt is lista-rövidülés → i-t nem növeljük
-                                continue
 
                         except Exception as e:
                             self._safe_log(f"❌ Short pozíció menedzsment hiba: {e}\n")
-                            i += 1
                             continue
-
-                        i += 1
 
                     # --- ÚJ NYITÁS (cooldown + pool limit) ---
                     now = int(time.time())
@@ -6107,11 +6006,10 @@ class CryptoBotApp:
                         # friss ticker: WS az első, REST csak ha nincs használható WS ár  ### WS-OPEN
                         if (not self._is_pos_num(last_px_rt)) or last_px_rt <= 0:
                             try:
-                                with self._ex_lock:
-                                    rt = float(self.exchange.fetch_last_price(symbol))
-                                if rt > 0:
+                                rt = float(self.get_best_price(symbol))
+                                if self._is_pos_num(rt) and rt > 0:
                                     last_px_rt = rt
-                            except:
+                            except Exception:
                                 pass
 
                         free_pool = max(0.0, self._pool_balance_quote - self._pool_used_quote)
@@ -6344,38 +6242,15 @@ class CryptoBotApp:
                                             fee_open_actual = float(fee_open_actual or 0.0)
                                             _fee_for_pnl = fee_open_actual if fee_open_actual > 0.0 else _fee_open_est
 
-                                            # --- PnL becslés: WS → fallback cache → végül REST ---
+                                            # --- PnL becslés: egységes árlekérdezés ---
                                             pnl_est = None
                                             try:
-                                                rt_now = last_px_rt
+                                                # Ár lekérdezése: WS → cache → REST
+                                                rt_now = self.get_best_price(symbol)
 
-                                                # ha nem jó, próbáljuk közvetlen WS-t
-                                                if (not self._is_pos_num(rt_now)) or rt_now <= 0:
-                                                    try:
-                                                        if getattr(self, "_ticker_ws", None) is not None:
-                                                            rt_ws_now = float(self._ticker_ws.get_last_price() or 0.0)
-                                                            if self._is_pos_num(rt_ws_now) and rt_ws_now > 0:
-                                                                rt_now = rt_ws_now
-                                                    except Exception:
-                                                        pass
-
-                                                # fallback: cache (ha worker már beírta)
-                                                if (not self._is_pos_num(rt_now)) or rt_now <= 0:
-                                                    try:
-                                                        rt_cache = float((self._mb_last_rt_px or {}).get(symbol, 0.0))
-                                                        if self._is_pos_num(rt_cache) and rt_cache > 0:
-                                                            rt_now = rt_cache
-                                                    except Exception:
-                                                        pass
-
-                                                # végső fallback: REST
-                                                if ((not self._is_pos_num(rt_now)) or rt_now <= 0) and self.exchange:
-                                                    with self._ex_lock:
-                                                        rt_now = float(self.exchange.fetch_last_price(symbol))
-
-                                                # ha végre van értelmes ár → becslés
                                                 if self._is_pos_num(rt_now) and rt_now > 0:
-                                                    gross = (rt_now - last_px_rt) * size_now * (1 if combined_sig == 'buy' else -1)
+                                                    gross = (rt_now - last_px_rt) * size_now * \
+                                                            (1 if combined_sig == 'buy' else -1)
                                                     pnl_est = gross - float(_fee_for_pnl)
                                             except Exception:
                                                 pass
@@ -6971,74 +6846,47 @@ class CryptoBotApp:
                 return "<unprintable>"
 
     def _mb_calc_order_qty(self,
-        side: str,              # "buy" | "sell"
-        price: float,           # aktuális ár
-        pool_free: float,       # szabad QUOTE (USDT) a pooledben
-        size_pct: float,        # UI % (pl. 50)
-        leverage: float,        # UI tőkeáttét (pl. 10)
-        mode: str = "quote",    # UI "mód" – itt főleg 'quote'
-        base_free: float = 0.0, # csak ha 'base' módban használod
-        lot_step: float = 0.0001,
-        price_step: float = 0.01,
-    ):
-        """
-        KuCoin-szerű számítás:
-          commit_quote = pool_free * pct
-          nominal_quote = commit_quote * leverage
-          qty_base = nominal_quote / price
-        A visszaadott 'commit_quote' vonódik le a pooledből (lock), a 'qty_base' megy az orderbe.
-        """
-        pct = max(0.0, min(100.0, float(size_pct))) / 100.0
-        mode_ui = None
-        try:
-            mode_ui = self.mb_mode.get()
-        except Exception:
-            pass
-        margin_mode = mode_ui if mode_ui in ("isolated","cross") else ("isolated" if mode!="cross" else "cross")
-        lev_cap = 10.0 if margin_mode == "isolated" else 5.0
-        lev = max(1.0, min(float(leverage), lev_cap))
+        side: str,
+        price: float,
+        pool_free: float,
+        size_pct: float,
+        leverage: int,
+        mode: str = "quote",
+        lot_step: float = 0.0,
+        price_step: float = 0.0,
+    ) -> dict:
+        """Wrapper a régi API-hoz: belül az egységes _mb_compute_size-et használja.
 
-        # --- ár-guard: ha az ár nem pozitív/NaN → üres mennyiséget adunk vissza
-        try:
-            p_ok = float(price) > 0 and float(price) == float(price)  # not NaN
-        except Exception:
-            p_ok = False
-        if not p_ok:
-            return {
-                "side": side,
-                "qty_base": 0.0,
-                "commit_quote": 0.0,
-                "nominal_quote": 0.0,
-                "lev": lev,
-                "price": 0.0
+        VISSZA:
+            {
+                "qty_base": float,       # bázismennyiség (szimbólum alapdevizájában)
+                "commit_quote": float,   # ténylegesen lekötött QUOTE (pl. USDT)
+                "nominal_quote": float,  # nominális pozícióméret (tőkeáttétellel)
             }
+        """
+        size_pct = float(max(0.0, min(100.0, size_pct)))
+        budget_quote = float(pool_free) * (size_pct / 100.0)
 
-        if mode == "quote":
-            commit_quote = pool_free * pct                 # saját tőke (margin)
-            nominal_quote = commit_quote * lev             # tényleges pozíció érték
-            qty_base = nominal_quote / max(price, 1e-12)
-        else:
-            # BASE módnál hagyjuk meg a régi logikát – itt csak durván számolunk
-            commit_quote = base_free * pct * price
-            nominal_quote = commit_quote * lev
-            qty_base = base_free * pct * lev
+        qty_base, commit_quote = self._mb_compute_size(
+            symbol=None,                 # itt nem használjuk a sym-et
+            side=side,
+            price=price,
+            size_pct=size_pct,
+            input_mode=mode,
+            mode=mode,
+            leverage=leverage,
+            budget_quote=budget_quote,
+            dry=True,
+            auto_borrow=False,
+            lot_step=lot_step,
+            price_step=price_step,
+        )
 
-        qty_base = max(self._mb_floor_to_step_dec(qty_base, float(lot_step or 0.0)), 0.0)
-        # price rounding: ha price_step == 0 vagy hibás, ne osszunk vele
-        px_rounded = price
-        try:
-            step = float(price_step or 0.0)
-            if step > 0:
-                px_rounded = round(price / step) * step
-        except Exception:
-            pass
+        nominal_quote = (commit_quote or 0.0) * max(1, leverage)
         return {
-            "side": side,
-            "qty_base": qty_base,
-            "commit_quote": commit_quote,
-            "nominal_quote": nominal_quote,
-            "lev": lev,
-            "price": px_rounded
+            "qty_base": float(qty_base or 0.0),
+            "commit_quote": float(commit_quote or 0.0),
+            "nominal_quote": float(nominal_quote or 0.0),
         }
 
     def _mb_build_cfg(self) -> dict:
