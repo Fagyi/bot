@@ -1865,15 +1865,45 @@ class CryptoBotApp:
                 pass
 
     def pretty_isolated_accounts(self, payload: dict) -> str:
-        data = payload.get('data', payload)
-        assets = data.get('assets', []) or []
+        """
+        Isolated margin számlák szépen formázva.
+        Optimalizálva: csak azokra a párokra kérünk árat,
+        ahol van releváns készlet / tartozás / risk.
+        """
+        from typing import Dict
+
+        data = payload.get("data", payload) or {}
+        assets = data.get("assets", []) or []
+
         lines = ["Isolated Margin – Részletes nézet", ""]
 
-        # --- Szimbólumok listája az árlekéréshez ---
-        symbols = [a.get('symbol', '').upper() for a in assets if a.get('symbol')]
+        # --- Előszűrés: csak releváns eszközök ---
+        relevant_assets = []
+        for a in assets:
+            base = a.get("baseAsset", {}) or {}
+            quote = a.get("quoteAsset", {}) or {}
+
+            debt_ratio = float(a.get("debtRatio", 0) or 0)
+
+            base_tot = float(base.get("total", 0) or 0)
+            base_li  = float(base.get("liability", 0) or 0)
+
+            quote_tot = float(quote.get("total", 0) or 0)
+            quote_li  = float(quote.get("liability", 0) or 0)
+
+            # Csak akkor érdekes, ha van valami nem nulla
+            if base_tot > 0 or base_li > 0 or quote_tot > 0 or quote_li > 0 or debt_ratio > 0:
+                relevant_assets.append(a)
+
+        # Ha semmi releváns nincs, gyorsan visszaadjuk
+        if not relevant_assets:
+            lines.append("Nincs releváns izolált eszköz/pozíció.")
+            return "\n".join(lines)
+
+        # --- Szimbólumok listája árlekéréshez (csak relevánsak!) ---
+        symbols = [a.get("symbol", "").upper() for a in relevant_assets if a.get("symbol")]
         prices: Dict[str, float] = {}
 
-        # Minden szimbólumhoz get_best_price
         for sym in symbols:
             try:
                 px = self.get_best_price(sym)
@@ -1881,67 +1911,60 @@ class CryptoBotApp:
             except Exception:
                 prices[sym] = 0.0
 
-        # --- Formázott sorok generálása ---
-        for a in assets:
-            sym = a.get('symbol', 'N/A').upper()
-            status = a.get('status', '')
-            debt_ratio = float(a.get('debtRatio', 0) or 0)
+        # --- Formázott sorok generálása csak releváns eszközökre ---
+        for a in relevant_assets:
+            sym = a.get("symbol", "N/A").upper()
+            status = a.get("status", "")
+            debt_ratio = float(a.get("debtRatio", 0) or 0)
 
-            base = a.get('baseAsset', {}) or {}
-            quote = a.get('quoteAsset', {}) or {}
+            base = a.get("baseAsset", {}) or {}
+            quote = a.get("quoteAsset", {}) or {}
 
-            base_ccy = base.get('currency', '')
-            base_tot = float(base.get('total', 0) or 0)
-            base_av  = float(base.get('available', 0) or 0)
-            base_li  = float(base.get('liability', 0) or 0)
+            base_ccy = base.get("currency", "")
+            base_tot = float(base.get("total", 0) or 0)
+            base_av  = float(base.get("available", 0) or 0)
+            base_li  = float(base.get("liability", 0) or 0)
 
-            quote_ccy = quote.get('currency', '')
-            quote_tot = float(quote.get('total', 0) or 0)
-            quote_av  = float(quote.get('available', 0) or 0)
-            quote_li  = float(quote.get('liability', 0) or 0)
+            quote_ccy = quote.get("currency", "")
+            quote_tot = float(quote.get("total", 0) or 0)
+            quote_av  = float(quote.get("available", 0) or 0)
+            quote_li  = float(quote.get("liability", 0) or 0)
 
-            # ---- Ár = CSUPÁN self.get_best_price ----
             last = float(prices.get(sym, 0.0))
 
-            # Nettó érték számítás (ha van ár)
             net_quote = base_tot * last + quote_tot - quote_li if last > 0 else None
 
-            if (base_tot > 0) or (quote_tot > 0) or (quote_li > 0) or (debt_ratio > 0):
-                lines.append(f"── {sym}  [{status}]")
-                lines.append(f"   Risk: {self._risk_label(debt_ratio)}")
+            lines.append(f"── {sym}  [{status}]")
+            lines.append(f"   Risk: {self._risk_label(debt_ratio)}")
 
-                if last > 0:
-                    lines.append(f"   Last Price: {last:,.6f} {quote_ccy}")
+            if last > 0:
+                lines.append(f"   Last Price: {last:,.6f} {quote_ccy}")
 
-                lines.append(
-                    f"   {base_ccy}: total {base_tot:,.6f}  |  available {base_av:,.6f}  |  liability {base_li:,.6f}"
-                )
-                lines.append(
-                    f"   {quote_ccy}: total {quote_tot:,.6f} |  available {quote_av:,.6f} | liability {quote_li:,.6f}"
-                )
+            lines.append(
+                f"   {base_ccy}: total {base_tot:,.6f}  |  available {base_av:,.6f}  |  liability {base_li:,.6f}"
+            )
+            lines.append(
+                f"   {quote_ccy}: total {quote_tot:,.6f} |  available {quote_av:,.6f} | liability {quote_li:,.6f}"
+            )
 
-                if net_quote is not None:
-                    lines.append(f"   Net Value (≈): {net_quote:,.2f} {quote_ccy}")
+            if net_quote is not None:
+                lines.append(f"   Net Value (≈): {net_quote:,.2f} {quote_ccy}")
 
-                    # Pozíció irány és zárható méret
-                    side_txt = None
-                    closable = None
-                    if base_li > 0:
-                        side_txt = "SHORT"
-                        closable = base_li
-                    elif base_tot > 0:
-                        side_txt = "LONG"
-                        closable = base_tot
+                side_txt = None
+                closable = None
+                if base_li > 0:
+                    side_txt = "SHORT"
+                    closable = base_li
+                elif base_tot > 0:
+                    side_txt = "LONG"
+                    closable = base_tot
 
-                    if side_txt and closable is not None:
-                        lines.append(
-                            f"   Position: {side_txt}  |  Closable size (≈): {closable:,.6f} {base_ccy}"
-                        )
+                if side_txt and closable is not None:
+                    lines.append(
+                        f"   Position: {side_txt}  |  Closable size (≈): {closable:,.6f} {base_ccy}"
+                    )
 
-                lines.append("")
-
-        if len(lines) <= 2:
-            lines.append("Nincs releváns izolált eszköz/pozíció.")
+            lines.append("")
 
         return "\n".join(lines)
 
@@ -2032,14 +2055,22 @@ class CryptoBotApp:
         return rows
 
     def pretty_cross_accounts(self, payload: dict, default_quote: str = "USDT") -> str:
+        """
+        Cross margin számlák szépen formázva.
+        Optimalizálva:
+          - csak a _parse_cross_rows által már előszűrt (releváns) sorokra kér árfolyamot,
+          - ugyanarra a szimbólumra csak egyszer kér árat,
+          - robusztus split, ha a szimbólumban nincs '-' (fallback).
+        """
         rows = self._parse_cross_rows(payload, default_quote)
         if not rows:
             return "Cross Margin – nincs releváns kitettség."
 
-        symbols = [r["symbol"] for r in rows]
+        # Egyedi szimbólumok a releváns sorokból
+        symbols = sorted({r["symbol"] for r in rows})
         prices: dict[str, float] = {}
 
-        # Egységes árlekérés minden szimbólumra: get_best_price (WS → cache → REST)
+        # Egységes árlekérés minden releváns szimbólumra: get_best_price (WS → cache → REST)
         for sym in symbols:
             try:
                 px = self.get_best_price(sym)
@@ -2051,11 +2082,17 @@ class CryptoBotApp:
         for r in rows:
             sym = r["symbol"]
             side = r["side"]
-            closable = r["closable"]
-            base_ccy, quote_ccy = sym.split("-")[0], sym.split("-")[1]
+            closable = float(r["closable"])
+
+            # Biztonságos szimbólum-bontás
+            parts = str(sym).split("-", 1)
+            if len(parts) == 2:
+                base_ccy, quote_ccy = parts[0], parts[1]
+            else:
+                base_ccy, quote_ccy = parts[0], default_quote.upper()
 
             last = float(prices.get(sym, 0.0) or 0.0)
-            est_val = f"{closable*last:,.2f} {quote_ccy}" if last > 0 else "n/a"
+            est_val = f"{closable * last:,.2f} {quote_ccy}" if last > 0 else "n/a"
 
             lines.append(f"── {sym}  [{side}]")
             if last > 0:
@@ -3813,68 +3850,119 @@ class CryptoBotApp:
         threading.Thread(target=run, daemon=True).start()
 
     def _mb_draw_chart(self, lookback: int = 150):
-            """Minidiagram a Margin Bot fülön: Close + opcionálisan két EMA a formból."""
-            try:
-                # Paraméterek kiolvasása
-                symbol = normalize_symbol(self.mb_symbol.get())
-                tf     = self.mb_tf.get()
-                fa     = int(self.mb_ma_fast.get())
-                slw    = int(self.mb_ma_slow.get())
+        """Minidiagram a Margin Bot fülön: Close + EMA-k + RSI."""
+        try:
+            # Paraméterek kiolvasása
+            symbol = normalize_symbol(self.mb_symbol.get())
+            tf     = self.mb_tf.get()
+            fa     = int(self.mb_ma_fast.get())
+            slw    = int(self.mb_ma_slow.get())
 
-                # ----------------------------------------------------
-                # ÚJ ELLENŐRZÉS: Exchange objektum inicializálva van-e
-                # ----------------------------------------------------
-                ex = getattr(self, "exchange", None)
-                if ex is None:
-                    # Csendes hibajelzés, ha a bot nincs indítva.
-                    # Ezzel megelőzzük a 'NoneType' object has no attribute 'fetch_ohlcv' hibát.
-                    try: self._safe_log("❌ Chart hiba: Az Exchange objektum nincs inicializálva (nincs futás).\n")
-                    except Exception: pass
-                    return
-                # ----------------------------------------------------
-
-                # Lekérés (most már a biztonságos 'ex' változót használjuk)
-                ohlcv = ex.fetch_ohlcv(symbol, tf, limit=max(lookback, slw+5)) # type: ignore
-                if not ohlcv:
-                    return
-                
-                import pandas as pd, matplotlib.dates as mdates
-                
-                df = pd.DataFrame(ohlcv, columns=["ts","o","h","l","c","v"])
-                df["dt"] = pd.to_datetime(df["ts"], unit="ms")
-
-                # EMA-k
-                close = df["c"].astype(float)
-
-                # --- Websocket élő ár integráció ---
+            # --- Exchange ellenőrzés ---
+            ex = getattr(self, "exchange", None)
+            if ex is None:
                 try:
-                    if getattr(self, "_ticker_ws", None) is not None:
-                        rt = float(self._ticker_ws.get_last_price() or 0.0)
-                        if rt > 0:
-                            # utolsó gyertya záróárát kicseréljük az élő árra
-                            close.iloc[-1] = rt
-                            df.loc[df.index[-1], "c"] = rt
+                    self._safe_log("❌ Chart hiba: Az Exchange objektum nincs inicializálva (nincs futás).\n")
                 except Exception:
                     pass
+                return
 
-                ema_f = close.ewm(span=fa, adjust=False).mean()
-                ema_s = close.ewm(span=slw, adjust=False).mean()
+            # --- OHLCV lekérés ---
+            ohlcv = ex.fetch_ohlcv(symbol, tf, limit=max(lookback, slw + 5))  # type: ignore
+            if not ohlcv:
+                return
 
-                # rajz
-                self.mb_ax.clear()
-                self.mb_ax.plot(df["dt"], close, label="Close")
-                self.mb_ax.plot(df["dt"], ema_f, label=f"EMA({fa})")
-                self.mb_ax.plot(df["dt"], ema_s, label=f"EMA({slw})")
-                self.mb_ax.legend(loc="lower left")
-                self.mb_ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
-                self.mb_ax.set_title(symbol + " • " + tf)
-                self.mb_ax.grid(True, alpha=0.25)
-                self.mb_fig.tight_layout()
-                self.mb_canvas.draw_idle()
-            except Exception as e:
-                # csendes – ne dobáljon fel ablakot
-                try: self._safe_log(f"Chart hiba: {e}\n")
-                except Exception: pass
+            import pandas as pd
+            import matplotlib.dates as mdates
+
+            df = pd.DataFrame(ohlcv, columns=["ts", "o", "h", "l", "c", "v"])
+            df["dt"] = pd.to_datetime(df["ts"], unit="ms")
+
+            # Close sor
+            close = df["c"].astype(float)
+
+            # --- Websocket élő ár integráció ---
+            try:
+                tws = getattr(self, "_ticker_ws", None)
+                if tws is not None:
+                    rt = float(tws.get_last_price() or 0.0)
+                    if rt > 0:
+                        close.iloc[-1] = rt
+                        df.loc[df.index[-1], "c"] = rt
+            except Exception:
+                pass
+
+            # --- EMA-k ---
+            ema_f = close.ewm(span=fa, adjust=False).mean()
+            ema_s = close.ewm(span=slw, adjust=False).mean()
+
+            # --- RSI (egyszerű rolling verzió) ---
+            try:
+                rsi_len = int(self._mb_cfg.get("rsi_len", 14) if hasattr(self, "_mb_cfg") else 14)
+            except Exception:
+                rsi_len = 14
+
+            rsi = None
+            try:
+                delta = close.diff()
+                gain = delta.clip(lower=0).rolling(rsi_len).mean()
+                loss = (-delta.clip(upper=0)).rolling(rsi_len).mean()
+                rs = gain / loss.replace(0, 1e-12)
+                rsi = 100 - (100 / (1 + rs))
+            except Exception:
+                rsi = None
+
+            # --- Rajzolás ---
+            self.mb_ax.clear()
+
+            # Ár + EMA-k
+            (line_close,) = self.mb_ax.plot(df["dt"], close, label="Close")
+            (line_ema_f,) = self.mb_ax.plot(df["dt"], ema_f, label=f"EMA({fa})")
+            (line_ema_s,) = self.mb_ax.plot(df["dt"], ema_s, label=f"EMA({slw})")
+
+            # RSI tengely (lazy init + clear)
+            if getattr(self, "mb_rsi_ax", None) is None:
+                self.mb_rsi_ax = self.mb_ax.twinx()
+            else:
+                self.mb_rsi_ax.clear()
+
+            if rsi is not None:
+                (line_rsi,) = self.mb_rsi_ax.plot(df["dt"], rsi, alpha=0.3, label="RSI")
+                self.mb_rsi_ax.set_ylim(0, 100)
+                self.mb_rsi_ax.axhline(30, linestyle="--", alpha=0.2)
+                self.mb_rsi_ax.axhline(70, linestyle="--", alpha=0.2)
+                self.mb_rsi_ax.set_yticks([])
+            else:
+                line_rsi = None
+
+            # X-tengely formátum
+            self.mb_ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+
+            # Cím, grid
+            self.mb_ax.set_title(symbol + " • " + tf)
+            self.mb_ax.grid(True, alpha=0.25)
+
+            # Legend: Close + EMA-k (+ RSI, ha van adat)
+            handles = [line_close, line_ema_f, line_ema_s]
+            if line_rsi is not None:
+                handles.append(line_rsi)
+
+            labels = [h.get_label() for h in handles]
+            self.mb_ax.legend(handles, labels, loc="lower left", fontsize="small")
+
+            # FONTOS: tight_layout-ot NE hívjuk minden frissítésnél,
+            # ha kell, egyszer hívd meg ott, ahol a self.mb_fig-et létrehozod.
+            # self.mb_fig.tight_layout()
+
+            self.mb_canvas.draw_idle()
+
+        except Exception as e:
+            # csendes – ne dobáljon fel ablakot
+            try:
+                self._safe_log(f"Chart hiba: {e}\n")
+            except Exception:
+                pass
+
 
     # --- Safe helpers: NaN/0 guard minden osztáshoz ---
     def _is_pos_num(self, x) -> bool:
@@ -6021,51 +6109,49 @@ class CryptoBotApp:
                         commit_usdt = 0.0
                         nominal_q = 0.0
 
-                        max_quote_for_trade = free_pool * (sizep_to_use / 100.0)
+                        # KERET: teljes szabad pool – a %-ot _mb_compute_size fogja alkalmazni
+                        max_quote_for_trade = free_pool
 
                         if max_quote_for_trade <= 0.0:
                             self._safe_log("ℹ️ Nincs szabad pool a nyitáshoz (keret limit). Kimarad.\n")
                         else:
-                            if inpm == "quote":
-                                _lot_step, _price_step, _, _, _ = self._mb_get_market_steps(symbol)
-                                ord = self._mb_calc_order_qty(
-                                    side=combined_sig,
-                                    price=last_px_rt,
-                                    pool_free=free_pool,
-                                    size_pct=sizep_to_use,
-                                    leverage=lev,
-                                    mode="quote",
-                                    lot_step=_lot_step,
-                                    price_step=_price_step
-                                )
-                                open_size   = float(ord["qty_base"])
-                                commit_usdt = float(ord["commit_quote"])
-                                nominal_q   = float(ord["nominal_quote"])
-                                size  = None
-                                funds = commit_usdt
+                            # Egységes méretszámítás, akár 'quote', akár 'base' módban vagyunk
+                            size, funds = self._mb_compute_size(
+                                symbol=symbol,
+                                side=combined_sig,
+                                price=last_px_rt,
+                                size_pct=sizep_to_use,
+                                input_mode=inpm,       # "quote" vagy "base"
+                                mode=mode,             # "isolated"/"cross"
+                                leverage=lev,
+                                budget_quote=max_quote_for_trade,
+                                dry=dry,
+                                auto_borrow=auto_borrow,
+                            )
+
+                            # _mb_compute_size logikája:
+                            #   - input_mode='quote' → (size=None, funds>0)
+                            #   - input_mode='base'  → (size>0, funds=None)
+                            if funds is not None and funds > 0:
+                                # QUOTE mód: funds = commit_usdt
+                                commit_usdt = float(funds)
+                                nominal_q   = commit_usdt * max(1, lev)
+                                open_size   = nominal_q / max(last_px_rt, 1e-12)
+                            elif size is not None and size > 0:
+                                # BASE mód: size = darabszám
+                                open_size   = float(size)
+                                nominal_q   = open_size * last_px_rt
+                                commit_usdt = nominal_q / max(1, lev)
                             else:
-                                size, funds = self._mb_compute_size(
-                                    symbol, combined_sig, last_px_rt, sizep_to_use, inpm, mode, lev,
-                                    budget_quote=max_quote_for_trade,
-                                    dry=dry,
-                                    auto_borrow=auto_borrow,
-                                )
-                                if funds is not None and funds > 0:
-                                    commit_usdt = float(funds)
-                                    nominal_q   = commit_usdt * max(1, lev)
-                                    open_size   = nominal_q / max(last_px_rt, 1e-12)
-                                elif size is not None and size > 0:
-                                    open_size   = float(size)
-                                    nominal_q   = open_size * last_px_rt
-                                    commit_usdt = nominal_q / max(1, lev)
-                                else:
-                                    open_size = 0.0; commit_usdt = 0.0; nominal_q = 0.0
+                                open_size = 0.0
+                                commit_usdt = 0.0
+                                nominal_q = 0.0
 
                             lot_step, price_step, min_base, min_funds, quote_step = self._mb_get_market_steps(symbol)
                             open_size = self._mb_floor_to_step_dec(open_size, lot_step)
 
                             self._safe_log(
-                                f"📈 Jel: {combined_sig.upper()} | px={last_px_rt:.6f} | size%={sizep_to_use:.2f} | "
+                                f"📈 Jel: {combined_sig.upper()} | price={last_px_rt:.6f} | size%={sizep_to_use:.2f} | "
                                 f"nominal={nominal_q:.2f} | commit={commit_usdt:.2f} | free_pool={free_pool:.2f} | "
                                 f"lev={lev} | mode={mode} dry={dry}\n"
                             )
@@ -6729,16 +6815,18 @@ class CryptoBotApp:
     # ---------- Méret-számítás (budget támogatással) ----------
     def _mb_compute_size(
         self,
-        symbol: str,
+        symbol: str | None,
         side: str,
-        px: float,
+        price: float,                 # régi px helyett
         size_pct: float,
-        input_mode: str,
-        mode: str,
+        input_mode: str,              # "quote" vagy "base"
+        mode: str,                    # "isolated" / "cross" (margin mód)
         leverage: int,
         budget_quote: float = 0.0,
         dry: bool | None = None,
         auto_borrow: bool | None = None,
+        lot_step: float = 0.0,        # opcionális, most nem kötelező használni
+        price_step: float = 0.0,      # opcionális
     ) -> tuple[float | None, float | None]:
         """
         Méret számítás:
@@ -6748,49 +6836,100 @@ class CryptoBotApp:
         cap_quote logika:
           - DRY-RUN: cap_quote = budget (ha >0), különben avail_quote
           - LIVE + Auto-borrow: cap_quote = budget (ha >0), különben avail_quote
-          - LIVE + NINCS Auto-borrow: cap_quote = min(avail_quote, budget) ha budget>0, különben avail_quote
+          - LIVE + NINCS Auto-borrow: cap_quote = min(avail_quote, budget) ha budget>0,
+                                      különben avail_quote
+        VISSZA:
+          (size_base, funds_quote)
         """
         try:
-            import tkinter as tk  # ha a fájl tetején már van, ez el is hagyható
+            import tkinter as tk
 
-            leverage = max(1, min(leverage, 10 if mode == 'isolated' else 5))
-            base, quote = split_symbol(symbol)
+            # tőkeáttét korlát (isolated: max 10, cross: max 5)
+            lev_max = 10 if mode == "isolated" else 5
+            leverage = int(max(1, min(lev_max, int(leverage or 1))))
 
-            # gyors készlet-lekérés (ha van helper)
-            avail_base, avail_quote = (0.0, 0.0)
-            if hasattr(self, "_mt_available"):
-                avail_base, avail_quote = self._mt_available(base, quote)
-
+            # százalék normálás
             pct = max(0.0, min(100.0, float(size_pct))) / 100.0
             budget_quote = float(budget_quote or 0.0)
 
-            if input_mode == 'quote':
-                # döntés a cap_quote-ról – csak akkor olvas widgetet, ha nem kaptunk paramot
-                if dry is None:
-                    dry = bool(self._mb_get_bool('mb_dry', True))
-                if auto_borrow is None:
-                    auto_borrow = bool(getattr(self, 'mb_autob', tk.BooleanVar(value=False)).get())
+            # alapértelmezett készletek
+            avail_base = 0.0
+            avail_quote = 0.0
 
-                if dry or auto_borrow:
+            base = ""
+            quote = ""
+
+            # ha van szimbólum, próbálunk tényleges készletet kérni
+            if symbol:
+                base, quote = split_symbol(symbol)
+                if hasattr(self, "_mt_available"):
+                    try:
+                        avail_base, avail_quote = self._mt_available(base, quote)
+                    except Exception:
+                        avail_base, avail_quote = 0.0, 0.0
+
+            # input mód egységesítés
+            input_mode = (input_mode or "quote").lower()
+            if input_mode not in ("quote", "base"):
+                input_mode = "quote"
+
+            # DRY / auto_borrow flag-ek kitöltése, ha None
+            if dry is None:
+                try:
+                    dry = bool(self._mb_get_bool("mb_dry", True))
+                except Exception:
+                    dry = True
+
+            if auto_borrow is None:
+                try:
+                    auto_borrow = bool(getattr(
+                        self,
+                        "mb_autob",
+                        tk.BooleanVar(value=False)
+                    ).get())
+                except Exception:
+                    auto_borrow = False
+
+            # --- QUOTE mód: funds-t számolunk ---
+            if input_mode == "quote":
+                # cap_quote választása a docstring logika szerint
+                if dry:
+                    # DRY: csak szimuláció → budget vagy avail
                     cap_quote = budget_quote if budget_quote > 0 else avail_quote
                 else:
-                    if budget_quote > 0:
-                        cap_quote = min(avail_quote, budget_quote)
+                    if auto_borrow:
+                        cap_quote = budget_quote if budget_quote > 0 else avail_quote
                     else:
-                        cap_quote = avail_quote
+                        if budget_quote > 0:
+                            cap_quote = min(avail_quote, budget_quote)
+                        else:
+                            cap_quote = avail_quote
 
                 use_quote = max(0.0, cap_quote * pct)
                 if use_quote <= 0:
                     return None, None
 
-                return None, use_quote
+                # itt lehetne quote_step-re padlózni, ha később akarod
+                return None, float(use_quote)
 
-            else:  # 'base'
-                size = max(0.0, avail_base * pct)
-                return (round(size, 6), None) if size > 0 else (None, None)
+            # --- BASE mód: darabszámot számolunk az elérhető BASE-ből ---
+            size_base = max(0.0, avail_base * pct)
+
+            # opcionális lot_step kerekítés
+            if lot_step and hasattr(self, "_mb_floor_to_step_dec"):
+                try:
+                    size_base = self._mb_floor_to_step_dec(size_base, float(lot_step))
+                except Exception:
+                    pass
+
+            if size_base <= 0:
+                return None, None
+
+            return float(size_base), None
 
         except Exception:
-            return (None, None)
+            # hiba esetén inkább ne nyisson semmit
+            return None, None
 
     def _mb_get_market_steps(self, symbol: str):
         """
@@ -6844,50 +6983,6 @@ class CryptoBotApp:
                 return repr(obj)
             except Exception:
                 return "<unprintable>"
-
-    def _mb_calc_order_qty(self,
-        side: str,
-        price: float,
-        pool_free: float,
-        size_pct: float,
-        leverage: int,
-        mode: str = "quote",
-        lot_step: float = 0.0,
-        price_step: float = 0.0,
-    ) -> dict:
-        """Wrapper a régi API-hoz: belül az egységes _mb_compute_size-et használja.
-
-        VISSZA:
-            {
-                "qty_base": float,       # bázismennyiség (szimbólum alapdevizájában)
-                "commit_quote": float,   # ténylegesen lekötött QUOTE (pl. USDT)
-                "nominal_quote": float,  # nominális pozícióméret (tőkeáttétellel)
-            }
-        """
-        size_pct = float(max(0.0, min(100.0, size_pct)))
-        budget_quote = float(pool_free) * (size_pct / 100.0)
-
-        qty_base, commit_quote = self._mb_compute_size(
-            symbol=None,                 # itt nem használjuk a sym-et
-            side=side,
-            price=price,
-            size_pct=size_pct,
-            input_mode=mode,
-            mode=mode,
-            leverage=leverage,
-            budget_quote=budget_quote,
-            dry=True,
-            auto_borrow=False,
-            lot_step=lot_step,
-            price_step=price_step,
-        )
-
-        nominal_quote = (commit_quote or 0.0) * max(1, leverage)
-        return {
-            "qty_base": float(qty_base or 0.0),
-            "commit_quote": float(commit_quote or 0.0),
-            "nominal_quote": float(nominal_quote or 0.0),
-        }
 
     def _mb_build_cfg(self) -> dict:
         """Margin bot beállítások snapshot – CSAK fő szálból hívd (pl. mb_start-ban)."""
