@@ -2227,7 +2227,7 @@ class CryptoBotApp:
                 # 1s-enként polloljuk a websocket/REST kombót (most már get_best_price)
                 self._mt_price_job = self.root.after(1000, _tick)
 
-        self._mt_price_job = self.root.after(100, _tick)
+        _tick()
 
     def _mt_update_estimate(self, last_price: float):
         sym = normalize_symbol(self.mt_symbol.get())
