@@ -4113,25 +4113,29 @@ class CryptoBotApp:
             # 7. A worker indítása háttérszálon
             threading.Thread(target=worker, daemon=True).start()
 
-    # ---- Margin "beragadt" kötelezettségek rendezése (cross margin, KuCoin szerinti maxRepayAmount alapján) ----
+    # ---- Margin "beragadt" kötelezettségek rendezése (cross + isolated) ----
     def repay_stuck_margin(self):
         """
-        Funds fülön lévő 'Repay' gombhoz.
+        Funds fülön lévő 'Beragadt margin kötelezettségek rendezése' gombhoz.
 
-        Ahelyett, hogy saját magunk számolnánk a törleszthető összeget cross/isolated
-        account view-ból, közvetlenül a KuCoin margin account endpointját kérdezzük le:
+        Logika:
+          - CROSS:  GET /api/v3/margin/accounts
+                    data.accounts[*].{currency, liability, available}
+          - ISOLATED: GET /api/v3/isolated/accounts
+                      data.assets[*].symbol + baseAsset/quoteAsset.{currency, liability, available}
 
-            GET /api/v3/margin/account
+        Minden olyan sorra, ahol liability > 0 ÉS available > 0,
+        repay-t küldünk max. min(liability, available) * 0.999 összeggel.
 
-        Ez tartalmazza devizánként:
-            - liability        (tartozás)
-            - maxRepayAmount   (mennyi törlesztés ENGEDÉLYEZETT)
+        Törlesztés:
+          POST /api/v3/margin/repay
 
-        A repay hívás pedig:
-            POST /api/v3/margin/repay  body = {"currency": "...", "size": "..."}
+            Cross:
+              {"currency": "USDT", "size": "0.1234"}
 
-        => Így elkerüljük a 130203 (Insufficient balance / max borrowing exceeded) hibákat,
-           mert csak a maxRepayAmount-ig próbálunk törleszteni.
+            Isolated:
+              {"currency": "USDT", "size": "0.1234",
+               "isolated": true, "symbol": "SOL-USDT"}
         """
         if self.public_mode.get():
             messagebox.showwarning(
@@ -4142,148 +4146,211 @@ class CryptoBotApp:
 
         def worker():
             import math
+            import tkinter as tk
 
             try:
-                ex = self.exchange
+                ex = getattr(self, "exchange", None)
                 if not ex:
                     raise RuntimeError("Nincs aktív exchange kliens.")
 
-                # 1) KuCoin margin account – ez adja a liabilityList + maxRepayAmount mezőket
-                with self._ex_lock:
-                    acc_raw = ex._rest_get("/api/v3/margin/account", {})  # type: ignore[union-attr]
+                repay_ops = []  # (scope, currency, symbol, liability, available, safe_amt)
 
-                if not isinstance(acc_raw, dict) or str(acc_raw.get("code", "")) != "200000":
-                    raise RuntimeError(f"Margin account hívás hiba / nem 200000: {acc_raw!r}")
+                # ---------- 1) CROSS MARGIN: /api/v3/margin/accounts ----------
+                try:
+                    with self._ex_lock:
+                        cross_raw = ex._rest_get(
+                            "/api/v3/margin/accounts",
+                            {"quoteCurrency": "USDT", "queryType": "MARGIN"},
+                        )  # type: ignore[union-attr]
 
-                data = acc_raw.get("data", {}) or {}
-                liab_list = data.get("liabilityList", []) or []
+                    if isinstance(cross_raw, dict) and str(cross_raw.get("code", "")) == "200000":
+                        data = cross_raw.get("data", {}) or {}
+                        accounts = data.get("accounts", []) or []
+                        for acc in accounts:
+                            ccy = (acc.get("currency") or "").upper()
+                            if not ccy:
+                                continue
+                            try:
+                                liab = float(acc.get("liability") or 0.0)
+                                avail = float(acc.get("available") or acc.get("availableBalance") or 0.0)
+                            except Exception:
+                                continue
 
-                # 2) Devizánként kigyűjtjük a liability + maxRepayAmount adatokat
-                repay_ops: list[tuple[str, float, float, float]] = []
-                # (ccy, liability, max_repay, safe_amt)
+                            if liab <= 0 or avail <= 0:
+                                continue
 
-                for item in liab_list:
-                    ccy  = (item.get("currency") or "").upper()
-                    if not ccy:
-                        continue
+                            raw_repay = min(liab, avail)
+                            eps = 1e-8
+                            safe_amt = max(0.0, raw_repay - eps) * 0.999
+                            safe_amt = math.floor(safe_amt * 1e8) / 1e8
 
-                    try:
-                        liab = float(item.get("liability") or 0.0)
-                        max_r = float(item.get("maxRepayAmount") or 0.0)
-                    except Exception:
-                        continue
-
-                    # Csak akkor érdekes, ha tényleg van tartozás
-                    if liab <= 0:
-                        continue
-
-                    # Ha a KuCoin szerint maxRepayAmount == 0 → semmit nem enged törleszteni
-                    if max_r <= 0:
-                        # Logoljuk, hogy értsd miért nincs repay kísérlet
-                        self.root.after(0, lambda c=ccy, l=liab: (
-                            self.funds_log.insert(
-                                tk.END,
-                                f"ℹ️ {c}: liability={l:.8f}, de maxRepayAmount=0 – KuCoin jelenleg nem enged repay-t erre a devizára.\n"
+                            if safe_amt > 0:
+                                repay_ops.append(("cross", ccy, None, liab, avail, safe_amt))
+                    else:
+                        # ha vmi más válasz jött, logoljuk
+                        self.root.after(
+                            0,
+                            lambda r=cross_raw: (
+                                self.funds_log.insert(
+                                    tk.END,
+                                    f"ℹ️ Cross margin account hívás nem 200000: {r!r}\n",
+                                ),
+                                self.funds_log.see(tk.END),
                             ),
-                            self.funds_log.see(tk.END)
-                        ))
-                        continue
-
-                    # Alapelv: sose próbáljunk többet törleszteni, mint a liability
-                    raw_repay = min(liab, max_r)
-
-                    # Biztonsági margin:
-                    # - pici epsilon kivonása (float hibák ellen)
-                    # - 0.999 faktor, hogy biztosan a maxRepay alatt maradjunk
-                    eps = 1e-8
-                    safe_amt = max(0.0, raw_repay - eps) * 0.999
-
-                    # Lefelé kerekítés 8 tizedesre (KuCoin USDT/általános pattern)
-                    safe_amt = math.floor(safe_amt * 1e8) / 1e8
-
-                    if safe_amt <= 0:
-                        # Ha a biztonságos összeg gyakorlatilag 0-ra kerekedik, akkor ezt a devizát kihagyjuk
-                        self.root.after(0, lambda c=ccy, l=liab, mr=max_r: (
+                        )
+                except Exception as e:
+                    self.root.after(
+                        0,
+                        lambda e=e: (
                             self.funds_log.insert(
-                                tk.END,
-                                f"ℹ️ {c}: liability={l:.8f}, maxRepayAmount={mr:.8f}, "
-                                f"de a biztonságos repay összeg túl kicsi – kihagyva.\n"
+                                tk.END, f"❌ Cross margin account lekérdezés hiba: {e}\n"
                             ),
-                            self.funds_log.see(tk.END)
-                        ))
-                        continue
-
-                    repay_ops.append((ccy, liab, max_r, safe_amt))
-
-                if not repay_ops:
-                    # Semmi olyat nem találtunk, amire KuCoin szerint van törleszthető összeg
-                    self.root.after(0, lambda: (
-                        self.funds_log.insert(
-                            tk.END,
-                            "ℹ️ Nem találtam olyan devizát, amelyre a KuCoin maxRepayAmount > 0 lett volna. "
-                            "Nincs automatikusan törleszthető margin kötelezettség.\n"
+                            self.funds_log.see(tk.END),
                         ),
-                        self.funds_log.see(tk.END)
-                    ))
+                    )
+
+                # ---------- 2) ISOLATED MARGIN: /api/v3/isolated/accounts ----------
+                try:
+                    with self._ex_lock:
+                        iso_raw = ex._rest_get(
+                            "/api/v3/isolated/accounts",
+                            {"quoteCurrency": "USDT", "queryType": "ISOLATED"},
+                        )  # type: ignore[union-attr]
+
+                    if isinstance(iso_raw, dict) and str(iso_raw.get("code", "")) == "200000":
+                        data = iso_raw.get("data", {}) or {}
+                        assets = data.get("assets", []) or []
+                        for asset in assets:
+                            sym = asset.get("symbol") or ""
+                            if not sym:
+                                continue
+
+                            for key in ("baseAsset", "quoteAsset"):
+                                node = asset.get(key) or {}
+                                ccy = (node.get("currency") or "").upper()
+                                if not ccy:
+                                    continue
+                                try:
+                                    liab = float(node.get("liability") or 0.0)
+                                    # v3: "available", v1: "availableBalance"
+                                    avail = float(node.get("available") or node.get("availableBalance") or 0.0)
+                                except Exception:
+                                    continue
+
+                                if liab <= 0 or avail <= 0:
+                                    continue
+
+                                raw_repay = min(liab, avail)
+                                eps = 1e-8
+                                safe_amt = max(0.0, raw_repay - eps) * 0.999
+                                safe_amt = math.floor(safe_amt * 1e8) / 1e8
+
+                                if safe_amt > 0:
+                                    repay_ops.append(("isolated", ccy, sym, liab, avail, safe_amt))
+                    else:
+                        self.root.after(
+                            0,
+                            lambda r=iso_raw: (
+                                self.funds_log.insert(
+                                    tk.END,
+                                    f"ℹ️ Isolated margin account hívás nem 200000: {r!r}\n",
+                                ),
+                                self.funds_log.see(tk.END),
+                            ),
+                        )
+                except Exception as e:
+                    self.root.after(
+                        0,
+                        lambda e=e: (
+                            self.funds_log.insert(
+                                tk.END, f"❌ Isolated margin account lekérdezés hiba: {e}\n"
+                            ),
+                            self.funds_log.see(tk.END),
+                        ),
+                    )
+
+                # ---------- 3) Nincs semmi törleszthető? ----------
+                if not repay_ops:
+                    self.root.after(
+                        0,
+                        lambda: (
+                            self.funds_log.insert(
+                                tk.END,
+                                "ℹ️ Nem találtam olyan cross/isolated devizát, "
+                                "amelyre liability > 0 és pozitív available lenne. "
+                                "Nincs automatikusan törleszthető margin kötelezettség.\n",
+                            ),
+                            self.funds_log.see(tk.END),
+                        ),
+                    )
                     return
 
-                # 3) Devizánként repay hívás a KuCoin által engedett safe_amt értékkel
-                for ccy, liab, max_r, safe_amt in repay_ops:
+                # ---------- 4) Repay hívások elküldése ----------
+                for scope, ccy, sym, liab, avail, safe_amt in repay_ops:
                     body = {
                         "currency": ccy,
                         "size": f"{safe_amt:.8f}",
                     }
+                    if scope == "isolated":
+                        body["isolated"] = True
+                        body["symbol"] = sym
 
                     try:
                         with self._ex_lock:
                             resp = ex._rest_post("/api/v3/margin/repay", body)  # type: ignore[union-attr]
 
-                        def _log_repay(c=ccy, l=liab, mr=max_r, a=safe_amt, r=resp):
-                            # Diagnosztika: megmutatjuk a liability, maxRepayAmount és küldött összeget
+                        def _log_repay(sc=scope, c=ccy, s=sym, l=liab, a=avail, amt=safe_amt, r=resp):
+                            prefix = "Isolated" if sc == "isolated" else "Cross"
+                            pair_info = f" [{s}]" if s else ""
                             self.funds_log.insert(
                                 tk.END,
-                                f"↪ Repay próbálkozás {c}: liability={l:.8f}, maxRepayAmount={mr:.8f}, küldött={a:.8f}\n"
+                                f"↪ {prefix} repay próbálkozás{pair_info} {c}: "
+                                f"liability={l:.8f}, available={a:.8f}, küldött={amt:.8f}\n",
                             )
 
                             if isinstance(r, dict):
                                 code = str(r.get("code", "?"))
-                                msg  = str(r.get("msg", "")) if r.get("msg") is not None else ""
-
+                                msg = str(r.get("msg", "")) if r.get("msg") is not None else ""
                                 if code == "200000":
                                     self.funds_log.insert(
                                         tk.END,
-                                        f"✅ Repay sikeres: {c} {a:.8f} – code={code}\n"
+                                        f"✅ Repay sikeres{pair_info}: {c} {amt:.8f} – code={code}\n",
                                     )
                                 elif code == "130203":
-                                    # Insufficient account balance / max borrowing exceeded
                                     self.funds_log.insert(
                                         tk.END,
-                                        f"❌ Repay elutasítva {c} {a:.8f}: 130203 – "
-                                        f"Nincs elég margin egyenleg ehhez a törlesztéshez (KuCoin szerint). msg='{msg}'\n"
+                                        f"❌ Repay elutasítva{pair_info} {c} {amt:.8f}: 130203 – "
+                                        f"Nincs elég margin egyenleg ehhez a törlesztéshez. msg='{msg}'\n",
                                     )
                                 else:
                                     self.funds_log.insert(
                                         tk.END,
-                                        f"❌ Repay elutasítva {c} {a:.8f}: code={code} msg='{msg}'\n"
+                                        f"❌ Repay elutasítva{pair_info} {c} {amt:.8f}: code={code} msg='{msg}'\n",
                                     )
                             else:
-                                # nem dict válasz – best-effort log
                                 self.funds_log.insert(
                                     tk.END,
-                                    f"✅ Repay elküldve (nem standard válasz): {c} {a:.8f}\n"
+                                    f"✅ Repay elküldve (nem standard válasz){pair_info}: {c} {amt:.8f}\n",
                                 )
-
                             self.funds_log.see(tk.END)
 
                         self.root.after(0, _log_repay)
 
                     except Exception as e:
-                        self.root.after(0, lambda c=ccy, e=e: (
-                            self.funds_log.insert(tk.END, f"❌ Repay hiba {c}: {e}\n"),
-                            self.funds_log.see(tk.END)
-                        ))
+                        self.root.after(
+                            0,
+                            lambda sc=scope, c=ccy, s=sym, e=e: (
+                                self.funds_log.insert(
+                                    tk.END,
+                                    f"❌ Repay hiba "
+                                    f"{'Isolated' if sc == 'isolated' else 'Cross'} "
+                                    f"{(s + ' ') if s else ''}{c}: {e}\n",
+                                ),
+                                self.funds_log.see(tk.END),
+                            ),
+                        )
 
-                # 4) Sikeres kör után frissítjük az összes egyenleget is (Funds táblázat + cache)
+                # ---------- 5) Végén egyenleg frissítés ----------
                 self.root.after(0, self.refresh_all_funds_balances)
 
             except Exception as e:
@@ -5333,6 +5400,9 @@ class CryptoBotApp:
         if not hasattr(self, "_mb_last_cross_ts"): self._mb_last_cross_ts = 0
         if not hasattr(self, "_mb_last_signal"):   self._mb_last_signal   = "hold"
         if not hasattr(self, "_mb_last_rt_px"):   self._mb_last_rt_px = {}
+        if not hasattr(self, "_mb_last_status_log_ts"):  self._mb_last_status_log_ts  = 0
+        if not hasattr(self, "_mb_last_status_sig"):     self._mb_last_status_sig     = ""
+        if not hasattr(self, "_mb_last_status_px"):      self._mb_last_status_px      = 0.0
 
         # Dinamikus keret (pool) – induláskor felépítjük
         if not hasattr(self, "_pool_balance_quote") or not hasattr(self, "_pool_used_quote"):
@@ -5921,23 +5991,79 @@ class CryptoBotApp:
                     log_line += f" | POOL used/bal={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f}"
                     log_line += f" | OPEN={open_now}/{('∞' if max_open==0 else max_open)}"
 
-                    # Naplózás ritkítása: csak akkor írunk, ha eltelt néhány másodperc,
-                    # vagy új BUY/SELL jel érkezett.
+                    # Ha HOLD és vannak okok, fűzzük hozzá a sor végére, ne külön sorba.
+                    if combined_sig in (None, "", "hold") and reasons:
+                        log_line += " | hold_reasons=" + ",".join(reasons)
+
+                    # ================== STÁTUSZ LOG VEZÉRLÉS ==================
+
+                    # 0) Beállítás: részletes státusz log engedélyezése?
+                    try:
+                        verbose_on = bool(
+                            getattr(self, "log_verbose_var", None)
+                            and self.log_verbose_var.get()
+                        )
+                    except Exception:
+                        verbose_on = True  # ha valami gond van, inkább ne hallgasson el teljesen
+
+                    # 1) Ha KI van kapcsolva a részletes log:
+                    #    - BUY/SELL jel esetén mindig logolunk 1 sort
+                    #    - HOLD esetén nem logolunk státusz-sorokat
+                    if not verbose_on:
+                        if combined_sig in ("buy", "sell"):
+                            self._safe_log(
+                                log_line.rstrip() + f"  → {combined_sig} | {filters_line}\n"
+                            )
+                        # és kész: HOLD-ra semmi, de a többi log (open/close, hibák, stb.) marad
+                        continue
+
+                    # 2) Ha BE van kapcsolva a részletes log:
+                    #    - BUY/SELL jel: mindig logolunk (nem throttoljuk)
+                    #    - HOLD: ritkítva, a beállított delay + ármozgás alapján
+                    try:
+                        delay_s = int(self.log_delay_var.get())
+                        if delay_s <= 0:
+                            delay_s = 5
+                    except Exception:
+                        delay_s = 5
+
                     should_log = True
                     try:
-                        now_ts_log = int(time.time())
-                        last_ts_log = getattr(self, "_mb_last_status_log_ts", 0)
-                        if combined_sig not in ("buy", "sell") and (now_ts_log - last_ts_log) < 3:
-                            should_log = False
+                        now_ts_log   = int(time.time())
+                        last_ts_log  = getattr(self, "_mb_last_status_log_ts", 0)
+                        last_sig_log = getattr(self, "_mb_last_status_sig", "")
+                        last_px_log  = float(getattr(self, "_mb_last_status_px", 0.0) or 0.0)
+
+                        if combined_sig in ("buy", "sell"):
+                            # Jel esetén mindig menjen ki
+                            should_log = True
                         else:
-                            self._mb_last_status_log_ts = now_ts_log
+                            # HOLD / egyéb eset
+                            dt = now_ts_log - last_ts_log
+                            px_move_pct = 0.0
+                            if self._is_pos_num(last_px_log) and self._is_pos_num(last_px_rt) and last_px_rt > 0:
+                                px_move_pct = abs(last_px_rt - last_px_log) / last_px_log * 100.0
+
+                            # csak akkor logolunk, ha:
+                            #  - eltelt legalább delay_s mp, VAGY
+                            #  - megváltozott a combined_sig (elvileg ritka), VAGY
+                            #  - az ár >0.2%-ot mozdult az utolsó loghoz képest
+                            if dt < delay_s and combined_sig == last_sig_log and px_move_pct < 0.2:
+                                should_log = False
+                            else:
+                                should_log = True
+
+                        if should_log:
+                            self._mb_last_status_log_ts  = now_ts_log
+                            self._mb_last_status_sig     = combined_sig
+                            self._mb_last_status_px      = float(last_px_rt or last_px or 0.0)
                     except Exception:
                         should_log = True
 
                     if should_log:
-                        self._safe_log(log_line.rstrip() + f"  → {combined_sig} | {filters_line}\n")
-                        if combined_sig in (None, "", "hold") and reasons:
-                            self._safe_log("  ↳ hold reasons: " + ",".join(reasons) + "\n")
+                        self._safe_log(
+                            log_line.rstrip() + f"  → {combined_sig} | {filters_line}\n"
+                        )
 
                     # BUY-ok kezelése – snapshot + lock-olt módosítás, hogy elkerüljük a race condition-t
                     with self._mb_lock:
@@ -7463,10 +7589,19 @@ class CryptoBotApp:
         self.tab_settings = ttk.Frame(self.nb)
         self.nb.add(self.tab_settings, text="Beállítások")
 
-        box = ttk.Labelframe(self.tab_settings, text="Megjelenés / betűk", padding=10)
-        box.pack(fill="x", padx=10, pady=10)
+        # === FELSŐ KERET: két oszlop (bal: betűk, jobb: logolás) ===
+        top_frame = ttk.Frame(self.tab_settings)
+        top_frame.pack(fill="x", padx=10, pady=10)
 
-        # oszlop kicsit engedjen jobbra is
+        top_frame.columnconfigure(0, weight=1)
+        top_frame.columnconfigure(1, weight=1)
+
+        # ====================================================================
+        #  BAL OLDAL: MEGJELENÉS / BETŰK
+        # ====================================================================
+        box = ttk.Labelframe(top_frame, text="Megjelenés / betűk", padding=10)
+        box.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+
         box.grid_columnconfigure(1, weight=1)
 
         # --- Betűméret ---
@@ -7495,7 +7630,6 @@ class CryptoBotApp:
         family_cb.grid(row=1, column=1, sticky="w", padx=4, pady=(8, 0))
 
         def apply_font():
-            # értékek beolvasása
             try:
                 new_size = int(self.font_size_var.get())
             except (ValueError, tk.TclError):
@@ -7503,16 +7637,41 @@ class CryptoBotApp:
 
             new_family = self.font_family_var.get() or self.base_font.cget("family")
 
-            # alap + félkövér font frissítése
             self.base_font.configure(size=new_size, family=new_family)
             self.bold_font.configure(size=new_size, family=new_family)
 
-            # Minden ttk stílus + Tk alapfont újrafontozása
             self._apply_global_font()
 
         ttk.Button(box, text="Alkalmaz", command=apply_font)\
            .grid(row=2, column=0, columnspan=2, pady=(10, 0), sticky="w")
 
+        # ====================================================================
+        #  JOBB OLDAL: LOGOLÁS
+        # ====================================================================
+        log_box = ttk.Labelframe(top_frame, text="Logolás", padding=10)
+        log_box.grid(row=0, column=1, sticky="nsew")
+
+        # Részletes státusz log engedélyezése
+        self.log_verbose_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            log_box,
+            text="Részletes státusz logolás engedélyezése",
+            variable=self.log_verbose_var
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+        # Státusz log késleltetés
+        ttk.Label(log_box, text="Státusz log késleltetése (mp):")\
+           .grid(row=1, column=0, sticky="w", pady=(8, 0))
+
+        self.log_delay_var = tk.IntVar(value=5)
+        delay_cb = ttk.Combobox(
+            log_box,
+            textvariable=self.log_delay_var,
+            values=["5", "10", "20", "30"],
+            width=5,
+            state="readonly"
+        )
+        delay_cb.grid(row=1, column=1, sticky="w", padx=4, pady=(8, 0))
 
     def _apply_global_font(self):
         """A base_font-ot ráteszi minden fontos ttk widget stílusra.
