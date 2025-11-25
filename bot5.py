@@ -5442,6 +5442,38 @@ class CryptoBotApp:
         def _pos_list(side: str):
             return self._sim_pos_long if side == "buy" else self._sim_pos_short
 
+        def _has_nearby_pos(side: str, px: float, tol_pct: float = 0.1):
+            """
+            Van-e már nyitott pozíció ugyanazon az oldalon (buy/sell),
+            amelynek entry ára tol_pct %-nál közelebb van az aktuális árhoz.
+
+            Visszaad:
+              (found: bool, existing_entry: float | None, diff_pct: float | None)
+            """
+            try:
+                tol = max(0.0, float(tol_pct)) / 100.0
+            except Exception:
+                tol = 0.001  # fallback = 0.1%
+
+            if not self._is_pos_num(px) or px <= 0:
+                return False, None, None
+
+            with self._mb_lock:
+                arr = self._sim_pos_long if side == "buy" else self._sim_pos_short
+                for pos in arr:
+                    try:
+                        e = float(pos.get("entry") or 0.0)
+                    except Exception:
+                        continue
+                    if not self._is_pos_num(e) or e <= 0:
+                        continue
+
+                    diff_pct = abs(e - px) / max(e, 1e-12)
+                    if diff_pct <= tol:
+                        return True, e, diff_pct * 100.0
+
+            return False, None, None
+
         def _manage_positions_for_side(side: str):
             """
             Közös menedzsment BUY / SELL pozikra.
@@ -6189,6 +6221,37 @@ class CryptoBotApp:
                             opened = False
                             time.sleep(1)
                             continue
+
+                        # --- DUPLIKÁLT ÁRSZINT SZŰRŐ (UI-ból állítható tolerancia %) ---
+                        if self._is_pos_num(last_px_rt) and last_px_rt > 0:
+                            # Tolerancia olvasása a Beállítások fülről (Spinbox),
+                            # ha valami gond van, fallback 0.5%-ra.
+                            try:
+                                tol_var = getattr(self, "mb_dup_tol_pct_var", None)
+                                if tol_var is not None:
+                                    tol_pct_val = float(tol_var.get())
+                                else:
+                                    tol_pct_val = 0.5
+                            except Exception:
+                                tol_pct_val = 0.5
+
+                            tol_pct_val = max(0.0, tol_pct_val)  # ne legyen negatív
+
+                            found, existing_entry, diff_pct = _has_nearby_pos(
+                                combined_sig,
+                                last_px_rt,
+                                tol_pct=tol_pct_val,   # UI-ból jön a százalék
+                            )
+                            if found:
+                                self._safe_log(
+                                    f"⏭ {combined_sig.upper()} jel átugorva: már van nyitott "
+                                    f"{combined_sig.upper()} pozíció hasonló áron "
+                                    f"(entry={existing_entry:.6f}, now={last_px_rt:.6f}, "
+                                    f"diff={diff_pct:.3f}%, tol={tol_pct_val:.3f}%).\n"
+                                )
+                                opened = False
+                                time.sleep(1)
+                                continue
 
                         # friss ticker: WS az első, REST csak ha nincs használható WS ár  ### WS-OPEN
                         if (not self._is_pos_num(last_px_rt)) or last_px_rt <= 0:
@@ -7562,22 +7625,19 @@ class CryptoBotApp:
         self.tab_settings = ttk.Frame(self.nb)
         self.nb.add(self.tab_settings, text="Beállítások")
 
-        # === FELSŐ KERET: két oszlop (bal: betűk, jobb: logolás) ===
-        top_frame = ttk.Frame(self.tab_settings)
-        top_frame.pack(fill="x", padx=10, pady=10)
+        # Fő frame a 2 oszlopos elrendezéshez
+        main_frame = ttk.Frame(self.tab_settings)
+        main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        main_frame.grid_columnconfigure(0, weight=1)
+        main_frame.grid_columnconfigure(1, weight=1)
 
-        top_frame.columnconfigure(0, weight=1)
-        top_frame.columnconfigure(1, weight=1)
-
-        # ====================================================================
-        #  BAL OLDAL: MEGJELENÉS / BETŰK
-        # ====================================================================
-        box = ttk.Labelframe(top_frame, text="Megjelenés / betűk", padding=10)
-        box.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        # --- Megjelenés / betűk (BAL OSZLOP) ---
+        box = ttk.Labelframe(main_frame, text="Megjelenés / betűk", padding=10)
+        box.grid(row=0, column=0, sticky="nsew", padx=(0, 5), pady=(0, 10))
 
         box.grid_columnconfigure(1, weight=1)
 
-        # --- Betűméret ---
+        # Betűméret
         ttk.Label(box, text="Betűméret:").grid(row=0, column=0, sticky="w")
         self.font_size_var = tk.IntVar(value=self.base_font.cget("size"))
         size_spin = ttk.Spinbox(
@@ -7589,7 +7649,7 @@ class CryptoBotApp:
         )
         size_spin.grid(row=0, column=1, sticky="w", padx=4)
 
-        # --- Betűtípus ---
+        # Betűtípus
         ttk.Label(box, text="Betűtípus:").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.font_family_var = tk.StringVar(value=self.base_font.cget("family"))
         font_list = sorted(set(tkfont.families()))
@@ -7603,6 +7663,7 @@ class CryptoBotApp:
         family_cb.grid(row=1, column=1, sticky="w", padx=4, pady=(8, 0))
 
         def apply_font():
+            # értékek beolvasása
             try:
                 new_size = int(self.font_size_var.get())
             except (ValueError, tk.TclError):
@@ -7610,41 +7671,61 @@ class CryptoBotApp:
 
             new_family = self.font_family_var.get() or self.base_font.cget("family")
 
+            # alap + félkövér font frissítése
             self.base_font.configure(size=new_size, family=new_family)
             self.bold_font.configure(size=new_size, family=new_family)
 
+            # Minden ttk stílus + Tk alapfont újrafontozása
             self._apply_global_font()
 
         ttk.Button(box, text="Alkalmaz", command=apply_font)\
            .grid(row=2, column=0, columnspan=2, pady=(10, 0), sticky="w")
 
-        # ====================================================================
-        #  JOBB OLDAL: LOGOLÁS
-        # ====================================================================
-        log_box = ttk.Labelframe(top_frame, text="Logolás", padding=10)
-        log_box.grid(row=0, column=1, sticky="nsew")
+        # --- Logolás + MarginBot (JOBB OSZLOP) ---
+        right_box = ttk.Labelframe(main_frame, text="Logolás / MarginBot", padding=10)
+        right_box.grid(row=0, column=1, sticky="nsew", padx=(5, 0), pady=(0, 10))
+        right_box.grid_columnconfigure(1, weight=1)
 
         # Részletes státusz log engedélyezése
         self.log_verbose_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            log_box,
+            right_box,
             text="Részletes státusz logolás engedélyezése",
             variable=self.log_verbose_var
         ).grid(row=0, column=0, columnspan=2, sticky="w")
 
-        # Státusz log késleltetés
-        ttk.Label(log_box, text="Státusz log késleltetése (mp):")\
+        # Késleltetés (mp) a státusz logok között
+        ttk.Label(right_box, text="Státusz log késleltetése (mp):")\
            .grid(row=1, column=0, sticky="w", pady=(8, 0))
 
-        self.log_delay_var = tk.IntVar(value=5)
+        self.log_delay_var = tk.IntVar(value=5)  # alap 5 mp
         delay_cb = ttk.Combobox(
-            log_box,
+            right_box,
             textvariable=self.log_delay_var,
             values=["5", "10", "20", "30"],
             width=5,
             state="readonly"
         )
         delay_cb.grid(row=1, column=1, sticky="w", padx=4, pady=(8, 0))
+
+        # --- MarginBot: duplikált / túl közeli nyitások tiltó zóna (%) ---
+        ttk.Label(
+            right_box,
+            text="Dupla / túl közeli azonos irányú nyitások tiltó zóna (%):"
+        ).grid(row=2, column=0, sticky="w", pady=(12, 0))
+
+        # ÚJ változó: ezt fogja a worker olvasni
+        self.mb_dup_tol_pct_var = tk.DoubleVar(value=0.5)  # alap: 0.1%
+        tol_spin = ttk.Spinbox(
+            right_box,
+            from_=0.0,
+            to=5.0,
+            increment=0.05,
+            width=6,
+            textvariable=self.mb_dup_tol_pct_var,
+            format="%.2f"
+        )
+        tol_spin.grid(row=2, column=1, sticky="w", padx=4, pady=(12, 0))
 
     def _apply_global_font(self):
         """A base_font-ot ráteszi minden fontos ttk widget stílusra.
