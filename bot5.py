@@ -5442,6 +5442,111 @@ class CryptoBotApp:
         def _pos_list(side: str):
             return self._sim_pos_long if side == "buy" else self._sim_pos_short
 
+        def _manage_positions_for_side(side: str):
+            """
+            Közös menedzsment BUY / SELL pozikra.
+
+            side: 'buy' → _sim_pos_long
+                  'sell' → _sim_pos_short
+            """
+            list_attr = "_sim_pos_long" if side == "buy" else "_sim_pos_short"
+
+            # Snapshot készítés
+            with self._mb_lock:
+                positions_snapshot = list(getattr(self, list_attr))
+
+            for pos in positions_snapshot:
+                try:
+                    # Ha közben (GUI-ból) törölték, ugorjunk
+                    with self._mb_lock:
+                        if pos not in getattr(self, list_attr):
+                            continue
+
+                    need_close = False
+                    close_reason = "mgmt_auto"
+
+                    # ATR / FIXED menedzsment (közös long/short logika)
+                    if pos.get('mgmt') == 'atr' and atr_val is not None:
+                        need_close = _manage_atr_on_pos(pos, px_for_mgmt, atr_val)
+                    elif pos.get('mgmt') == 'fixed':
+                        need_close = _manage_fixed_on_pos(pos, px_for_mgmt)
+
+                    if not need_close:
+                        continue
+
+                    # --- SIM ZÁRÁS ---
+                    if dry:
+                        try:
+                            with self._mb_lock:
+                                try:
+                                    idx = getattr(self, list_attr).index(pos)
+                                except ValueError:
+                                    idx = -1
+                            if idx >= 0:
+                                self._close_sim_by_index(
+                                    side,
+                                    idx,
+                                    px_for_mgmt,
+                                    reason=close_reason,
+                                    pos_obj=pos,
+                                )
+                        except Exception as e:
+                            self._safe_log(
+                                f"❌ SIM {side} zárás hiba: {e}\n"
+                            )
+                            continue
+
+                    # --- LIVE ZÁRÁS ---
+                    else:
+                        ok = False
+                        try:
+                            ok = self._live_close_pos(
+                                side,
+                                pos,
+                                px_for_mgmt,
+                                symbol=symbol,
+                                mode=mode,
+                                lev=lev,
+                            )
+                        except Exception as e:
+                            self._safe_log(
+                                f"❌ LIVE {side} zárás hiba: {e}\n"
+                            )
+                            ok = False
+
+                        if ok:
+                            # sikeres LIVE után tükörzárás SIM-ben
+                            try:
+                                with self._mb_lock:
+                                    try:
+                                        idx = getattr(self, list_attr).index(pos)
+                                    except ValueError:
+                                        idx = -1
+                                if idx >= 0:
+                                    self._close_sim_by_index(
+                                        side,
+                                        idx,
+                                        px_for_mgmt,
+                                        reason=close_reason,
+                                        pos_obj=pos,
+                                    )
+                            except Exception as e:
+                                self._safe_log(
+                                    f"❌ SIM tükrözés hiba ({side}): {e}\n"
+                                )
+                                continue
+                        else:
+                            self._safe_log(
+                                f"❗ LIVE zárás sikertelen – a {side} pozíció nyitva marad.\n"
+                            )
+                            continue
+
+                except Exception as e:
+                    self._safe_log(
+                        f"❌ Pozíció menedzsment hiba ({side}): {e}\n"
+                    )
+                    continue
+
         def _open_sim(side: str, entry_px: float, size_base: float, commit_usdt: float,
                       atr_pack=None, fixed_pack=None, **extra):
             fee_rate = self._mb_get_taker_fee()
@@ -6065,141 +6170,9 @@ class CryptoBotApp:
                             log_line.rstrip() + f"  → {combined_sig} | {filters_line}\n"
                         )
 
-                    # BUY-ok kezelése – snapshot + lock-olt módosítás, hogy elkerüljük a race condition-t
-                    with self._mb_lock:
-                        long_positions_snapshot = list(self._sim_pos_long)
-
-                    for pos in long_positions_snapshot:
-                        try:
-                            # ha közben (GUI-ból) már törölték ezt a pozíciót, ugorjunk
-                            with self._mb_lock:
-                                if pos not in self._sim_pos_long:
-                                    continue
-
-                            need_close = False
-                            close_reason = "mgmt_auto"
-
-                            if pos.get('mgmt') == 'atr' and atr_val is not None:
-                                need_close = _manage_atr_on_pos(pos, px_for_mgmt, atr_val)
-                            elif pos.get('mgmt') == 'fixed':
-                                need_close = _manage_fixed_on_pos(pos, px_for_mgmt)
-
-                            if need_close:
-                                if dry:
-                                    # SIM zárás – csak akkor, ha a pozíció még benne van a listában
-                                    try:
-                                        with self._mb_lock:
-                                            try:
-                                                idx = self._sim_pos_long.index(pos)
-                                            except ValueError:
-                                                idx = -1
-                                        if idx >= 0:
-                                            self._close_sim_by_index('buy', idx, px_for_mgmt, reason=close_reason, pos_obj=pos)
-                                    except Exception as e:
-                                        self._safe_log(f"❌ SIM long zárás hiba: {e}\n")
-                                        continue
-                                else:
-                                    # LIVE zárás – API/egyéb hiba itt is lokálisan kezelt
-                                    ok = False
-                                    try:
-                                        ok = self._live_close_pos(
-                                            'buy', pos, px_for_mgmt,
-                                            symbol=symbol, mode=mode, lev=lev
-                                        )
-                                    except Exception as e:
-                                        self._safe_log(f"❌ LIVE long zárás hiba: {e}\n")
-                                        ok = False
-
-                                    if ok:
-                                        # csak sikeres LIVE zárás után tükörzárunk SIM-ben,
-                                        # de előbb ellenőrizzük, hogy a pozíció még létezik-e
-                                        try:
-                                            with self._mb_lock:
-                                                try:
-                                                    idx = self._sim_pos_long.index(pos)
-                                                except ValueError:
-                                                    idx = -1
-                                            if idx >= 0:
-                                                self._close_sim_by_index('buy', idx, px_for_mgmt, reason=close_reason, pos_obj=pos)
-                                        except Exception as e:
-                                            self._safe_log(f"❌ SIM tükrözés hiba (long): {e}\n")
-                                            continue
-                                    else:
-                                        self._safe_log(
-                                            "❗ LIVE zárás sikertelen – a long pozíció nyitva marad.\n"
-                                        )
-                                        continue
-
-                        except Exception as e:
-                            # bármilyen más hiba a menedzsmentben – ne dőljön el a teljes worker
-                            self._safe_log(f"❌ Long pozíció menedzsment hiba: {e}\n")
-                            continue
-
-                    # SELL-ek kezelése – snapshot + lock-olt módosítás, hogy elkerüljük a race condition-t
-                    with self._mb_lock:
-                        short_positions_snapshot = list(self._sim_pos_short)
-
-                    for pos in short_positions_snapshot:
-                        try:
-                            # ha közben (GUI-ból) már törölték ezt a pozíciót, ugorjunk
-                            with self._mb_lock:
-                                if pos not in self._sim_pos_short:
-                                    continue
-
-                            need_close = False
-                            close_reason = "mgmt_auto"
-
-                            if pos.get('mgmt') == 'atr' and atr_val is not None:
-                                need_close = _manage_atr_on_pos(pos, px_for_mgmt, atr_val)
-                            elif pos.get('mgmt') == 'fixed':
-                                need_close = _manage_fixed_on_pos(pos, px_for_mgmt)
-
-                            if need_close:
-                                if dry:
-                                    # SIM zárás – csak akkor, ha a pozíció még benne van a listában
-                                    try:
-                                        with self._mb_lock:
-                                            try:
-                                                idx = self._sim_pos_short.index(pos)
-                                            except ValueError:
-                                                idx = -1
-                                        if idx >= 0:
-                                            self._close_sim_by_index('sell', idx, px_for_mgmt, reason=close_reason, pos_obj=pos)
-                                    except Exception as e:
-                                        self._safe_log(f"❌ SIM short zárás hiba: {e}\n")
-                                        continue
-                                else:
-                                    ok = False
-                                    try:
-                                        ok = self._live_close_pos(
-                                            'sell', pos, px_for_mgmt,
-                                            symbol=symbol, mode=mode, lev=lev
-                                        )
-                                    except Exception as e:
-                                        self._safe_log(f"❌ LIVE short zárás hiba: {e}\n")
-                                        ok = False
-
-                                    if ok:
-                                        try:
-                                            with self._mb_lock:
-                                                try:
-                                                    idx = self._sim_pos_short.index(pos)
-                                                except ValueError:
-                                                    idx = -1
-                                            if idx >= 0:
-                                                self._close_sim_by_index('sell', idx, px_for_mgmt, reason=close_reason, pos_obj=pos)
-                                        except Exception as e:
-                                            self._safe_log(f"❌ SIM tükrözés hiba (short): {e}\n")
-                                            continue
-                                    else:
-                                        self._safe_log(
-                                            "❗ LIVE zárás sikertelen – a short pozíció nyitva marad.\n"
-                                        )
-                                        continue
-
-                        except Exception as e:
-                            self._safe_log(f"❌ Short pozíció menedzsment hiba: {e}\n")
-                            continue
+                    # BUY / SELL pozíciók közös menedzsmentje
+                    _manage_positions_for_side("buy")
+                    _manage_positions_for_side("sell")
 
                     # --- ÚJ NYITÁS (cooldown + pool limit) ---
                     now = int(time.time())
