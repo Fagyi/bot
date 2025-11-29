@@ -290,6 +290,249 @@ class KucoinTickerWS:
     def _on_close(self, ws, *args):
         self._log("⚠️ WS closed.\n")
 
+class KucoinKlineWS:
+    """
+    Egyszerű K-Line (gyertya) WebSocket kliens KuCoinhoz.
+    - Több TF-et tud figyelni egy szimbólumra
+    - A legutóbbi N gyertyát cache-eli tf-enként
+    - get_ohlcv(tf, limit) → ccxt-szerű OHLCV lista: [ts_ms, o, h, l, c, v]
+    """
+
+    TF_MAP = {
+        "1m": "1min",
+        "3m": "3min",
+        "5m": "5min",
+        "15m": "15min",
+        "30m": "30min",
+        "1h": "1hour",
+        "2h": "2hour",
+        "4h": "4hour",
+        "6h": "6hour",
+        "8h": "8hour",
+        "12h": "12hour",
+        "1d": "1day",
+    }
+
+    def __init__(self, symbol: str, tfs: list[str], log_fn=None, depth: int = 300):
+        import threading, requests
+
+        self.symbol = normalize_symbol(symbol)
+        self.tfs = sorted(set(tfs))
+        self._depth = int(max(50, depth))
+
+        self._log = log_fn or (lambda *a, **k: None)
+        self._lock = threading.RLock()
+        self._running = False
+        self._thread = None
+        self._ws = None
+
+        self._http = requests.Session()
+        self._base_url = "https://api.kucoin.com"
+
+        self._ping_interval = 20
+        self._ping_timeout = 10
+
+        # tf → list[ [ts_ms, o, h, l, c, v] ]
+        self._kline: dict[str, list[list[float]]] = {}
+
+    # --- Bullet-public URL ugyanúgy, mint a Ticker WS-ben ---
+    def _get_ws_url(self) -> str:
+        import json
+
+        resp = self._http.post(
+            self._base_url + "/api/v1/bullet-public",
+            json={},
+            timeout=8,
+        )
+        data = resp.json()
+        if not isinstance(data, dict) or str(data.get("code", "")) != "200000":
+            raise RuntimeError(f"bullet-public hiba: {data!r}")
+
+        d2 = data.get("data", {}) or {}
+        instance_servers = d2.get("instanceServers", []) or []
+        if not instance_servers:
+            raise RuntimeError("bullet-public: instanceServers üres")
+
+        server = instance_servers[0]
+        endpoint = server.get("endpoint")
+        if not endpoint:
+            raise RuntimeError("bullet-public: endpoint hiányzik")
+
+        token = d2.get("token")
+        if not token:
+            raise RuntimeError("bullet-public: token hiányzik")
+
+        self._ping_interval = int(server.get("pingInterval", 20000)) / 1000.0
+        self._ping_timeout = int(server.get("pingTimeout", 10000)) / 1000.0
+
+        return f"{endpoint}?token={token}"
+
+    def _log_safe(self, msg: str):
+        try:
+            self._log(msg)
+        except Exception:
+            pass
+
+    def _build_sub_msg(self, tf: str) -> dict:
+        import time
+
+        tf_api = self.TF_MAP.get(tf, None)
+        if not tf_api:
+            raise ValueError(f"Nem támogatott TF: {tf!r}")
+
+        topic = f"/market/candles:{self.symbol}_{tf_api}"
+        return {
+            "id": str(int(time.time() * 1000)),
+            "type": "subscribe",
+            "topic": topic,
+            "privateChannel": False,
+            "response": True,
+        }
+
+    def _on_open(self, ws):
+        import json
+
+        self._log_safe(f"🌐 KLINE WS open: {self.symbol} {self.tfs}\n")
+        for tf in self.tfs:
+            try:
+                sub = self._build_sub_msg(tf)
+                ws.send(json.dumps(sub))
+                self._log_safe(f"  ↪ subscribed {sub['topic']}\n")
+            except Exception as e:
+                self._log_safe(f"❌ KLINE subscribe hiba ({tf}): {e}\n")
+
+    def _on_message(self, ws, message: str):
+        import json, time
+
+        try:
+            d = json.loads(message)
+        except Exception:
+            return
+
+        if d.get("type") != "message":
+            return
+
+        topic = d.get("topic", "") or ""
+        if not topic.startswith("/market/candles:"):
+            return
+
+        data = d.get("data", {}) or {}
+        # KuCoin WS K-line struktúra (docs szerint):
+        # data = {
+        #    "symbol": "BTC-USDT",
+        #    "candles": ["1589968800","9702.7","9711.6","9702.7","9711.6","0.004776","46.3834592"]
+        # }
+        candles = data.get("candles") or data.get("kline") or data.get("tick")
+        if not isinstance(candles, (list, tuple)) or len(candles) < 7:
+            return
+
+        try:
+            ts_s = float(candles[0])
+            o = float(candles[1])
+            c = float(candles[2])
+            h = float(candles[3])
+            l = float(candles[4])
+            v = float(candles[5])
+        except Exception:
+            return
+
+        ts_ms = int(ts_s * 1000)
+
+        # TF visszakeresése a topicból
+        try:
+            _, pair_tf = topic.split(":", 1)
+            # "BTC-USDT_1min" → "1min"
+            tf_api = pair_tf.split("_", 1)[1]
+            # invert map
+            inv = {v: k for k, v in self.TF_MAP.items()}
+            tf = inv.get(tf_api)
+            if not tf:
+                return
+        except Exception:
+            return
+
+        row = [ts_ms, o, h, l, c, v]
+
+        with self._lock:
+            arr = self._kline.setdefault(tf, [])
+            # töröljük azonos ts-t, ha volt
+            arr = [x for x in arr if x[0] != ts_ms]
+            arr.append(row)
+            arr.sort(key=lambda x: x[0])
+            if len(arr) > self._depth:
+                arr = arr[-self._depth :]
+            self._kline[tf] = arr
+
+    def _on_error(self, ws, error):
+        self._log_safe(f"❌ KLINE WS error: {error}\n")
+
+    def _on_close(self, ws, code, reason):
+        self._log_safe(f"🔌 KLINE WS close code={code} reason={reason}\n")
+
+    def _run_loop(self):
+        import websocket, time
+
+        while self._running:
+            try:
+                url = self._get_ws_url()
+                self._log_safe(f"🌐 KLINE WS connect → {url}\n")
+                ws = websocket.WebSocketApp(
+                    url,
+                    on_open=self._on_open,
+                    on_message=self._on_message,
+                    on_error=self._on_error,
+                    on_close=self._on_close,
+                )
+                self._ws = ws
+                pi = max(5, int(self._ping_interval))
+                pt = max(5, int(self._ping_timeout))
+
+                ws.run_forever(
+                    ping_interval=pi,
+                    ping_timeout=pt,
+                    skip_utf8_validation=True,
+                )
+            except Exception as e:
+                self._log_safe(f"❌ KLINE WS run_loop hiba: {e}\n")
+            finally:
+                self._ws = None
+                if self._running:
+                    time.sleep(5)
+
+    def start(self):
+        import threading
+
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(
+            target=self._run_loop, daemon=True, name="KucoinKlineWS"
+        )
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+        try:
+            if self._ws is not None:
+                self._ws.close()
+        except Exception:
+            pass
+
+    def is_running(self) -> bool:
+        return bool(self._running)
+
+    def get_ohlcv(self, tf: str, limit: int = 200) -> list[list[float]]:
+        """
+        ccxt-szerű OHLCV: [ts_ms, o, h, l, c, v]
+        """
+        with self._lock:
+            arr = list(self._kline.get(tf, []))
+        if not arr:
+            return []
+        if limit <= 0:
+            return arr
+        return arr[-limit:]
+
 class KucoinPrivateOrderWS:
     """
     Privát KuCoin Spot/Margin order WebSocket manager (/spotMarket/tradeOrdersV2).
@@ -1146,6 +1389,15 @@ class CryptoBotApp:
         self.root.title("KuCoin Universal SDK Bot (SPOT + Margin)")
         self.root.geometry("1280x930")
 
+        # ---- Funds / Margin cache alapértelmezett állapota ----
+        # Így az _mb_refresh_available hívható akkor is, ha még nem volt teljes "Összes egyenleg frissítése".
+        self._balance_cache: dict[str, dict] = {
+            "spot": {},
+            "cross": {},
+            "isolated": {},
+        }
+        self.usdt_avail: float = 0.0
+
         # === Globális fontok ===
         # A TkDefaultFont-ot használjuk alapnak, hogy minden ttk widget automatikusan ezt vegye át.
         self.base_font = tkfont.nametofont("TkDefaultFont")
@@ -1484,10 +1736,28 @@ class CryptoBotApp:
         self._mt_price_job = None
         self._mt_start_price_loop()
         self._mt_on_input_change()
-        self._ensure_order_ws()
 
         # --- Margin Bot (auto) ---
         self._build_margin_bot_tab()
+
+        # --- K-Line WS indítása már init-ben (alapértelmezett symbol + TF-ek) ---
+        try:
+            default_sym = normalize_symbol(DEFAULT_SYMBOL)
+            # TF lista: pl. az 1m + HTF, amit a trend filter használ
+            tf_list = [DEFAULT_TIMEFRAME, "1m"]  # vagy amiket valójában használsz
+            self._ensure_kline_ws(default_sym, tf_list)
+        except Exception as e:
+            # ha bármi gebasz van, ne dőljön el a GUI
+            print("K-Line WS init hiba az __init__-ben:", e)
+
+        # --- K-Line WS indítása már init-ben (alapértelmezett symbol + TF-ek) ---
+        try:
+            default_sym = normalize_symbol(DEFAULT_SYMBOL)
+            self._ensure_ticker_ws(default_sym)
+        except Exception as e:
+            # ha bármi gebasz van, ne dőljön el a GUI
+            print("Ticker WS init hiba az __init__-ben:", e)
+        self._ensure_order_ws()
 
         # --- Beállítások fül (font) ---
         self._build_settings_tab()
@@ -2185,6 +2455,86 @@ class CryptoBotApp:
             self._safe_log(f"⚠️ Privát order WS init hiba: {e}\n")
             self._order_ws = None
 
+    # --- MarginBot: K-Line WS integráció / közös OHLCV getter -----------------
+    def _ensure_kline_ws(self, symbol: str, tfs: list[str]):
+        """
+        Gondoskodik róla, hogy legyen futó K-Line WS a megadott symbol + TF-ekre.
+        JAVÍTVA: Ha a symbol vagy a TF lista változik, újraindítja a WS-t.
+        """
+
+        # Normalizáljuk a kért paramétereket
+        req_sym = normalize_symbol(symbol)
+        req_tfs = sorted(list(set([str(tf) for tf in tfs if tf])))
+        
+        if not req_tfs:
+            return
+
+        ws = getattr(self, "_mb_kline_ws", None)
+        restart_needed = False
+
+        if ws is None or not ws.is_running():
+            # Ha nem létezik vagy leállt -> indítás
+            restart_needed = True
+        else:
+            # Ha fut, ellenőrizzük, hogy egyeznek-e a beállítások
+            current_sym = getattr(ws, "symbol", "")
+            current_tfs = getattr(ws, "tfs", [])
+            
+            if current_sym != req_sym:
+                self._safe_log(f"🔄 K-Line WS váltás: {current_sym} -> {req_sym}\n")
+                restart_needed = True
+            elif current_tfs != req_tfs:
+                self._safe_log(f"🔄 K-Line WS TF váltás: {current_tfs} -> {req_tfs}\n")
+                restart_needed = True
+
+        if restart_needed:
+            # Ha már futott, állítsuk le szépen
+            if ws is not None:
+                try:
+                    ws.stop()
+                except Exception:
+                    pass
+                self._mb_kline_ws = None
+
+            try:
+                self._safe_log(f"🌐 K-Line WS indítása: {req_sym} {req_tfs}\n")
+                self._mb_kline_ws = KucoinKlineWS(
+                    symbol=req_sym,
+                    tfs=req_tfs,
+                    log_fn=self._safe_log,
+                    depth=300,
+                )
+                self._mb_kline_ws.start()
+            except Exception as e:
+                self._safe_log(f"❌ K-Line WS indítási hiba: {e}\n")
+                self._mb_kline_ws = None
+
+    def _mb_get_ohlcv(self, symbol: str, tf: str, limit: int = 200):
+        """
+        Közös OHLCV beszerzés:
+          1) Ha van élő K-Line WS → onnan
+          2) Egyébként lokális public REST (NEM piszkálja self.exchange-et)
+        """
+        ohlcv = None
+
+        # 1) WebSocket cache
+        ws = getattr(self, "_mb_kline_ws", None)
+        try:
+            if ws is not None and ws.is_running():
+                ohlcv = ws.get_ohlcv(tf, limit=limit)
+        except Exception:
+            ohlcv = None
+
+        # 2) Fallback: lokális KucoinSDKWrapper (public_mode=True)
+        if not ohlcv:
+            try:
+                local_ex = KucoinSDKWrapper(public_mode=True, log_fn=self.log)
+                ohlcv = local_ex.fetch_ohlcv(symbol, tf, limit=limit)
+            except Exception:
+                ohlcv = None
+
+        return ohlcv or []
+
     def _mt_start_price_loop(self):
         if self._mt_price_job:
             self.root.after_cancel(self._mt_price_job)
@@ -2705,6 +3055,7 @@ class CryptoBotApp:
         if getattr(self, "_tick_busy", False):
             self.log("⏳ Frissítés már folyamatban…\n")
             return
+
         self._tick_busy = True
         self.log("🔄 Frissítés indul…\n")
 
@@ -2721,10 +3072,6 @@ class CryptoBotApp:
         def _work(p_symbol, p_tf, p_short, p_long):
             import pandas as pd
             try:
-                # exchange init (public), ha nincs
-                if getattr(self, "exchange", None) is None:
-                    self.exchange = KucoinSDKWrapper(public_mode=True, log_fn=self.log)
-
                 df = None
                 use_cache_df = False
 
@@ -2746,10 +3093,13 @@ class CryptoBotApp:
                 except Exception:
                     pass
 
-                # --- 2) Ha nincs használható cache, akkor REST-ből töltjük az OHLCV-t ---
+                # --- 2) Ha nincs használható cache, akkor K-Line WS + REST fallback ---
                 if not use_cache_df:
-                    with self._ex_lock:
-                        ohlcv = self.exchange.fetch_ohlcv(p_symbol, p_tf, limit=200)
+                    try:
+                        ohlcv = self._mb_get_ohlcv(p_symbol, p_tf, limit=200)
+                    except Exception as _e:
+                        ohlcv = []
+                        self.log(f"❌ tick_once OHLCV hiba: {_e}\n")
 
                     if not ohlcv:
                         def _no_data():
@@ -2765,6 +3115,7 @@ class CryptoBotApp:
                     df['c'] = df['c'].astype(float)
                 except Exception:
                     pass
+
                 df['short'] = df['c'].rolling(p_short, min_periods=1).mean()
                 df['long']  = df['c'].rolling(p_long,  min_periods=1).mean()
 
@@ -2793,6 +3144,7 @@ class CryptoBotApp:
             args=(symbol, tf, short, long),
             daemon=True
         ).start()
+
 
     # ---- diagram ----
     def draw_chart(self, df: pd.DataFrame, symbol: str, tf: str):
@@ -3792,6 +4144,7 @@ class CryptoBotApp:
         # --- Margin Bot belső flag-ek / állapotok ---
         self._mb_running = False
         self._mb_thread = None
+        self._mb_kline_ws = None
 
         # Jel/cooldown állapot
         self._mb_last_cross_ts = 0
@@ -3816,14 +4169,11 @@ class CryptoBotApp:
         self._mb_toggle_rsi_widgets()
         self._mb_toggle_htf_widgets()
 
-        # a history táblázat létrehozása UTÁN:
-        self._mb_hist_start_pnl_loop()
+        # 1 másodperc múlva rajzolja ki először a chartot
+        self.root.after(1000, lambda: self._mb_draw_chart())
 
-        # első rajz
-        self._mb_draw_chart()
-
-        # Margin és spot egyenleg cache. Ezt tölti fel a funds fül, de előre inicializálni kell.
-        self._balance_cache: Dict[str, Any] = {}
+        # A szimbólumok betöltését is kicsit késleltetjük (pl. 500ms)
+        self.root.after(500, lambda: threading.Thread(target=self._load_symbols_async, daemon=True).start())
 
         # ha TF vagy pár változik, frissítsünk
         try:
@@ -3858,17 +4208,20 @@ class CryptoBotApp:
             fa     = int(self.mb_ma_fast.get())
             slw    = int(self.mb_ma_slow.get())
 
-            # --- Exchange ellenőrzés ---
-            ex = getattr(self, "exchange", None)
-            if ex is None:
-                try:
-                    self._safe_log("❌ Chart hiba: Az Exchange objektum nincs inicializálva (nincs futás).\n")
-                except Exception:
-                    pass
-                return
+            # --- OHLCV lekérés (K-Line WS + REST fallback) ---
+            limit = max(lookback, slw + 5)
 
-            # --- OHLCV lekérés ---
-            ohlcv = ex.fetch_ohlcv(symbol, tf, limit=max(lookback, slw + 5))  # type: ignore
+            # K-Line WS indítása a mini-charthez is
+            try:
+                self._ensure_kline_ws(symbol, [tf])
+            except Exception:
+                pass
+
+            try:
+                ohlcv = self._mb_get_ohlcv(symbol, tf, limit=limit)
+            except Exception:
+                ohlcv = []
+
             if not ohlcv:
                 return
 
@@ -4433,18 +4786,58 @@ class CryptoBotApp:
         except Exception:
             pass
 
-    def _mb_hist_start_pnl_loop(self):
-        if getattr(self, "_mb_hist_pnl_job", None):
+    def _mb_hist_apply_pnl(self, rt: float):
+        """
+        History táblában floating PnL frissítése egy adott realtime árral.
+        Ezt a függvényt mindig a Tk főszálról hívd (pl. call_in_main-nal).
+        """
+        try:
+            rt_val = float(rt or 0.0)
+        except Exception:
+            rt_val = 0.0
+
+        if rt_val <= 0:
             return
-        self._mb_hist_pnl_inflight = False
-        self._mb_hist_pnl_tick()
+
+        col = getattr(self, "_mb_hist_col_index", {})
+        ENTRY_IDX = col.get("entry", 2); EXIT_IDX = col.get("exit", 3)
+        SIZE_IDX  = col.get("size", 4);  SIDE_IDX = col.get("side", 1)
+        FEE_IDX   = col.get("fee", 6);   PNL_IDX  = col.get("pnl", 7)
+
+        tv = getattr(self, "_mb_hist_tv", None)
+        if tv is None:
+            return
+
+        for iid in tv.get_children(""):
+            vals = list(tv.item(iid, "values"))
+            try:
+                # zárt pozícióra nem számolunk floating PnL-t
+                if vals[EXIT_IDX]:
+                    continue
+
+                entry = float(vals[ENTRY_IDX] or "0")
+                size  = float(vals[SIZE_IDX]  or "0")
+                side  = str(vals[SIDE_IDX]).strip().upper()
+                fee_s = (vals[FEE_IDX] or "").strip()
+                fee_est = float(fee_s) if fee_s not in ("", None) else 0.0
+
+                gross = (rt_val - entry) * size * (1 if side == "BUY" else -1)
+                vals[PNL_IDX] = f"{(gross - fee_est):.6f}"
+                tv.item(iid, values=tuple(vals))
+            except Exception:
+                continue
 
     def _mb_hist_pnl_tick(self):
-        try:
-            if getattr(self, "_mb_hist_pnl_inflight", False):
-                return
-            self._mb_hist_pnl_inflight = True
+        """
+        History floating PnL frissítése.
+        Feltételezzük, hogy a főszálról hívódik (pl. root.after vagy workerből call_in_main).
+        """
+        if getattr(self, "_mb_hist_pnl_inflight", False):
+            return
+        self._mb_hist_pnl_inflight = True
 
+        try:
+            # Szimbólum kinyerése (MarginBot / MarginTrade beállításból)
             try:
                 symbol = normalize_symbol(
                     self._mb_get_str("mb_symbol", self._mb_get_str("mt_symbol", DEFAULT_SYMBOL))
@@ -4452,56 +4845,36 @@ class CryptoBotApp:
             except Exception:
                 symbol = None
 
-            def fetch_rt():
-                """Utolsó ár a history PnL-hez – egységes helperrel:
-                get_best_price: WS → cache → REST.
-                """
-                if not symbol:
-                    return None
-                try:
-                    rt = float(self.get_best_price(symbol))
-                    if (not self._is_pos_num(rt)) or rt <= 0:
-                        return None
-                    return rt
-                except Exception:
-                    return None
+            if not symbol:
+                return
 
-            def apply(rt):
-                self._mb_hist_pnl_inflight = False
-                if not rt or rt <= 0:
+            # Utolsó ár a history PnL-hez – egységes helperrel:
+            # get_best_price: WS → cache → REST.
+            try:
+                rt = float(self.get_best_price(symbol))
+                if (not self._is_pos_num(rt)) or rt <= 0:
                     return
+            except Exception:
+                return
 
-                col = getattr(self, "_mb_hist_col_index", {})
-                ENTRY_IDX = col.get("entry", 2); EXIT_IDX = col.get("exit", 3)
-                SIZE_IDX  = col.get("size", 4);  SIDE_IDX = col.get("side", 1)
-                FEE_IDX   = col.get("fee", 6);   PNL_IDX  = col.get("pnl", 7)
+            # Itt már a Tk főszálon vagyunk (ha így hívod),
+            # nyugodtan frissíthetjük közvetlenül a TreeView-t.
+            try:
+                rt_val = float(rt or 0.0)
+            except Exception:
+                rt_val = 0.0
+            if rt_val <= 0:
+                return
 
-                for iid in self._mb_hist_tv.get_children(""):
-                    vals = list(self._mb_hist_tv.item(iid, "values"))
-                    try:
-                        # zárt pozícióra nem számolunk floating PnL-t
-                        if vals[EXIT_IDX]:
-                            continue
+            # Ha van külön helpered:
+            #   self._mb_hist_apply_pnl(rt_val)
+            # Ha nincs, akkor itt bent maradhat a korábbi PnL-számoló loopod.
+            self._mb_hist_apply_pnl(rt_val)
 
-                        entry = float(vals[ENTRY_IDX] or "0")
-                        size  = float(vals[SIZE_IDX]  or "0")
-                        side  = str(vals[SIDE_IDX]).strip().upper()
-                        fee_s = (vals[FEE_IDX] or "").strip()
-                        fee_est = float(fee_s) if fee_s not in ("", None) else 0.0
-
-                        gross = (rt - entry) * size * (1 if side == "BUY" else -1)
-                        vals[PNL_IDX] = f"{(gross - fee_est):.6f}"
-                        self._mb_hist_tv.item(iid, values=tuple(vals))
-                    except Exception:
-                        continue
-
-            def fail(_e):
-                self._mb_hist_pnl_inflight = False
-
-            self._bg(fetch_rt, apply, fail)
         finally:
-            # 5 mp múlva újrafrissítjük a floating PnL-t
-            self._mb_hist_pnl_job = self.root.after(5000, self._mb_hist_pnl_tick)
+            self._mb_hist_pnl_inflight = False
+            # Nincs automatikus időzítés, a worker / history refresh hívja, ha kell.
+            self._mb_hist_pnl_job = None
 
     def _mb_hist_on_rclick(self, event):
         """Jobb klikk a LIVE History táblán – kontextusmenü (csak a kattintott sorra)."""
@@ -5860,8 +6233,23 @@ class CryptoBotApp:
                             need_refresh = True
 
                     if need_refresh or not hasattr(self, "_mb_last_df"):
-                        with self._ex_lock:
-                            ohlcv = self.exchange.fetch_ohlcv(symbol, tf, limit=200)
+                        # --- K-Line WS biztosítása az aktuális TF-re (+ HTF-re, ha kell) ---
+                        try:
+                            tf_list = [tf]
+                            if use_htf and htf_tf:
+                                tf_list.append(htf_tf)
+                            tf_list = sorted(set(tf_list))
+                            self._ensure_kline_ws(symbol, tf_list)
+                        except Exception:
+                            pass
+
+                        # OHLCV beszerzés WS-ből, vagy fallback REST-ből
+                        try:
+                            ohlcv = self._mb_get_ohlcv(symbol, tf, limit=200)
+                        except Exception:
+                            with self._ex_lock:
+                                ohlcv = self.exchange.fetch_ohlcv(symbol, tf, limit=200)
+
                         if not ohlcv:
                             self._safe_log("⚠️ Nincs candle adat.\n")
                             time.sleep(2)
@@ -5937,6 +6325,12 @@ class CryptoBotApp:
                             if not hasattr(self, "_mb_last_rt_px"):
                                 self._mb_last_rt_px = {}
                             self._mb_last_rt_px[symbol] = float(last_px_rt)
+
+                            # History floating PnL frissítése ugyanazzal a rt-vel (Tk főszálon)
+                            try:
+                                self.call_in_main(self._mb_hist_apply_pnl, float(last_px_rt))
+                            except Exception:
+                                pass
                     except Exception:
                         pass
 
@@ -6134,14 +6528,15 @@ class CryptoBotApp:
 
                     # ================== STÁTUSZ LOG VEZÉRLÉS ==================
 
-                    # 0) Beállítás: részletes státusz log engedélyezése?
-                    try:
-                        verbose_on = bool(
-                            getattr(self, "log_verbose_var", None)
-                            and self.log_verbose_var.get()
-                        )
-                    except Exception:
-                        verbose_on = True  # ha valami gond van, inkább ne hallgasson el teljesen
+                    logvar = getattr(self, "log_verbose_var", None)
+
+                    if logvar is None:
+                        verbose_on = True   # ha nincs változó, inkább legyen bekapcsolva
+                    else:
+                        try:
+                            verbose_on = bool(logvar.get())
+                        except Exception:
+                            verbose_on = True
 
                     # 1) Ha KI van kapcsolva a részletes log:
                     #    - BUY/SELL jel esetén mindig logolunk 1 sort
@@ -6933,21 +7328,28 @@ class CryptoBotApp:
         FONTOS: Ha ezt ciklusban hívod, a hálózati kérés (fetch_ohlcv) lassíthatja a botot!
         """
         try:
-            # Adatlekérés (csak ha muszáj)
-            with self._ex_lock:
-                # Limit optimalizálás: nem kell 500 gyertya, elég a slow EMA beállásához kb 2-3x
-                ohlcv = self.exchange.fetch_ohlcv(symbol, tf, limit=max(slow * 3, 100))
-            
-            if not ohlcv:
+            # Adatlekérés (K-Line WS → fallback REST)
+            # A slow EMA-hoz kb 2–3x annyi gyertya elég
+            limit = max(100, slow * 3)
+
+            try:
+                # K-Line WS előkészítése HTF-re
+                self._ensure_kline_ws(symbol, [tf])
+            except Exception:
+                pass
+
+            try:
+                ohlcv = self._mb_get_ohlcv(symbol, tf, limit=limit)
+            except Exception:
+                with self._ex_lock:
+                    ohlcv = self.exchange.fetch_ohlcv(symbol, tf, limit=limit)
+
+            if not ohlcv or len(ohlcv) < slow + 5:
                 return 0
-                
+
             import pandas as pd
-            # Csak a Close árak kellenek, ne építsünk teljes DataFrame-et feleslegesen
-            closes = [x[4] for x in ohlcv] 
-            s = pd.Series(closes, dtype='float64')
-            
-            if len(s) < slow + 5:
-                return 0
+            df = pd.DataFrame(ohlcv, columns=["ts", "o", "h", "l", "c", "v"])
+            s = df["c"].astype(float)
 
             ema_f = s.ewm(span=fast, adjust=False).mean().iloc[-1]
             ema_s = s.ewm(span=slow, adjust=False).mean().iloc[-1]
@@ -7294,6 +7696,14 @@ class CryptoBotApp:
             ws = getattr(self, "_ticker_ws", None)
             if ws is not None:
                 ws.stop()
+        except Exception:
+            pass
+
+        try:
+            # K-Line WS kulturált leállítása
+            kws = getattr(self, "_mb_kline_ws", None)
+            if kws is not None:
+                kws.stop()
         except Exception:
             pass
 
