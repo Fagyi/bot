@@ -6468,7 +6468,7 @@ class CryptoBotApp:
 
                             # History floating PnL frissítése ugyanazzal a rt-vel (Tk főszálon)
                             try:
-                                self.call_in_main(self._mb_hist_apply_pnl, float(last_px_rt))
+                                self.root.after(0, self._mb_hist_apply_pnl, float(last_px_rt))
                             except Exception:
                                 pass
                     except Exception:
