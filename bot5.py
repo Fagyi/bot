@@ -14,7 +14,7 @@ A program betölti a .env és/vagy key.env fájlokat is a script mappájából (
 from __future__ import annotations
 
 import os, sys, time, json, uuid, hmac, base64, hashlib, threading
-from typing import List, Optional, Literal, Any, Dict
+from typing import List, Optional, Literal, Any, Dict, Tuple
 from urllib.parse import urlencode
 import time as _time
 import threading
@@ -22,6 +22,7 @@ import threading
 # -------- 3rd party --------
 import requests
 import pandas as pd
+import numpy as np
 import websocket  # websocket-client
 
 # Tkinter
@@ -2561,6 +2562,48 @@ class CryptoBotApp:
                 ohlcv = []
 
         return ohlcv or []
+
+    # ---- Z-score segédfüggvények ----
+    def _mb_ohlcv_to_df(self, ohlcv, tz_unit: str = "ms"):
+        """OHLCV listából (ts, o, h, l, c, v) pandas DataFrame-et készít."""
+        import pandas as pd
+
+        if not ohlcv:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(ohlcv, columns=["ts", "open", "high", "low", "close", "volume"])
+        # KuCoin ts ms-ben van, ezért unit="ms"
+        df["ts"] = pd.to_datetime(df["ts"], unit=tz_unit, utc=True)
+        df.set_index("ts", inplace=True)
+        df = df.astype(float, errors="ignore")
+        return df
+
+    def _compute_zscore_signal(self, symbol: str, tf: str,
+                               length: int = 40, data_points: int = 100):
+        """Z-score jelzés számítása az aktuális párra/idősíkra.
+
+        Visszatérés:
+            (signal, quadrant_info)
+        """
+        try:
+            ohlcv = self._mb_get_ohlcv(symbol, tf,
+                                       limit=max(length * 3, data_points + 10))
+        except Exception:
+            ohlcv = []
+
+        df = self._mb_ohlcv_to_df(ohlcv)
+        if df.empty or len(df) < length + 5:
+            return 0, None
+
+        # Másolunk, hogy az eredetit ne írjuk tele plusz oszlopokkal
+        signal, quadrant_info = self.apply_zscore_strategy(
+            df.copy(),
+            length=length,
+            data_points=data_points,
+            source="close",
+        )
+        return int(signal or 0), quadrant_info
+
     def _mt_start_price_loop(self):
         if self._mt_price_job:
             self.root.after_cancel(self._mt_price_job)
@@ -3895,6 +3938,79 @@ class CryptoBotApp:
         self.mb_avail_lbl.pack(side=tk.LEFT)
         r += 1
 
+        # --- Z-score filter / konfluencia (EMA/RSI mellé) ---
+        z_box = ttk.Labelframe(form, text="Z-score filter / konfluencia", padding=6)
+        z_box.grid(row=r, column=0, columnspan=2, sticky="we", pady=(8, 0))
+
+        # 1. sor: checkbox + rövid magyarázó szöveg
+        z_row1 = ttk.Frame(z_box)
+        z_row1.pack(anchor="w")
+
+        self.mb_use_zscore = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            z_row1,
+            text="Z-score filter használata",
+            variable=self.mb_use_zscore,
+            command=self._mb_toggle_zscore_widgets,   # állapotváltáskor spinbox enable/disable
+        ).pack(side=tk.LEFT)
+
+        # 2. sor: paraméterek (Hossz, Pontok) + teszt gomb
+        z_row2 = ttk.Frame(z_box)
+        z_row2.pack(anchor="w", pady=(4, 0))
+
+        ttk.Label(z_row2, text="Hossz:").pack(side=tk.LEFT)
+        self.mb_z_len = ttk.Spinbox(z_row2, from_=10, to=200, width=6)
+        self.mb_z_len.delete(0, tk.END)
+        self.mb_z_len.insert(0, "40")
+        self.mb_z_len.pack(side=tk.LEFT, padx=(2, 8))
+
+        ttk.Label(z_row2, text="Pontok:").pack(side=tk.LEFT, padx=(4, 2))
+        self.mb_z_points = ttk.Spinbox(z_row2, from_=20, to=500, width=6)
+        self.mb_z_points.delete(0, tk.END)
+        self.mb_z_points.insert(0, "100")
+        self.mb_z_points.pack(side=tk.LEFT)
+
+        def _mb_test_zscore():
+            symbol = normalize_symbol(self.mb_symbol.get())
+            tf = self.mb_tf.get().strip() or "1m"
+            try:
+                length = int(self.mb_z_len.get())
+            except Exception:
+                length = 40
+            try:
+                points = int(self.mb_z_points.get())
+            except Exception:
+                points = 100
+
+            sig, quad = self._compute_zscore_signal(
+                symbol, tf, length=length, data_points=points
+            )
+            txt_map = {1: "LONG", -1: "SHORT", 0: "SEMLEGES"}
+            txt = txt_map.get(sig, "ismeretlen")
+
+            extra = ""
+            if quad:
+                extra = (
+                    f" | Q1:{quad['quad1']} Q2:{quad['quad2']} "
+                    f"Q3:{quad['quad3']} Q4:{quad['quad4']} "
+                    f"CurQ:{quad['current_quadrant']}"
+                )
+            self.mb_z_label.configure(text=f"Z-score jelzés: {txt}{extra}")
+
+        ttk.Button(
+            z_row2,
+            text="Z-score teszt",
+            command=_mb_test_zscore,
+        ).pack(side=tk.LEFT, padx=(10, 0))
+
+        # 3. sor: jelzés kiírása
+        z_row3 = ttk.Frame(z_box)
+        z_row3.pack(anchor="w", pady=(4, 0))
+        self.mb_z_label = ttk.Label(z_row3, text="Z-score jelzés: n/a")
+        self.mb_z_label.pack(side=tk.LEFT)
+
+        r += 1
+
         # Fix SL / TP / Trailing – opcionális (ATR nélkül)
         fixed_box = ttk.Labelframe(form, text="Fix SL / TP / Trailing (ATR nélkül)", padding=6)
         fixed_box.grid(row=r, column=0, columnspan=2, sticky="we", pady=(8,0))
@@ -4176,6 +4292,7 @@ class CryptoBotApp:
         self._mb_toggle_live_widgets()
         self._mb_toggle_rsi_widgets()
         self._mb_toggle_htf_widgets()
+        self._mb_toggle_zscore_widgets()
 
         # 1 másodperc múlva rajzolja ki először a chartot
         self.root.after(1000, lambda: self._mb_draw_chart())
@@ -6195,6 +6312,11 @@ class CryptoBotApp:
                     if use_fixed and use_atr:
                         use_fixed = False
 
+                    # Z-score filter
+                    use_zscore = bool(cfg.get("use_zscore", False))
+                    z_len      = int(cfg.get("z_len", 40))
+                    z_points   = int(cfg.get("z_points", 100))
+
                     use_live       = bool(cfg.get("use_live", True))
                     live_shock_pct = float(cfg.get("live_shock_pct", 1.0))
                     live_shock_atr = float(cfg.get("live_shock_atr", 1.2))
@@ -6463,7 +6585,37 @@ class CryptoBotApp:
                     except Exception:
                         pass
 
+                    # --- Eredeti kombó jel (EMA+RSI+HTF+BRK+shock) ---
                     combined_sig = brk_sig if brk_sig in ('buy', 'sell') else sig
+                    combined_sig_raw = combined_sig  # Z-score előtt eltesszük az "eredeti" jelet
+
+                    # --- Z-score filter (opcionális) ---
+                    z_dir = "hold"
+                    z_quad = None
+                    if use_zscore:
+                        try:
+                            z_sig, z_quad = self._compute_zscore_signal(
+                                symbol,
+                                tf,
+                                length=z_len,
+                                data_points=z_points,
+                            )
+                        except Exception:
+                            z_sig, z_quad = 0, None
+
+                        if z_sig == 1:
+                            z_dir = "buy"
+                        elif z_sig == -1:
+                            z_dir = "sell"
+                        else:
+                            z_dir = "hold"
+
+                        # Ha van jel (buy/sell), de a Z-score nem támogatja, vagy ellentétes,
+                        # akkor végül HOLD lesz → tiszta "filter" szerep
+                        if combined_sig in ("buy", "sell"):
+                            if z_dir == "hold" or z_dir != combined_sig:
+                                combined_sig = "hold"
+                    # --- /Z-score filter ---
 
                     try:
                         now_ts = int(time.time())
@@ -6481,6 +6633,7 @@ class CryptoBotApp:
                         + f", htf={'ON' if use_htf else 'OFF'}({trend_htf:+d})"
                         + f", brk={'ON' if use_brk else 'OFF'}"
                         + f", live_px={'ON' if use_live else 'OFF'}"
+                        + f", zscore={'ON' if use_zscore else 'OFF'}"
                         + f", cd_left={cd_left}s"
                     )
 
@@ -6524,6 +6677,9 @@ class CryptoBotApp:
                         reasons.append("rsi_block_sell")
                     if htf_block:
                         reasons.append("htf_block")
+                    # ha az eredeti jel buy/sell volt, de a Z-score filterből HOLD lett:
+                    if use_zscore and combined_sig_raw in ("buy", "sell") and combined_sig == "hold":
+                        reasons.append("zscore_block")
 
                     log_line = (
                         f"[{symbol} {tf}] Élő ár={last_px_rt:.6f} Gyertya ár={last_px:.6f} "
@@ -7089,6 +7245,28 @@ class CryptoBotApp:
         finally:
             self._mb_toggling = False
 
+    def _mb_toggle_zscore_widgets(self, *_):
+        """Z-score UI elemek ki-/bekapcsolása a checkbox alapján."""
+        import tkinter as tk
+
+        try:
+            on = bool(self.mb_use_zscore.get())
+        except Exception:
+            on = False
+
+        state = "normal" if on else "disabled"
+
+        # csak a két spinboxot kapcsoljuk, ahogy kérted
+        for name in ("mb_z_len", "mb_z_points"):
+            w = getattr(self, name, None)
+            if w is None:
+                continue
+            try:
+                w.configure(state=state)
+            except tk.TclError:
+                # ha valamiért nem támogatja a state-et, ne dobjunk hibát
+                pass
+
     # ============ NEW: Leállításkori / ad-hoc összegzés ============
     def _mb_summary(self):
         """Összegző statisztika (SIM trade-ek alapján)."""
@@ -7392,6 +7570,102 @@ class CryptoBotApp:
         except Exception:
             return 0
 
+    def compute_zscore_strategy(
+        self,
+        df: pd.DataFrame,
+        length: int = 40,
+        source: str = "close",
+    ) -> Tuple[pd.Series, pd.Series]:
+        """Statistical Trend Analysis (Scatterplot) alapú Z-score és Z-change."""
+        if source == "Returns":
+            src = (df["close"] - df["open"]) / df["close"] * 100.0
+        elif source in df.columns:
+            src = df[source]
+        else:
+            src = df["close"]
+
+        mean = src.rolling(window=length).mean()
+        stdev = src.rolling(window=length).std()
+        z_score = (src - mean) / stdev.replace(0, np.nan)
+
+        z_change = z_score.diff()
+
+        return z_score, z_change
+
+
+    def apply_zscore_strategy(
+        self,
+        df: pd.DataFrame,
+        length: int = 40,
+        data_points: int = 100,
+        source: str = "close",
+    ) -> Tuple[int, Dict[str, Any]]:
+        """Z-score stratégia alkalmazása.
+
+        Visszatérés:
+            signal:  1 = long, -1 = short, 0 = semleges
+            quadrant_info: dict a statisztikákkal
+        """
+        z_score, z_change = self.compute_zscore_strategy(df, length=length, source=source)
+
+        recent_z = z_score.iloc[-data_points:].tolist()
+        recent_z_change = z_change.iloc[-data_points:].tolist()
+
+        quad1 = quad2 = quad3 = quad4 = 0
+
+        for z, z_ch in zip(recent_z, recent_z_change):
+            if pd.notna(z) and pd.notna(z_ch):
+                if z > 0 and z_ch > 0:
+                    quad1 += 1
+                elif z > 0 and z_ch < 0:
+                    quad2 += 1
+                elif z < 0 and z_ch < 0:
+                    quad3 += 1
+                elif z < 0 and z_ch > 0:
+                    quad4 += 1
+
+        current_z = z_score.iloc[-1]
+        current_z_change = z_change.iloc[-1]
+
+        current_quadrant = 0
+        if pd.notna(current_z) and pd.notna(current_z_change):
+            if current_z > 0 and current_z_change > 0:
+                current_quadrant = 1
+            elif current_z > 0 and current_z_change < 0:
+                current_quadrant = 2
+            elif current_z < 0 and current_z_change < 0:
+                current_quadrant = 3
+            elif current_z < 0 and current_z_change > 0:
+                current_quadrant = 4
+
+        total_points = quad1 + quad2 + quad3 + quad4
+        signal = 0
+
+        if total_points > 0:
+            if (
+                (current_quadrant == 4 and quad4 > 0.3 * total_points)
+                or (current_quadrant == 1 and quad1 > 0.3 * total_points)
+            ):
+                signal = 1
+            elif (
+                (current_quadrant == 2 and quad2 > 0.3 * total_points)
+                or (current_quadrant == 3 and quad3 > 0.3 * total_points)
+            ):
+                signal = -1
+
+        df["z_score"] = z_score
+        df["z_change"] = z_change
+        df["zscore_signal"] = signal
+
+        quadrant_info: Dict[str, Any] = {
+            "quad1": quad1,
+            "quad2": quad2,
+            "quad3": quad3,
+            "quad4": quad4,
+            "current_quadrant": current_quadrant,
+            "signal": signal,
+        }
+        return signal, quadrant_info
     # ---------- Méret-számítás (budget támogatással) ----------
     def _mb_compute_size(
         self,
@@ -7624,6 +7898,11 @@ class CryptoBotApp:
             "live_shock_pct": self._mb_get_float('mb_live_shock_pct', 1.0),
             "live_shock_atr": self._mb_get_float('mb_live_shock_atr', 1.2),
             "drift_max_pct": self._mb_get_float('mb_drift_max_pct', 0.0),
+
+            # Z-score filter
+            "use_zscore": bool(getattr(self, "mb_use_zscore", tk.BooleanVar(value=False)).get()),
+            "z_len": self._mb_get_int('mb_z_len', 40),
+            "z_points": self._mb_get_int('mb_z_points', 100),
 
             # Max nyitott, pause new
             "max_open": self._mb_get_int('mb_max_open', 0),
