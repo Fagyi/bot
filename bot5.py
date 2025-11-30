@@ -7100,9 +7100,16 @@ class CryptoBotApp:
                                 self._mb_last_cross_ts = now
                                 self._mb_last_signal   = combined_sig
 
-                    # --- Diagram frissítés ---
+                    # --- Diagram frissítés (throttling: 5 mp) ---
                     try:
-                        self.root.after(0, self._mb_draw_chart)
+                        import time as _t
+                        now_ts = int(_t.time())
+                        last_ts = getattr(self, "_mb_last_chart_ts", 0)
+
+                        if now_ts - last_ts >= 5:
+                            # csak akkor rajzolunk, ha legalább 5 mp eltelt
+                            self._mb_last_chart_ts = now_ts
+                            self.root.after(0, self._mb_draw_chart)
                     except Exception:
                         pass
 
