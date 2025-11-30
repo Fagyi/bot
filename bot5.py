@@ -824,17 +824,28 @@ class KucoinPrivateOrderWS:
             if not order_id:
                 return
 
+            # --- fee ---
             fee_raw = data.get("fee", 0.0)
             try:
                 fee = float(fee_raw or 0.0)
             except Exception:
                 fee = 0.0
 
+            # --- filled (BASE) ---
             match_size_raw = data.get("matchSize", 0.0)
             try:
                 match_size = float(match_size_raw or 0.0)
             except Exception:
                 match_size = 0.0
+
+            # --- filled_quote (QUOTE) = matchPrice * matchSize ---
+            match_price_raw = data.get("matchPrice", 0.0)
+            try:
+                match_price = float(match_price_raw or 0.0)
+            except Exception:
+                match_price = 0.0
+
+            filled_quote_inc = match_size * match_price if (match_size and match_price) else 0.0
 
             symbol = data.get("symbol") or ""
             ts = int(data.get("ts") or 0)
@@ -843,13 +854,17 @@ class KucoinPrivateOrderWS:
                 info = self._order_info.get(order_id) or {
                     "fee": 0.0,
                     "filled": 0.0,
+                    "filled_quote": 0.0,  # ÚJ: inicializáljuk
                     "symbol": symbol,
                     "ts": ts,
                 }
+
                 info["fee"] = float(info.get("fee", 0.0)) + fee
                 info["filled"] = float(info.get("filled", 0.0)) + match_size
+                info["filled_quote"] = float(info.get("filled_quote", 0.0)) + float(filled_quote_inc or 0.0)
                 info["symbol"] = symbol or info.get("symbol", "")
                 info["ts"] = ts or info.get("ts", 0)
+
                 self._order_info[order_id] = info
 
         except Exception as e:
@@ -1743,21 +1758,10 @@ class CryptoBotApp:
         # --- K-Line WS indítása már init-ben (alapértelmezett symbol + TF-ek) ---
         try:
             default_sym = normalize_symbol(DEFAULT_SYMBOL)
-            # TF lista: pl. az 1m + HTF, amit a trend filter használ
-            tf_list = [DEFAULT_TIMEFRAME, "1m"]  # vagy amiket valójában használsz
-            self._ensure_kline_ws(default_sym, tf_list)
-        except Exception as e:
-            # ha bármi gebasz van, ne dőljön el a GUI
-            print("K-Line WS init hiba az __init__-ben:", e)
-
-        # --- K-Line WS indítása már init-ben (alapértelmezett symbol + TF-ek) ---
-        try:
-            default_sym = normalize_symbol(DEFAULT_SYMBOL)
             self._ensure_ticker_ws(default_sym)
         except Exception as e:
             # ha bármi gebasz van, ne dőljön el a GUI
             print("Ticker WS init hiba az __init__-ben:", e)
-        self._ensure_order_ws()
 
         # --- Beállítások fül (font) ---
         self._build_settings_tab()
@@ -2424,29 +2428,38 @@ class CryptoBotApp:
     def _ensure_order_ws(self):
         """
         Privát order WebSocket lusta init.
-        Csak KuCoin Spot/Margin esetén van értelme.
+
+        Csak KuCoin Spot/Margin esetén van értelme, de a bot amúgy is
+        erre van kihegyezve, ezért külön ex-típus ellenőrzés nem nagyon kell.
         """
-        # már van és fut
-        if getattr(self, "_order_ws", None) is not None:
+        # Ha már van és fut, nem csinálunk semmit
+        ws = getattr(self, "_order_ws", None)
+        if ws is not None:
             try:
-                if self._order_ws.is_running():
+                if ws.is_running():
                     return
             except Exception:
                 # ha valamiért nincs ilyen metódus, újrainitializáljuk
                 pass
 
-        try:
-            # REST POST a KucoinSDKWrapper-ből jön!
-            if self.exchange is None:
-                with self._ex_lock:
-                    # >>> ITT LEGYEN PÉLDÁNYOSÍTÁS, NEM OSZTÁLY HOZZÁRENDELÉS <<<
-                    self.exchange = KucoinSDKWrapper(
-                        public_mode=self.public_mode.get(),
-                        log_fn=self.log,
-                    )
+        # Exchange ellenőrzés
+        ex = getattr(self, "exchange", None)
+        if ex is None:
+            self._safe_log("⚠️ Nincs exchange inicializálva – privát WS nem hozható létre.\n")
+            self._order_ws = None
+            return
 
+        # Biztonságos REST-wrapper: fix szignó (path, body=None)
+        def _rest_post_wrapper(path: str, body: dict | None = None):
+            try:
+                return ex._rest_post(path, body or {})
+            except TypeError:
+                # Ha valami nagyon régi signóval futna, próbáljuk meg body nélkül is
+                return ex._rest_post(path)
+
+        try:
             self._order_ws = KucoinPrivateOrderWS(
-                rest_post_func=self.exchange._rest_post,
+                rest_post_func=_rest_post_wrapper,
                 log_func=self._safe_log,
             )
             self._order_ws.start()
@@ -2459,13 +2472,13 @@ class CryptoBotApp:
     def _ensure_kline_ws(self, symbol: str, tfs: list[str]):
         """
         Gondoskodik róla, hogy legyen futó K-Line WS a megadott symbol + TF-ekre.
-        JAVÍTVA: Ha a symbol vagy a TF lista változik, újraindítja a WS-t.
+        Ha a symbol vagy a TF lista változik, újraindítja a WS-t.
         """
 
         # Normalizáljuk a kért paramétereket
         req_sym = normalize_symbol(symbol)
-        req_tfs = sorted(list(set([str(tf) for tf in tfs if tf])))
-        
+        req_tfs = sorted(list(set(str(tf) for tf in tfs if tf)))
+
         if not req_tfs:
             return
 
@@ -2473,22 +2486,19 @@ class CryptoBotApp:
         restart_needed = False
 
         if ws is None or not ws.is_running():
-            # Ha nem létezik vagy leállt -> indítás
             restart_needed = True
         else:
-            # Ha fut, ellenőrizzük, hogy egyeznek-e a beállítások
-            current_sym = getattr(ws, "symbol", "")
-            current_tfs = getattr(ws, "tfs", [])
-            
-            if current_sym != req_sym:
-                self._safe_log(f"🔄 K-Line WS váltás: {current_sym} -> {req_sym}\n")
+            cur_sym = getattr(ws, "symbol", "")
+            cur_tfs = getattr(ws, "tfs", [])
+
+            if cur_sym != req_sym:
+                self._safe_log(f"🔄 K-Line WS váltás: {cur_sym} -> {req_sym}\n")
                 restart_needed = True
-            elif current_tfs != req_tfs:
-                self._safe_log(f"🔄 K-Line WS TF váltás: {current_tfs} -> {req_tfs}\n")
+            elif sorted(cur_tfs) != req_tfs:
+                self._safe_log(f"🔄 K-Line WS TF váltás: {cur_tfs} -> {req_tfs}\n")
                 restart_needed = True
 
         if restart_needed:
-            # Ha már futott, állítsuk le szépen
             if ws is not None:
                 try:
                     ws.stop()
@@ -2512,29 +2522,45 @@ class CryptoBotApp:
     def _mb_get_ohlcv(self, symbol: str, tf: str, limit: int = 200):
         """
         Közös OHLCV beszerzés:
-          1) Ha van élő K-Line WS → onnan
-          2) Egyébként lokális public REST (NEM piszkálja self.exchange-et)
+          1) Ha van élő K-Line WS ÉS van elég adat (min. 50 gyertya) → onnan
+          2) Egyébként lokális public REST fallback
         """
-        ohlcv = None
+        ohlcv = []
 
         # 1) WebSocket cache
         ws = getattr(self, "_mb_kline_ws", None)
         try:
             if ws is not None and ws.is_running():
-                ohlcv = ws.get_ohlcv(tf, limit=limit)
+                # Lekérjük a WS adatot
+                ws_data = ws.get_ohlcv(tf, limit=limit)
+                
+                # JAVÍTÁS: Csak akkor fogadjuk el a WS-t, ha van benne elég adat a számításokhoz!
+                # Ha pl. frissen indult, lehet, hogy csak 1-2 gyertya van benne.
+                # A MA(26)-hoz minimum 26 kell, de a biztonság kedvéért 50-et kérünk.
+                if len(ws_data) >= min(limit, 50):
+                    ohlcv = ws_data
         except Exception:
-            ohlcv = None
+            ohlcv = []
 
-        # 2) Fallback: lokális KucoinSDKWrapper (public_mode=True)
+        # 2) Fallback: Ha a WS üres vagy kevés az adat, jöjjön a REST
         if not ohlcv:
             try:
-                local_ex = KucoinSDKWrapper(public_mode=True, log_fn=self.log)
-                ohlcv = local_ex.fetch_ohlcv(symbol, tf, limit=limit)
-            except Exception:
-                ohlcv = None
+                # Ha már van inicializált exchange (akár public módban), használjuk azt
+                # így nem kell mindig új kapcsolatot építeni.
+                ex = getattr(self, "exchange", None)
+                if ex:
+                    with self._ex_lock:
+                        ohlcv = ex.fetch_ohlcv(symbol, tf, limit=limit)
+                else:
+                    # Ha még nincs exchange (nagyon a futás elején), csinálunk egy ideigleneset
+                    local_ex = KucoinSDKWrapper(public_mode=True, log_fn=self.log)
+                    ohlcv = local_ex.fetch_ohlcv(symbol, tf, limit=limit)
+            except Exception as e:
+                # Opcionális: logolhatjuk, ha a REST is elhasal
+                # print(f"REST ohlcv fallback error: {e}")
+                ohlcv = []
 
         return ohlcv or []
-
     def _mt_start_price_loop(self):
         if self._mt_price_job:
             self.root.after_cancel(self._mt_price_job)
@@ -3001,24 +3027,6 @@ class CryptoBotApp:
                     self.log(f"Margin order API: {moa.__class__.__name__ if moa else 'N/A'}")
                 except Exception as _e:
                     self.log(f"Margin capability dump error: {_e}")
-                # Capability log: margin order api
-                try:
-                    moa = None
-                    if hasattr(self.exchange, "get_margin_order_api"):
-                        with self._ex_lock:
-                            moa = self.exchange.get_margin_order_api()
-                    if moa is None and hasattr(self.exchange, "_client"):
-                        try:
-                            with self._ex_lock:
-                                rs = self.exchange._client.rest_service()
-                            ms = rs.get_margin_service()
-                            if ms and hasattr(ms, "get_order_api"):
-                                moa = ms.get_order_api()
-                        except Exception:
-                            moa = None
-                    self.log(f"Margin order API: {moa.__class__.__name__ if moa else 'N/A'}")
-                except Exception:
-                    self.log("Margin order API: N/A")
         except Exception as e:
             messagebox.showerror("Inicializálási hiba", str(e))
             return
@@ -3044,7 +3052,7 @@ class CryptoBotApp:
     # ---- fő ciklus ----
     def loop(self):
         while self.is_running:
-            self.tick_once()
+            #self.tick_once()
             for _ in range(SLEEP_SECONDS):
                 if not self.is_running:
                     break
@@ -4211,12 +4219,6 @@ class CryptoBotApp:
             # --- OHLCV lekérés (K-Line WS + REST fallback) ---
             limit = max(lookback, slw + 5)
 
-            # K-Line WS indítása a mini-charthez is
-            try:
-                self._ensure_kline_ws(symbol, [tf])
-            except Exception:
-                pass
-
             try:
                 ohlcv = self._mb_get_ohlcv(symbol, tf, limit=limit)
             except Exception:
@@ -4315,7 +4317,6 @@ class CryptoBotApp:
                 self._safe_log(f"Chart hiba: {e}\n")
             except Exception:
                 pass
-
 
     # --- Safe helpers: NaN/0 guard minden osztáshoz ---
     def _is_pos_num(self, x) -> bool:
@@ -6204,6 +6205,33 @@ class CryptoBotApp:
                     invert_ema     = bool(cfg.get("invert_ema", False))
                     ema_hyst_pct   = float(cfg.get("ema_hyst_pct", 1.0))
 
+                    # --- K-Line WS: ÖSSZES szükséges TF egy helyen ---
+                    required_tfs = [tf]
+
+                    # HTF TF hozzáadása, ha használod
+                    if use_htf and htf_tf:
+                        required_tfs.append(htf_tf)
+
+                    # Ha van külön chart TF (pl. GUI comboboxból), azt is belerakhatod:
+                    try:
+                        tf_chart = None
+                        try:
+                            tf_chart = self.mb_tf_chart.get().strip()
+                        except Exception:
+                            tf_chart = None
+                        if tf_chart:
+                            required_tfs.append(tf_chart)
+                    except Exception:
+                        pass
+
+                    # duplikátumok kiszedése + rendezés, hogy ne okozzon felesleges restartot
+                    required_tfs = sorted(set(required_tfs))
+
+                    try:
+                        self._ensure_kline_ws(symbol, required_tfs)
+                    except Exception as e:
+                        self._safe_log(f"⚠️ K-Line WS indítás hiba: {e}\n")
+
                     # --- Privát order WS biztosítása (KuCoin) ---
                     try:
                         self._ensure_order_ws()
@@ -6233,16 +6261,6 @@ class CryptoBotApp:
                             need_refresh = True
 
                     if need_refresh or not hasattr(self, "_mb_last_df"):
-                        # --- K-Line WS biztosítása az aktuális TF-re (+ HTF-re, ha kell) ---
-                        try:
-                            tf_list = [tf]
-                            if use_htf and htf_tf:
-                                tf_list.append(htf_tf)
-                            tf_list = sorted(set(tf_list))
-                            self._ensure_kline_ws(symbol, tf_list)
-                        except Exception:
-                            pass
-
                         # OHLCV beszerzés WS-ből, vagy fallback REST-ből
                         try:
                             ohlcv = self._mb_get_ohlcv(symbol, tf, limit=200)
@@ -7325,22 +7343,23 @@ class CryptoBotApp:
     ) -> int:
         """
         HTF Filter: +1 (Bull), -1 (Bear), 0 (Semleges/Hiba).
-        FONTOS: Ha ezt ciklusban hívod, a hálózati kérés (fetch_ohlcv) lassíthatja a botot!
+
+        JAVÍTVA:
+          - NEM indít WebSocketet, azt a fő worker (_mb_worker) intézi.
+          - Itt csak az adatot olvassuk a K-Line WS cache-ből, vagy REST-ről fallback-kel.
         """
         try:
-            # Adatlekérés (K-Line WS → fallback REST)
             # A slow EMA-hoz kb 2–3x annyi gyertya elég
             limit = max(100, slow * 3)
 
-            try:
-                # K-Line WS előkészítése HTF-re
-                self._ensure_kline_ws(symbol, [tf])
-            except Exception:
-                pass
-
+            # 1) Megpróbáljuk a K-Line WS cache-ből
             try:
                 ohlcv = self._mb_get_ohlcv(symbol, tf, limit=limit)
             except Exception:
+                ohlcv = []
+
+            # 2) Ha nincs WS adat → fallback: exchange.fetch_ohlcv
+            if not ohlcv:
                 with self._ex_lock:
                     ohlcv = self.exchange.fetch_ohlcv(symbol, tf, limit=limit)
 
@@ -7364,16 +7383,13 @@ class CryptoBotApp:
             # Invertálás
             if invert is None:
                 try:
-                    # Biztonságos hozzáférés
                     invert = bool(getattr(self, "mb_invert_ema", False).get())
                 except Exception:
                     invert = False
 
             return -trend if invert else trend
 
-        except Exception as e:
-            # Opcionális: logolhatod a hibát, ha debuggolsz
-            # print(f"Trend filter error: {e}")
+        except Exception:
             return 0
 
     # ---------- Méret-számítás (budget támogatással) ----------
