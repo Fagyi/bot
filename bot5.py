@@ -4294,8 +4294,11 @@ class CryptoBotApp:
         self._mb_toggle_htf_widgets()
         self._mb_toggle_zscore_widgets()
 
-        # 1 másodperc múlva rajzolja ki először a chartot
-        self.root.after(1000, lambda: self._mb_draw_chart())
+        # Chart frissítési intervallum (ms)
+        self._mb_chart_interval_ms = 5000  # 5 mp
+
+        # 1 másodperc múlva indul a periódikus frissítés
+        self.root.after(1000, self._mb_chart_timer)
 
         # A szimbólumok betöltését is kicsit késleltetjük (pl. 500ms)
         self.root.after(500, lambda: threading.Thread(target=self._load_symbols_async, daemon=True).start())
@@ -4434,6 +4437,24 @@ class CryptoBotApp:
                 self._safe_log(f"Chart hiba: {e}\n")
             except Exception:
                 pass
+
+    def _mb_chart_timer(self):
+        """MarginBot mini-chart periódikus frissítése a fő szálon."""
+        try:
+            self._mb_draw_chart()
+        except Exception as e:
+            # ha akarsz logolni:
+            try:
+                self.log(f"⚠ Chart frissítés hiba: {e}")
+            except Exception:
+                pass
+        finally:
+            # ha nem áll a bot, ütemezzük be a következő frissítést
+            if not getattr(self, "_mb_stopping", False):
+                self.root.after(
+                    getattr(self, "_mb_chart_interval_ms", 5000),
+                    self._mb_chart_timer
+                )
 
     # --- Safe helpers: NaN/0 guard minden osztáshoz ---
     def _is_pos_num(self, x) -> bool:
@@ -6497,7 +6518,7 @@ class CryptoBotApp:
                     # hiszterézis mult kivonva cfg-ből → nincs Tk az _mb_signal_from_ema_live-ben
                     atr_eps_mult = max(0.0, ema_hyst_pct) / 100.0
                     sig_raw, ef_l, es_l = self._mb_signal_from_ema_live(
-                        closes_for_sig, fa, slw, last_px_rt=None,
+                        closes_for_sig, fa, slw, last_px_rt=last_px_rt if (last_px_rt is not None and last_px_rt > 0) else None,
                         atr_eps_mult=atr_eps_mult,
                         invert=invert_ema,            # <<< invert flag cfg-ből
                     )
@@ -7100,19 +7121,6 @@ class CryptoBotApp:
                                 self._mb_last_cross_ts = now
                                 self._mb_last_signal   = combined_sig
 
-                    # --- Diagram frissítés (throttling: 5 mp) ---
-                    try:
-                        import time as _t
-                        now_ts = int(_t.time())
-                        last_ts = getattr(self, "_mb_last_chart_ts", 0)
-
-                        if now_ts - last_ts >= 5:
-                            # csak akkor rajzolunk, ha legalább 5 mp eltelt
-                            self._mb_last_chart_ts = now_ts
-                            self.root.after(0, self._mb_draw_chart)
-                    except Exception:
-                        pass
-
                     # --- TF-hez igazított alvás, websocket-tel gyorsítva ---  ### WS-SLEEP
                     if getattr(self, "_ticker_ws", None) is not None:
                         # ha él a realtime WS ár, tickeljünk gyorsabban
@@ -7436,10 +7444,10 @@ class CryptoBotApp:
 
         # ---- 2. Keresztezés logikája ----
         # Long: Előzőleg a sáv alatt/benne volt, most a sáv felett van
-        crossed_up   = (diff_prev <= dn_th) and (diff_now > up_th)
+        crossed_up   = (diff_prev <= up_th) and (diff_now > up_th)
         
         # Short: Előzőleg a sáv felett/benne volt, most a sáv alatt van
-        crossed_down = (diff_prev >= up_th) and (diff_now < dn_th)
+        crossed_down = (diff_prev >= dn_th) and (diff_now < dn_th)
 
         # ---- 3. Slope (Meredekség) Szűrés (Opcionális PRO funkció) ----
         # Ha a lassú mozgóátlag "lapos", akkor oldalazunk -> veszélyes a jel.
