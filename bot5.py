@@ -6722,16 +6722,7 @@ class CryptoBotApp:
                         log_line += " | hold_reasons=" + ",".join(reasons)
 
                     # ================== STÁTUSZ LOG VEZÉRLÉS ==================
-
-                    logvar = getattr(self, "log_verbose_var", None)
-
-                    if logvar is None:
-                        verbose_on = True   # ha nincs változó, inkább legyen bekapcsolva
-                    else:
-                        try:
-                            verbose_on = bool(logvar.get())
-                        except Exception:
-                            verbose_on = True
+                    verbose_on = bool(getattr(self, "_mb_log_verbose", False))
 
                     # 1) Ha KI van kapcsolva a részletes log:
                     #    - BUY/SELL jel esetén mindig logolunk 1 sort
@@ -6748,7 +6739,7 @@ class CryptoBotApp:
                     #    - BUY/SELL jel: mindig logolunk (nem throttoljuk)
                     #    - HOLD: ritkítva, a beállított delay + ármozgás alapján
                     try:
-                        delay_s = int(self.log_delay_var.get())
+                        delay_s = int(getattr(self, "_mb_log_delay", 5))
                         if delay_s <= 0:
                             delay_s = 5
                     except Exception:
@@ -6814,14 +6805,9 @@ class CryptoBotApp:
 
                         # --- DUPLIKÁLT ÁRSZINT SZŰRŐ (UI-ból állítható tolerancia %) ---
                         if self._is_pos_num(last_px_rt) and last_px_rt > 0:
-                            # Tolerancia olvasása a Beállítások fülről (Spinbox),
-                            # ha valami gond van, fallback 0.5%-ra.
+                            # Tolerancia olvasása a shadow változóból (thread-safe)
                             try:
-                                tol_var = getattr(self, "mb_dup_tol_pct_var", None)
-                                if tol_var is not None:
-                                    tol_pct_val = float(tol_var.get())
-                                else:
-                                    tol_pct_val = 0.5
+                                tol_pct_val = float(getattr(self, "_mb_dup_tol_pct", 0.5))
                             except Exception:
                                 tol_pct_val = 0.5
 
@@ -7380,7 +7366,7 @@ class CryptoBotApp:
         import pandas as pd
         return series.ewm(alpha=1.0 / n, adjust=False).mean()
 
-    # ---------- Jel-generátor: EMA KERESZTEZÉS + SLOPE SZŰRÉS ----------
+    # ---------- Jel-generátor: EMA KERESZTEZÉS ----------
     def _mb_signal_from_ema_live(
         self,
         series,
@@ -7389,94 +7375,72 @@ class CryptoBotApp:
         last_px_rt: float | None,
         atr_eps_mult: float | None = None,
         invert: bool | None = None,
-        slope_threshold: float = 0.0,  # ÚJ: Meredekség küszöb (pl. 1e-6)
     ) -> tuple[str, float, float]:
         """
-        Professzionális EMA jelgenerátor:
-        1. Keresztezés detektálása (Crossover).
-        2. Hysteresis sáv (ATR alapú zajszűrés).
-        3. Opcionális: Slope (meredekség) ellenőrzés a hamis jelek ellen oldalazáskor.
+        EMA jelgenerátor (slope nélkül):
+          1) Friss keresztezés detektálása hysteresis sávval.
+          2) ATR alapú zajszűrés.
+          3) Invertálás (ha kérve van).
         """
         import pandas as pd
-        import numpy as np
 
-        # Biztonsági másolat és típusellenőrzés
+        # --- adat ellenőrzés ---
         s = pd.Series(series, dtype="float64").copy()
-        
-        # Adathossz ellenőrzés: Kell elég adat a beálláshoz
         if len(s) < max(fast, slow) + 5:
             return "hold", float("nan"), float("nan")
 
-        # Élő ár beégetése (Intrabar update)
+        # --- élő ár beírása ---
         if last_px_rt is not None and last_px_rt > 0:
             s.iloc[-1] = float(last_px_rt)
 
-        # Számítás
+        # --- EMA-k számítása ---
         ema_f = s.ewm(span=fast, adjust=False).mean()
         ema_s = s.ewm(span=slow, adjust=False).mean()
 
-        # Utolsó két érték kinyerése
         ef_p, ef_l = float(ema_f.iloc[-2]), float(ema_f.iloc[-1])
         es_p, es_l = float(ema_s.iloc[-2]), float(ema_s.iloc[-1])
 
         diff_prev = ef_p - es_p
         diff_now  = ef_l - es_l
 
-        # ---- 1. Hysteresis (Zajszűrő sáv) ----
+        # --- hysteresis sáv ---
         if atr_eps_mult is None:
             try:
-                # GUI thread-safe olvasása (vagy default)
                 ui_pct = float(getattr(self, "mb_ema_hyst_pct", 0.0).get())
                 atr_eps_mult = max(0.0, ui_pct) / 100.0
             except Exception:
                 atr_eps_mult = 0.0
 
-        # ATR érték biztonságos olvasása
         atr_last = float(getattr(self, "_mb_last_atr_val", 0.0))
-        
-        # Sáv számítása
-        band = 0.0
-        if atr_last > 0 and atr_eps_mult > 0:
-            band = atr_last * atr_eps_mult
-        
+        band = atr_last * atr_eps_mult if (atr_last > 0 and atr_eps_mult > 0) else 0.0
+
         up_th =  band
         dn_th = -band
 
-        # ---- 2. Keresztezés logikája ----
-        # Long: Előzőleg a sáv alatt/benne volt, most a sáv felett van
+        # --- keresztezések ---
         crossed_up   = (diff_prev <= up_th) and (diff_now > up_th)
-        
-        # Short: Előzőleg a sáv felett/benne volt, most a sáv alatt van
         crossed_down = (diff_prev >= dn_th) and (diff_now < dn_th)
 
-        # ---- 3. Slope (Meredekség) Szűrés (Opcionális PRO funkció) ----
-        # Ha a lassú mozgóátlag "lapos", akkor oldalazunk -> veszélyes a jel.
-        # slope = (jelenlegi - előző) / előző
-        slope_ok = True
-        if slope_threshold > 0:
-            slow_slope = (es_l - es_p) / es_p if es_p != 0 else 0
-            if crossed_up and slow_slope < -slope_threshold:
-                slope_ok = False # Ne vegyünk, ha a trend még mindig erősen esik
-            elif crossed_down and slow_slope > slope_threshold:
-                slope_ok = False # Ne adjunk el, ha a trend még mindig erősen emelkedik
-
-        # Döntés
-        sig = "hold"
-        if crossed_up and slope_ok:
+        # --- döntés ---
+        if crossed_up:
             sig = "buy"
-        elif crossed_down and slope_ok:
+        elif crossed_down:
             sig = "sell"
+        else:
+            sig = "hold"
 
-        # Invertálás
+        # --- invertálás ---
         if invert is None:
             try:
                 invert = bool(self.mb_invert_ema.get())
             except Exception:
                 invert = False
-        
+
         if invert:
-            if sig == "buy": sig = "sell"
-            elif sig == "sell": sig = "buy"
+            if sig == "buy":
+                sig = "sell"
+            elif sig == "sell":
+                sig = "buy"
 
         return sig, ef_l, es_l
 
@@ -8428,6 +8392,26 @@ class CryptoBotApp:
         )
         delay_cb.grid(row=1, column=1, sticky="w", padx=4, pady=(8, 0))
 
+        # Shadow értékek a workernek (thread-safe attribútumok)
+        self._mb_log_verbose = bool(self.log_verbose_var.get())
+        self._mb_log_delay   = int(self.log_delay_var.get())
+
+        def _on_log_verbose_changed(*args):
+            try:
+                self._mb_log_verbose = bool(self.log_verbose_var.get())
+            except Exception:
+                self._mb_log_verbose = False
+
+        def _on_log_delay_changed(*args):
+            try:
+                self._mb_log_delay = int(self.log_delay_var.get())
+            except Exception:
+                self._mb_log_delay = 5
+
+        # Változás figyelése (főszálon fut!)
+        self.log_verbose_var.trace_add("write", _on_log_verbose_changed)
+        self.log_delay_var.trace_add("write", _on_log_delay_changed)
+
         # --- MarginBot: duplikált / túl közeli nyitások tiltó zóna (%) ---
         ttk.Label(
             right_box,
@@ -8446,6 +8430,18 @@ class CryptoBotApp:
             format="%.2f"
         )
         tol_spin.grid(row=2, column=1, sticky="w", padx=4, pady=(12, 0))
+
+        # Shadow érték a workernek
+        self._mb_dup_tol_pct = float(self.mb_dup_tol_pct_var.get())
+
+        def _on_dup_tol_changed(*args):
+            try:
+                self._mb_dup_tol_pct = max(0.0, float(self.mb_dup_tol_pct_var.get()))
+            except Exception:
+                # fallback: ha valamiért rossz az érték, legyen 0.5%
+                self._mb_dup_tol_pct = 0.5
+
+        self.mb_dup_tol_pct_var.trace_add("write", _on_dup_tol_changed)
 
     def _apply_global_font(self):
         """A base_font-ot ráteszi minden fontos ttk widget stílusra.
