@@ -7383,6 +7383,7 @@ class CryptoBotApp:
           3) Invertálás (ha kérve van).
         """
         import pandas as pd
+        import math
 
         # --- adat ellenőrzés ---
         s = pd.Series(series, dtype="float64").copy()
@@ -7405,13 +7406,14 @@ class CryptoBotApp:
 
         # --- hysteresis sáv ---
         if atr_eps_mult is None:
-            try:
-                ui_pct = float(getattr(self, "mb_ema_hyst_pct", 0.0).get())
-                atr_eps_mult = max(0.0, ui_pct) / 100.0
-            except Exception:
-                atr_eps_mult = 0.0
+            atr_eps_mult = 0.0
 
-        atr_last = float(getattr(self, "_mb_last_atr_val", 0.0))
+        # ATR az osztályból – ez lehet 0 is, az csak annyit jelent, hogy nincs sáv
+        try:
+            atr_last = float(getattr(self, "_mb_last_atr_val", 0.0))
+        except Exception:
+            atr_last = 0.0
+
         band = atr_last * atr_eps_mult if (atr_last > 0 and atr_eps_mult > 0) else 0.0
 
         up_th =  band
@@ -7431,10 +7433,7 @@ class CryptoBotApp:
 
         # --- invertálás ---
         if invert is None:
-            try:
-                invert = bool(self.mb_invert_ema.get())
-            except Exception:
-                invert = False
+            invert = False
 
         if invert:
             if sig == "buy":
