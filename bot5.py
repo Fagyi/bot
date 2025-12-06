@@ -18,6 +18,7 @@ from typing import List, Optional, Literal, Any, Dict, Tuple
 from urllib.parse import urlencode
 import time as _time
 import threading
+import datetime
 
 # -------- 3rd party --------
 import requests
@@ -3235,10 +3236,16 @@ class CryptoBotApp:
             daemon=True
         ).start()
 
-
     # ---- diagram ----
     def draw_chart(self, df: pd.DataFrame, symbol: str, tf: str):
-        dates = pd.to_datetime(df['ts'], unit='ms')
+        # UTC → helyi idő konverzió
+        local_tz = datetime.datetime.now().astimezone().tzinfo
+        dates = (
+            pd.to_datetime(df["ts"], unit="ms", utc=True)  # KuCoin ts ms-ben, UTC
+              .dt.tz_convert(local_tz)                     # helyi időzónára váltás
+              .dt.tz_localize(None)                        # tz-info eldobása matplotlib miatt
+        )
+
         self.ax.clear()
         self.ax.plot(dates, df['c'], label='close')
         self.ax.plot(dates, df['short'], label=f"MA{int(self.e_short.get())}")
@@ -4366,8 +4373,8 @@ class CryptoBotApp:
                     self.root.after(0, lambda e=e: err(e))
         threading.Thread(target=run, daemon=True).start()
 
+    ### --- """Minidiagram a Margin Bot fülön: Close + EMA-k + RSI."""   --- ###
     def _mb_draw_chart(self, lookback: int = 150):
-        """Minidiagram a Margin Bot fülön: Close + EMA-k + RSI."""
         try:
             # Paraméterek kiolvasása
             symbol = normalize_symbol(self.mb_symbol.get())
@@ -4386,11 +4393,14 @@ class CryptoBotApp:
             if not ohlcv:
                 return
 
-            import pandas as pd
-            import matplotlib.dates as mdates
-
             df = pd.DataFrame(ohlcv, columns=["ts", "o", "h", "l", "c", "v"])
-            df["dt"] = pd.to_datetime(df["ts"], unit="ms")
+            # --- UTC → helyi idő konverzió --- 
+            local_tz = datetime.datetime.now().astimezone().tzinfo
+            df["dt"] = (
+                pd.to_datetime(df["ts"], unit="ms", utc=True)   # ts UTC ms
+                  .dt.tz_convert(local_tz)                      # átváltás helyi időre
+                  .dt.tz_localize(None)                         # tz-info eldobása a matplotlib miatt
+            )
 
             # Close sor
             close = df["c"].astype(float)
