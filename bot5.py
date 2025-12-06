@@ -2578,31 +2578,70 @@ class CryptoBotApp:
         df = df.astype(float, errors="ignore")
         return df
 
-    def _compute_zscore_signal(self, symbol: str, tf: str,
-                               length: int = 40, data_points: int = 100):
+    def _compute_zscore_signal(
+        self,
+        symbol: str,
+        tf: str,
+        length: int = 40,
+        data_points: int = 100,
+        df=None,               # <-- ÚJ, opcionális paraméter
+    ):
         """Z-score jelzés számítása az aktuális párra/idősíkra.
 
         Visszatérés:
             (signal, quadrant_info)
         """
+        import pandas as pd
+
         try:
-            ohlcv = self._mb_get_ohlcv(symbol, tf,
-                                       limit=max(length * 3, data_points + 10))
+            # Ha nincs átadott df, akkor marad a régi logika: OHLCV lekérés + konverzió
+            if df is None:
+                try:
+                    ohlcv = self._mb_get_ohlcv(
+                        symbol,
+                        tf,
+                        limit=max(length * 3, data_points + 10),
+                    )
+                except Exception:
+                    ohlcv = []
+
+                df = self._mb_ohlcv_to_df(ohlcv)
+            else:
+                # Worker által átadott df (pl. ts, o, h, l, c, v oszlopokkal)
+                df = df.copy()
+
+                # Ha a worker-féle df 'c', 'o', 'h', 'l', 'v' oszlopokat használ,
+                # konvertáljuk át a zscore-stratégiához elvárt nevekre.
+                if isinstance(df, pd.DataFrame):
+                    cols = df.columns
+
+                    if "close" not in cols and "c" in cols:
+                        df["close"] = df["c"]
+                    if "open" not in cols and "o" in cols:
+                        df["open"] = df["o"]
+                    if "high" not in cols and "h" in cols:
+                        df["high"] = df["h"]
+                    if "low" not in cols and "l" in cols:
+                        df["low"] = df["l"]
+                    if "volume" not in cols and "v" in cols:
+                        df["volume"] = df["v"]
+
+            # Ha valamiért mégis üres / túl rövid
+            if not isinstance(df, pd.DataFrame) or df.empty or len(df) < length + 5:
+                return 0, None
+
+            # Másolunk, hogy az eredetit ne írjuk tele plusz oszlopokkal
+            signal, quadrant_info = self.apply_zscore_strategy(
+                df.copy(),
+                length=length,
+                data_points=data_points,
+                source="close",
+            )
+            return int(signal or 0), quadrant_info
+
         except Exception:
-            ohlcv = []
-
-        df = self._mb_ohlcv_to_df(ohlcv)
-        if df.empty or len(df) < length + 5:
+            # Ha bármi elhasal, marad a régi, safe default
             return 0, None
-
-        # Másolunk, hogy az eredetit ne írjuk tele plusz oszlopokkal
-        signal, quadrant_info = self.apply_zscore_strategy(
-            df.copy(),
-            length=length,
-            data_points=data_points,
-            source="close",
-        )
-        return int(signal or 0), quadrant_info
 
     def _mt_start_price_loop(self):
         if self._mt_price_job:
@@ -5753,7 +5792,9 @@ class CryptoBotApp:
                     return False
                 funds_to_send = str(fq)
 
-            closing_a_short = (close_side == "buy")
+            # Záráskor engedjük az autoBorrow-t mindkét irányban.
+            # KuCoin így tud picit rásegíteni, ha dust hiányzik a base/quote oldalról.
+            use_auto_borrow_on_close = True
 
             _payload_dbg = {
                 "mode": mode,
@@ -5762,7 +5803,7 @@ class CryptoBotApp:
                 "size_base": size_to_send,
                 "funds_quote": funds_to_send,
                 "leverage": lev,
-                "auto_borrow": closing_a_short,
+                "auto_borrow": use_auto_borrow_on_close,
                 "auto_repay": True,
             }
 
@@ -5779,8 +5820,8 @@ class CryptoBotApp:
                         size_base=size_to_send,
                         funds_quote=funds_to_send,
                         leverage=lev,
-                        auto_borrow=closing_a_short,
-                        auto_repay=True
+                        auto_borrow=use_auto_borrow_on_close,
+                        auto_repay=True,
                     )
             except Exception as e:
                 self._safe_log(f"❌ LIVE zárási API hiba: {e}\n")
@@ -6460,26 +6501,6 @@ class CryptoBotApp:
                     except Exception:
                         pass
 
-                    # --- Élő high/low/close frissítés a legutóbbi gyertyára WS alapján ---  ### WS-HIGH/LOW
-                    # Ez MINDEN ciklusban lefut: akár volt REST refresh, akár nem.
-                    # Így az indikátorok (EMA/RSI/ATR/BRK) mindig a WS-sel frissített utolsó gyertyára számolódnak.
-                    try:
-                        if self._is_pos_num(last_px_rt) and last_px_rt > 0:
-                            idx_last = df.index[-1]
-                            h_last = float(df.loc[idx_last, 'h'])
-                            l_last = float(df.loc[idx_last, 'l'])
-                            if last_px_rt > h_last:
-                                df.loc[idx_last, 'h'] = last_px_rt
-                            if last_px_rt < l_last:
-                                df.loc[idx_last, 'l'] = last_px_rt
-                            # close is menjen a legutolsó tickre
-                            df.loc[idx_last, 'c'] = last_px_rt
-
-                        # cache frissítése, hogy a következő körben is a WS-sel módosított df-et kapjuk
-                        self._mb_last_df = df.copy()
-                    except Exception:
-                        pass
-
                     # --- cache-eljük a realtime árakat más funkcióknak is (manual close / PnL / history) ---
                     try:
                         if self._is_pos_num(last_px_rt) and last_px_rt > 0:
@@ -6518,7 +6539,7 @@ class CryptoBotApp:
                     # hiszterézis mult kivonva cfg-ből → nincs Tk az _mb_signal_from_ema_live-ben
                     atr_eps_mult = max(0.0, ema_hyst_pct) / 100.0
                     sig_raw, ef_l, es_l = self._mb_signal_from_ema_live(
-                        closes_for_sig, fa, slw, last_px_rt=last_px_rt if (last_px_rt is not None and last_px_rt > 0) else None,
+                        closes_for_sig, fa, slw, last_px_rt,
                         atr_eps_mult=atr_eps_mult,
                         invert=invert_ema,            # <<< invert flag cfg-ből
                     )
@@ -6620,6 +6641,7 @@ class CryptoBotApp:
                                 tf,
                                 length=z_len,
                                 data_points=z_points,
+                                df=df,
                             )
                         except Exception:
                             z_sig, z_quad = 0, None
@@ -6721,67 +6743,70 @@ class CryptoBotApp:
                     if combined_sig in (None, "", "hold") and reasons:
                         log_line += " | hold_reasons=" + ",".join(reasons)
 
-                    # ================== STÁTUSZ LOG VEZÉRLÉS ==================
+                    # ================== STÁTUSZ LOG VEZÉRLÉS (JAVÍTOTT) ==================
                     verbose_on = bool(getattr(self, "_mb_log_verbose", False))
+                    
+                    # Előző állapot lekérése a dedup-hoz
+                    last_sig_log = getattr(self, "_mb_last_status_sig", "")
+                    last_px_log  = float(getattr(self, "_mb_last_status_px", 0.0) or 0.0)
 
-                    # 1) Ha KI van kapcsolva a részletes log:
-                    #    - BUY/SELL jel esetén mindig logolunk 1 sort
-                    #    - HOLD esetén nem logolunk státusz-sorokat
+                    # 1) Ha KI van kapcsolva a részletes log (Csendes mód)
                     if not verbose_on:
+                        # SPAM VÉDELEM: Csak akkor logolunk, ha a jelzés VÁLTOZOTT az előzőhöz képest.
+                        # Így ha pl. cooldown miatt beragad a 'buy', nem írja ki 100x.
                         if combined_sig in ("buy", "sell"):
+                            if combined_sig != last_sig_log:
+                                self._safe_log(
+                                    log_line.rstrip() + f"  → {combined_sig} | {filters_line}\n"
+                                )
+                        
+                        # Állapot frissítése a következő körhöz
+                        self._mb_last_status_sig = combined_sig
+                        self._mb_last_status_px  = float(last_px_rt or last_px or 0.0)
+                        
+                        # FONTOS: Itt NEM használunk continue-t, hogy a kód tovább tudjon menni 
+                        # a lenti pozíció-menedzsmentre és új nyitásra!
+
+                    # 2) Ha BE van kapcsolva a részletes log (VERBOSE ON)
+                    else:
+                        try:
+                            delay_s = int(getattr(self, "_mb_log_delay", 5))
+                            if delay_s <= 0: delay_s = 5
+                        except Exception:
+                            delay_s = 5
+
+                        should_log = True
+                        try:
+                            now_ts_log   = int(time.time())
+                            last_ts_log  = getattr(self, "_mb_last_status_log_ts", 0)
+
+                            if combined_sig in ("buy", "sell"):
+                                # Éles jel esetén mindig logolunk (hogy lássuk, miért nem köt, pl. cooldown)
+                                should_log = True
+                            else:
+                                # HOLD / egyéb eset ritkítása
+                                dt = now_ts_log - last_ts_log
+                                px_move_pct = 0.0
+                                if self._is_pos_num(last_px_log) and self._is_pos_num(last_px_rt) and last_px_rt > 0:
+                                    px_move_pct = abs(last_px_rt - last_px_log) / last_px_log * 100.0
+
+                                # Csak akkor logolunk, ha letelt az idő VAGY nagyot mozdult az ár
+                                if dt < delay_s and combined_sig == last_sig_log and px_move_pct < 0.2:
+                                    should_log = False
+                                else:
+                                    should_log = True
+
+                            if should_log:
+                                self._mb_last_status_log_ts  = now_ts_log
+                                self._mb_last_status_sig     = combined_sig
+                                self._mb_last_status_px      = float(last_px_rt or last_px or 0.0)
+                        except Exception:
+                            should_log = True
+
+                        if should_log:
                             self._safe_log(
                                 log_line.rstrip() + f"  → {combined_sig} | {filters_line}\n"
                             )
-                        # és kész: HOLD-ra semmi, de a többi log (open/close, hibák, stb.) marad
-                        continue
-
-                    # 2) Ha BE van kapcsolva a részletes log:
-                    #    - BUY/SELL jel: mindig logolunk (nem throttoljuk)
-                    #    - HOLD: ritkítva, a beállított delay + ármozgás alapján
-                    try:
-                        delay_s = int(getattr(self, "_mb_log_delay", 5))
-                        if delay_s <= 0:
-                            delay_s = 5
-                    except Exception:
-                        delay_s = 5
-
-                    should_log = True
-                    try:
-                        now_ts_log   = int(time.time())
-                        last_ts_log  = getattr(self, "_mb_last_status_log_ts", 0)
-                        last_sig_log = getattr(self, "_mb_last_status_sig", "")
-                        last_px_log  = float(getattr(self, "_mb_last_status_px", 0.0) or 0.0)
-
-                        if combined_sig in ("buy", "sell"):
-                            # Jel esetén mindig menjen ki
-                            should_log = True
-                        else:
-                            # HOLD / egyéb eset
-                            dt = now_ts_log - last_ts_log
-                            px_move_pct = 0.0
-                            if self._is_pos_num(last_px_log) and self._is_pos_num(last_px_rt) and last_px_rt > 0:
-                                px_move_pct = abs(last_px_rt - last_px_log) / last_px_log * 100.0
-
-                            # csak akkor logolunk, ha:
-                            #  - eltelt legalább delay_s mp, VAGY
-                            #  - megváltozott a combined_sig (elvileg ritka), VAGY
-                            #  - az ár >0.2%-ot mozdult az utolsó loghoz képest
-                            if dt < delay_s and combined_sig == last_sig_log and px_move_pct < 0.2:
-                                should_log = False
-                            else:
-                                should_log = True
-
-                        if should_log:
-                            self._mb_last_status_log_ts  = now_ts_log
-                            self._mb_last_status_sig     = combined_sig
-                            self._mb_last_status_px      = float(last_px_rt or last_px or 0.0)
-                    except Exception:
-                        should_log = True
-
-                    if should_log:
-                        self._safe_log(
-                            log_line.rstrip() + f"  → {combined_sig} | {filters_line}\n"
-                        )
 
                     # BUY / SELL pozíciók közös menedzsmentje
                     _manage_positions_for_side("buy")
@@ -6819,12 +6844,24 @@ class CryptoBotApp:
                                 tol_pct=tol_pct_val,   # UI-ból jön a százalék
                             )
                             if found:
-                                self._safe_log(
-                                    f"⏭ {combined_sig.upper()} jel átugorva: már van nyitott "
-                                    f"{combined_sig.upper()} pozíció hasonló áron "
-                                    f"(entry={existing_entry:.6f}, now={last_px_rt:.6f}, "
-                                    f"diff={diff_pct:.3f}%, tol={tol_pct_val:.3f}%).\n"
-                                )
+                                # --- SPAM CSÖKKENTÉS ---
+                                # Csak akkor logolunk, ha:
+                                # 1. A részletes logolás (verbose) BE van kapcsolva
+                                # 2. ÉS eltelt legalább 30 másodperc az utolsó ilyen üzenet óta
+                                
+                                now_ts = int(time.time())
+                                last_skip_ts = getattr(self, "_mb_last_skip_log_ts", 0)
+                                
+                                # Itt állíthatod a ritkítást (most 30 másodperc)
+                                if verbose_on and (now_ts - last_skip_ts > 30):
+                                    self._safe_log(
+                                        f"⏭ {combined_sig.upper()} jel átugorva: már van nyitott "
+                                        f"{combined_sig.upper()} pozíció hasonló áron "
+                                        f"(entry={existing_entry:.6f}, now={last_px_rt:.6f}, "
+                                        f"diff={diff_pct:.3f}%, tol={tol_pct_val:.3f}%). (Ritkítva 30s)\n"
+                                    )
+                                    self._mb_last_skip_log_ts = now_ts
+                                
                                 opened = False
                                 time.sleep(1)
                                 continue
@@ -7389,10 +7426,6 @@ class CryptoBotApp:
         s = pd.Series(series, dtype="float64").copy()
         if len(s) < max(fast, slow) + 5:
             return "hold", float("nan"), float("nan")
-
-        # --- élő ár beírása ---
-        if last_px_rt is not None and last_px_rt > 0:
-            s.iloc[-1] = float(last_px_rt)
 
         # --- EMA-k számítása ---
         ema_f = s.ewm(span=fast, adjust=False).mean()
