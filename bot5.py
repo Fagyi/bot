@@ -2648,42 +2648,74 @@ class CryptoBotApp:
         if self._mt_price_job:
             self.root.after_cancel(self._mt_price_job)
 
-        self._mt_price_inflight = False  # egyszerre csak egy kérés fusson
+        # egyszerre csak egy árlekérés fusson
+        self._mt_price_inflight = False
 
         def _tick():
             try:
                 # csak aktív fülön frissítünk
-                if self.nb.tab(self.nb.select(), "text") != "Margin Trade":
+                try:
+                    if self.nb.tab(self.nb.select(), "text") != "Margin Trade":
+                        return
+                except Exception:
                     return
+
+                # ha még fut egy előző worker, nem indítunk újat
                 if self._mt_price_inflight:
                     return
-                self._mt_price_inflight = True
 
                 sym = normalize_symbol(self.mt_symbol.get())
+
+                # WS előkészítése – ez gyors, maradhat a főszálon
                 try:
                     self._ensure_ticker_ws(sym)
                 except Exception:
                     pass
-                # ---- egységes árlekérés: WS → cache → REST ----
-                try:
-                    px = self.get_best_price(sym)
-                    if not self._is_pos_num(px) or px <= 0:
-                        px = 0.0
-                except Exception:
+
+                self._mt_price_inflight = True
+
+                # --- háttér thread az árhoz (WS → cache → REST) ---
+                def worker(symbol: str):
                     px = 0.0
+                    try:
+                        try:
+                            p = self.get_best_price(symbol)
+                            if self._is_pos_num(p) and p > 0:
+                                px = float(p)
+                        except Exception:
+                            px = 0.0
+                    finally:
+                        # UI frissítés a fő szálon
+                        def ui_update():
+                            # engedjük el a flaget
+                            self._mt_price_inflight = False
 
-                # ---- UI update ----
-                self._mt_price_inflight = False
-                if px > 0:
-                    self.mt_price_lbl.config(text=f"Ár: {px:.6f}")
-                else:
-                    self.mt_price_lbl.config(text="Ár: –")
+                            # közben lehet, hogy elnavigáltál a fülről
+                            try:
+                                if self.nb.tab(self.nb.select(), "text") != "Margin Trade":
+                                    return
+                            except Exception:
+                                return
 
-                # becslések frissítése
-                self._mt_update_estimate(px)
+                            if px > 0:
+                                self.mt_price_lbl.config(text=f"Ár: {px:.6f}")
+                            else:
+                                self.mt_price_lbl.config(text="Ár: –")
+
+                            # becslés frissítése
+                            self._mt_update_estimate(px)
+
+                        try:
+                            self.root.after(0, ui_update)
+                        except Exception:
+                            # ha már meghalt a root, legalább a flaget engedjük el
+                            self._mt_price_inflight = False
+
+                import threading
+                threading.Thread(target=worker, args=(sym,), daemon=True).start()
 
             finally:
-                # 1s-enként polloljuk a websocket/REST kombót (most már get_best_price)
+                # 1s-enként újrapróbálkozunk – de a hálózati munka már háttérben megy
                 self._mt_price_job = self.root.after(1000, _tick)
 
         _tick()
@@ -2743,7 +2775,8 @@ class CryptoBotApp:
         action_type: 'percent' (value = 0-100) vagy 'max' (value = 'buy'|'sell')
         """
         try:
-            self.root.config(cursor="watch")
+            # kurzor állítás a fő szálon
+            self.root.after(0, lambda: self.root.config(cursor="watch"))
             
             # 1. Adatgyűjtés (ez a lassú rész)
             sym = normalize_symbol(self.mt_symbol.get())
@@ -2756,7 +2789,7 @@ class CryptoBotApp:
                     px = 0.0
             except Exception:
                 px = 0.0
-            
+
             # Ez a leglassabb hívás – egyenleg lekérés
             avail_base, avail_quote = self._mt_available(base, quote)
 
