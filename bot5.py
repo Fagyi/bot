@@ -5293,6 +5293,7 @@ class CryptoBotApp:
                 idx=sim_index,
                 exit_px=last_px,
                 reason="manual_hist_close",
+                pos_obj=sim_pos,
             )
         except Exception as e:
             self._safe_log(f"⚠️ Manuális SIM zárás hiba (history): {e}\n")
@@ -5672,41 +5673,42 @@ class CryptoBotApp:
         with self._mb_lock:
             lst = self._sim_pos_long if side == 'buy' else self._sim_pos_short
 
+            # Thread-safe ellenőrzés: létezik-e még az index?
             if idx < 0 or idx >= len(lst):
-                return
-
-            # Ha a hívó adott konkrét pos_obj-ot, ellenőrizzük, hogy még mindig ugyanaz ül-e ott.
-            pos = lst[idx]
-            if pos_obj is not None and pos is not pos_obj:
-                # Próbáljuk megkeresni identity alapján
-                real_idx = None
-                for j, p in enumerate(lst):
-                    if p is pos_obj:
-                        real_idx = j
-                        break
-                if real_idx is None:
-                    # már kikerült a listából → nincs teendő
+                # Ha van pos_obj, próbáljuk identity alapján megkeresni
+                if pos_obj is not None:
+                    try:
+                        idx = lst.index(pos_obj)
+                    except ValueError:
+                        # már nincs benne → valaki más bezárta
+                        return
+                else:
+                    # se érvényes index, se objektum → nincs teendő
                     return
-                idx = real_idx
-                pos = lst[idx]
+
+            pos = lst[idx]
+
+            # Ha van pos_obj, ellenőrizzük, hogy tényleg ugyanarra mutat-e
+            if pos_obj is not None and pos is not pos_obj:
+                # még egyszer megpróbálhatjuk identity alapján (óvatosságból),
+                # de szigorúan véve ez már opcionális
+                try:
+                    idx = lst.index(pos_obj)
+                    pos = lst[idx]
+                except ValueError:
+                    return
 
             entry = float(pos.get('entry', 0.0))
             sz    = float(pos.get('size', 0.0))
-
             gross = (exit_px - entry) * sz * (1 if side == 'buy' else -1)
-
             fee_rate = self._mb_get_taker_fee()
             f_open, f_close, f_total = self._mb_sum_fee_actual_or_est(pos, exit_px, fee_rate)
-
             pnl = gross - f_total
-
-            # pool + összesített PnL frissítése
             self._sim_pnl_usdt       += pnl
             self._pool_balance_quote += pnl
             self._pool_used_quote    -= (float(pos.get('commit_usdt', 0.0)) +
                                          float(pos.get('fee_reserved', 0.0)))
             self._pool_used_quote     = max(0.0, self._pool_used_quote)
-
             total_pnl    = float(self._sim_pnl_usdt)
             pool_used    = float(self._pool_used_quote)
             pool_balance = float(self._pool_balance_quote)
