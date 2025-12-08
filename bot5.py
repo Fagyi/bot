@@ -4406,117 +4406,171 @@ class CryptoBotApp:
                     self.root.after(0, lambda e=e: err(e))
         threading.Thread(target=run, daemon=True).start()
 
-    ### --- """Minidiagram a Margin Bot fülön: Close + EMA-k + RSI."""   --- ###
+    ### --- """Minidiagram a Margin Bot fülön: Close + EMA-k + RSI (bot-féle, stabil eleje-vége).""" --- ###
     def _mb_draw_chart(self, lookback: int = 150):
+        import numpy as np
+        import pandas as pd
+
         try:
-            # Paraméterek kiolvasása
+            # Paraméterek kiolvasása (GUI-ból – EZ FŐSZÁLON FUT)
             symbol = normalize_symbol(self.mb_symbol.get())
             tf     = self.mb_tf.get()
             fa     = int(self.mb_ma_fast.get())
             slw    = int(self.mb_ma_slow.get())
 
-            # --- OHLCV lekérés (K-Line WS + REST fallback) ---
+            # --- OHLCV lekérés paraméterei ---
             limit = max(lookback, slw + 5)
 
-            try:
-                ohlcv = self._mb_get_ohlcv(symbol, tf, limit=limit)
-            except Exception:
-                ohlcv = []
+            # --- WORKER: csak adatlekérés, MEHET háttérszálba ---
+            def worker():
+                try:
+                    ohlcv = self._mb_get_ohlcv(symbol, tf, limit=limit)
+                except Exception:
+                    ohlcv = []
+                return ohlcv
 
-            if not ohlcv:
-                return
+            # --- on_ok: adat megjött, INNENTŐL CSAK FŐSZÁLON fut (root.after) ---
+            def on_ok(ohlcv):
+                try:
+                    if not ohlcv:
+                        return
 
-            df = pd.DataFrame(ohlcv, columns=["ts", "o", "h", "l", "c", "v"])
-            # --- UTC → helyi idő konverzió --- 
-            local_tz = datetime.datetime.now().astimezone().tzinfo
-            df["dt"] = (
-                pd.to_datetime(df["ts"], unit="ms", utc=True)   # ts UTC ms
-                  .dt.tz_convert(local_tz)                      # átváltás helyi időre
-                  .dt.tz_localize(None)                         # tz-info eldobása a matplotlib miatt
-            )
+                    df = pd.DataFrame(ohlcv, columns=["ts", "o", "h", "l", "c", "v"])
 
-            # Close sor
-            close = df["c"].astype(float)
+                    # idő szerint növekvő sorrend (régi → új)
+                    df = df.sort_values("ts").reset_index(drop=True)
 
-            # --- Websocket élő ár integráció ---
-            try:
-                tws = getattr(self, "_ticker_ws", None)
-                if tws is not None:
-                    rt = float(tws.get_last_price() or 0.0)
-                    if rt > 0:
-                        close.iloc[-1] = rt
-                        df.loc[df.index[-1], "c"] = rt
-            except Exception:
-                pass
+                    # --- UTC → helyi idő konverzió ---
+                    local_tz = datetime.datetime.now().astimezone().tzinfo
+                    df["dt"] = (
+                        pd.to_datetime(df["ts"], unit="ms", utc=True)
+                          .dt.tz_convert(local_tz)
+                          .dt.tz_localize(None)
+                    )
 
-            # --- EMA-k ---
-            ema_f = close.ewm(span=fa, adjust=False).mean()
-            ema_s = close.ewm(span=slw, adjust=False).mean()
+                    # Close-ok
+                    close_for_rsi = df["c"].astype(float).copy()   # RSI-hez
+                    close_for_ema = close_for_rsi.copy()           # EMA + ár rajzhoz
 
-            # --- RSI (egyszerű rolling verzió) ---
-            try:
-                rsi_len = int(self._mb_cfg.get("rsi_len", 14) if hasattr(self, "_mb_cfg") else 14)
-            except Exception:
-                rsi_len = 14
+                    # --- Websocket RT ár csak a chart/EMA-ra ---
+                    try:
+                        tws = getattr(self, "_ticker_ws", None)
+                        if tws is not None:
+                            rt = float(tws.get_last_price() or 0.0)
+                            if rt > 0:
+                                close_for_ema.iloc[-1] = rt
+                                df.loc[df.index[-1], "c"] = rt
+                    except Exception:
+                        pass
 
-            rsi = None
-            try:
-                delta = close.diff()
-                gain = delta.clip(lower=0).rolling(rsi_len).mean()
-                loss = (-delta.clip(upper=0)).rolling(rsi_len).mean()
-                rs = gain / loss.replace(0, 1e-12)
-                rsi = 100 - (100 / (1 + rs))
-            except Exception:
-                rsi = None
+                    # --- EMA-k ---
+                    ema_f = close_for_ema.ewm(span=fa, adjust=False).mean()
+                    ema_s = close_for_ema.ewm(span=slw, adjust=False).mean()
 
-            # --- Rajzolás ---
-            self.mb_ax.clear()
+                    # --- RSI (bot-féle, stabil eleje + vége) ---
+                    try:
+                        rsi_len = int(self._mb_cfg.get("rsi_len", 14)
+                                      if hasattr(self, "_mb_cfg") else 14)
+                    except Exception:
+                        rsi_len = 14
 
-            # Ár + EMA-k
-            (line_close,) = self.mb_ax.plot(df["dt"], close, label="Close")
-            (line_ema_f,) = self.mb_ax.plot(df["dt"], ema_f, label=f"EMA({fa})")
-            (line_ema_s,) = self.mb_ax.plot(df["dt"], ema_s, label=f"EMA({slw})")
+                    rsi_raw = None
+                    rsi_plot = None
+                    try:
+                        if len(close_for_rsi) >= rsi_len:
+                            rsi_raw = self._mb_rsi(close_for_rsi, n=rsi_len)
+                            rsi_raw = pd.Series(rsi_raw.values, index=df.index)
 
-            # RSI tengely (lazy init + clear)
-            if getattr(self, "mb_rsi_ax", None) is None:
-                self.mb_rsi_ax = self.mb_ax.twinx()
-            else:
-                self.mb_rsi_ax.clear()
+                            rsi_plot = rsi_raw.copy()
 
-            if rsi is not None:
-                (line_rsi,) = self.mb_rsi_ax.plot(df["dt"], rsi, alpha=0.3, label="RSI")
-                self.mb_rsi_ax.set_ylim(0, 100)
-                self.mb_rsi_ax.axhline(30, linestyle="--", alpha=0.2)
-                self.mb_rsi_ax.axhline(70, linestyle="--", alpha=0.2)
-                self.mb_rsi_ax.set_yticks([])
-            else:
-                line_rsi = None
+                            # --- ELEJE: dinamikus, de konzervatív warmup ---
+                            stable_window = 5          # ennyi egymás utáni "normális" RSI kell
+                            min_warmup     = rsi_len   # legalább ennyi bar legyen elrejtve
 
-            # X-tengely formátum
-            self.mb_ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+                            warmup_n = len(rsi_raw)    # default: ha semmi nem ok, akkor semmit nem rajzolunk
 
-            # Cím, grid
-            self.mb_ax.set_title(symbol + " • " + tf)
-            self.mb_ax.grid(True, alpha=0.25)
+                            if len(rsi_raw) >= rsi_len:
+                                mask_ok = (~np.isnan(rsi_raw)) & (rsi_raw > 5.0) & (rsi_raw < 95.0)
 
-            # Legend: Close + EMA-k (+ RSI, ha van adat)
-            handles = [line_close, line_ema_f, line_ema_s]
-            if line_rsi is not None:
-                handles.append(line_rsi)
+                                found_idx = None
+                                # keresünk egy olyan indexet, ahonnan indulva van stable_window db egymásutáni "ok" RSI
+                                for i in range(0, len(rsi_raw) - stable_window + 1):
+                                    if mask_ok.iloc[i:i+stable_window].all():
+                                        found_idx = i
+                                        break
 
-            labels = [h.get_label() for h in handles]
-            self.mb_ax.legend(handles, labels, loc="lower left", fontsize="small")
+                                if found_idx is not None:
+                                    warmup_n = max(min_warmup, found_idx + 1)
+                                else:
+                                    warmup_n = min(rsi_len * 2, len(rsi_raw))
 
-            # FONTOS: tight_layout-ot NE hívjuk minden frissítésnél,
-            # ha kell, egyszer hívd meg ott, ahol a self.mb_fig-et létrehozod.
-            # self.mb_fig.tight_layout()
+                            warmup_n = min(warmup_n, len(rsi_raw))
+                            rsi_plot.iloc[:warmup_n] = np.nan
 
-            self.mb_canvas.draw_idle()
+                            # --- VÉGE: ha akarod, visszarakhatod az aktuális gyertyára a NaN-t ---
+                            # rsi_plot.iloc[-1] = np.nan
+
+                            rsi_plot = rsi_plot.clip(0.0, 100.0)
+                        else:
+                            rsi_raw = None
+                            rsi_plot = None
+                    except Exception:
+                        rsi_raw = None
+                        rsi_plot = None
+
+                    # --- Rajzolás (MINDEN Tk / mpl CSAK ITT, FŐSZÁLON!) ---
+                    self.mb_ax.clear()
+
+                    (line_close,) = self.mb_ax.plot(df["dt"], close_for_ema, label="Close")
+                    (line_ema_f,) = self.mb_ax.plot(df["dt"], ema_f, label=f"EMA({fa})")
+                    (line_ema_s,) = self.mb_ax.plot(df["dt"], ema_s, label=f"EMA({slw})")
+
+                    if getattr(self, "mb_rsi_ax", None) is None:
+                        self.mb_rsi_ax = self.mb_ax.twinx()
+                    else:
+                        self.mb_rsi_ax.clear()
+
+                    if rsi_plot is not None:
+                        (line_rsi,) = self.mb_rsi_ax.plot(df["dt"], rsi_plot, alpha=0.3, label="RSI")
+                        self.mb_rsi_ax.set_ylim(0, 100)
+                        self.mb_rsi_ax.axhline(30, linestyle="--", alpha=0.2)
+                        self.mb_rsi_ax.axhline(70, linestyle="--", alpha=0.2)
+                        self.mb_rsi_ax.set_yticks([])
+                    else:
+                        line_rsi = None
+
+                    self.mb_ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+                    self.mb_ax.set_title(symbol + " • " + tf)
+                    self.mb_ax.grid(True, alpha=0.25)
+
+                    handles = [line_close, line_ema_f, line_ema_s]
+                    if line_rsi is not None:
+                        handles.append(line_rsi)
+                    labels = [h.get_label() for h in handles]
+                    self.mb_ax.legend(handles, labels, loc="lower left", fontsize="small")
+
+                    self.mb_canvas.draw_idle()
+
+                except Exception as e:
+                    # csendes – ne dobáljon fel ablakot
+                    try:
+                        self._safe_log(f"Chart hiba: {e}\n")
+                    except Exception:
+                        pass
+
+            # --- on_err: háttérszál hibája, biztonságos log ---
+            def on_err(e):
+                try:
+                    self._safe_log(f"Chart hiba (bg): {e}\n")
+                except Exception:
+                    pass
+
+            # Adat a háttérben, rajz a főszálon
+            self._bg(worker, on_ok, on_err)
 
         except Exception as e:
-            # csendes – ne dobáljon fel ablakot
             try:
-                self._safe_log(f"Chart hiba: {e}\n")
+                self._safe_log(f"Chart hiba (külső): {e}\n")
             except Exception:
                 pass
 
