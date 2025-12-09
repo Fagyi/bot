@@ -6144,6 +6144,7 @@ class CryptoBotApp:
     # === MarginBot – fő ciklus, HTF-filter + ATR menedzsment + RSI szűrő === 
     def _mb_worker(self):
         import time, math, pandas as pd, threading
+        from types import SimpleNamespace as NS
 
         # --- egyszeri init-ek (ha még nem léteznek) ---
         if not hasattr(self, "_sim_pos_long"):   self._sim_pos_long = []   # list[dict]
@@ -6160,7 +6161,9 @@ class CryptoBotApp:
 
         # Dinamikus keret (pool) – induláskor felépítjük
         if not hasattr(self, "_pool_balance_quote") or not hasattr(self, "_pool_used_quote"):
-            cfg0 = getattr(self, "_mb_cfg", {}) or {}
+            # _mb_cfg olvasása lock alatt, mert GUI thread is írhatja
+            with self._mb_lock:
+                cfg0 = getattr(self, "_mb_cfg", {}) or {}
             try:
                 symbol0 = normalize_symbol(cfg0.get("symbol", DEFAULT_SYMBOL))
                 base0, quote0 = split_symbol(symbol0)
@@ -6196,6 +6199,156 @@ class CryptoBotApp:
         def _pos_list(side: str):
             return self._sim_pos_long if side == "buy" else self._sim_pos_short
 
+        def _safe_now_ts() -> int:
+            try:
+                return int(time.time())
+            except Exception:
+                return 0
+
+        def _cooldown_status(last_cross_ts: int | None, cd_s: int) -> tuple[int, bool]:
+            """
+            Vissza: (cd_left_sec, cd_ok)
+            - cd_left_sec: hátralévő cooldown másodperc (min. 0)
+            - cd_ok: True, ha már letelt a cooldown
+            """
+            if not last_cross_ts or cd_s <= 0:
+                return 0, True
+            now_ts = _safe_now_ts()
+            elapsed = now_ts - last_cross_ts
+            cd_left = max(0, cd_s - elapsed)
+            cd_ok = (elapsed >= cd_s)
+            return cd_left, cd_ok
+
+        def _drift_status(drift_pct: float, drift_max_ui: float) -> tuple[bool, str | None]:
+            """
+            Vissza: (drift_ok, drift_over_txt)
+            - drift_ok: True, ha abs(drift_pct) <= drift_max_ui, vagy nincs limit
+            - drift_over_txt: pl. 'drift>0.50%' ha túl nagy
+            """
+            try:
+                if drift_max_ui <= 0:
+                    return True, None
+                if drift_pct != drift_pct:  # NaN
+                    return True, None
+                if abs(drift_pct) <= drift_max_ui:
+                    return True, None
+                return False, f"drift>{drift_max_ui:.2f}%"
+            except Exception:
+                return True, None
+
+        def _build_hold_reasons(
+            ema_up: bool,
+            ema_dn: bool,
+            cd_ok: bool,
+            drift_ok: bool,
+            drift_over_txt: str | None,
+            rsi_ok_buy: bool,
+            rsi_ok_sell: bool,
+            htf_block: bool,
+            use_zscore: bool,
+            combined_sig_raw: str | None,
+            combined_sig: str | None,
+        ) -> list[str]:
+            reasons: list[str] = []
+
+            if not (ema_up or ema_dn):
+                reasons.append("no_ema_trend")
+            if not cd_ok:
+                reasons.append("cooldown")
+            if drift_over_txt and not drift_ok:
+                reasons.append(drift_over_txt)
+            if ema_up and not rsi_ok_buy:
+                reasons.append("rsi_block_buy")
+            if ema_dn and not rsi_ok_sell:
+                reasons.append("rsi_block_sell")
+            if htf_block:
+                reasons.append("htf_block")
+            # ha az eredeti jel buy/sell volt, de a Z-score filterből HOLD lett:
+            if use_zscore and combined_sig_raw in ("buy", "sell") and combined_sig == "hold":
+                reasons.append("zscore_block")
+
+            return reasons
+
+        def _build_filters_line(
+            use_rsi: bool,
+            rsi_bmin: float,
+            rsi_bmax: float,
+            rsi_smin: float,
+            rsi_smax: float,
+            use_htf: bool,
+            trend_htf: int,
+            use_brk: bool,
+            use_live: bool,
+            use_zscore: bool,
+            cd_left: int,
+        ) -> str:
+            parts: list[str] = []
+
+            if use_rsi:
+                parts.append(
+                    f"rsi=ON[buy:{rsi_bmin:.1f}-{rsi_bmax:.1f} "
+                    f"sell:{rsi_smin:.1f}-{rsi_smax:.1f}]"
+                )
+            else:
+                parts.append("rsi=OFF")
+
+            parts.append(f"htf={'ON' if use_htf else 'OFF'}({trend_htf:+d})")
+            parts.append(f"brk={'ON' if use_brk else 'OFF'}")
+            parts.append(f"live_px={'ON' if use_live else 'OFF'}")
+            parts.append(f"zscore={'ON' if use_zscore else 'OFF'}")
+            parts.append(f"cd_left={cd_left}s")
+
+            return "filters: " + ", ".join(parts)
+
+        def _log_status_line(
+            symbol: str,
+            tf: str,
+            fa: int,
+            slw: int,
+            last_px: float,
+            last_px_rt: float,
+            ef_l: float,
+            es_l: float,
+            use_htf: bool,
+            trend_htf: int,
+            use_rsi: bool,
+            rsi_len: int,
+            rsi_val: float | None,
+            use_brk: bool,
+            brk_n: int,
+            hh: float,
+            ll: float,
+            up_lvl: float,
+            dn_lvl: float,
+            drift_pct: float,
+            open_now: int,
+            max_open: int,
+            pool_used: float,
+            pool_balance: float,
+        ) -> str:
+            parts: list[str] = [
+                f"[{symbol} {tf}] Élő ár={last_px_rt:.6f}",
+                f"Gyertya ár={last_px:.6f}",
+                f"EMA({fa})={ef_l:.4f}/EMA({slw})={es_l:.4f}",
+            ]
+            if use_htf:
+                parts.append(f"HTF={trend_htf:+d}")
+            if use_rsi and rsi_val is not None:
+                parts.append(f"RSI({rsi_len})={rsi_val:.2f}")
+            if use_brk and not (math.isnan(hh) or math.isnan(ll)):
+                parts.append(
+                    f"BRK[{brk_n}] HH={hh:.4f} LL={ll:.4f} ↑{up_lvl:.4f} ↓{dn_lvl:.4f}"
+                )
+            if drift_pct == drift_pct:
+                parts.append(f"drift={drift_pct:.2f}%")
+            parts.append(
+                f"POOL used/bal={pool_used:.2f}/{pool_balance:.2f}"
+            )
+            parts.append(
+                f"OPEN={open_now}/{('∞' if max_open == 0 else max_open)}"
+            )
+            return " ".join(parts)
+
         def _has_nearby_pos(side: str, px: float, tol_pct: float = 0.1):
             """
             Van-e már nyitott pozíció ugyanazon az oldalon (buy/sell),
@@ -6227,6 +6380,76 @@ class CryptoBotApp:
                         return True, e, diff_pct * 100.0
 
             return False, None, None
+
+        # --- CFG loader: minden beállítás egy helyen ---
+        def _load_cfg() -> NS:
+            # config olvasása lock alatt, a GUI szál ugyanígy ugyanazzal a lockkal írja
+            with self._mb_lock:
+                cfg = dict(getattr(self, "_mb_cfg", {}) or {})
+
+            ns = NS(
+                raw=cfg,
+                symbol=normalize_symbol(cfg.get("symbol", DEFAULT_SYMBOL)),
+                tf=cfg.get("tf", "1m"),
+                fa=int(cfg.get("ma_fast", 9)),
+                slw=int(cfg.get("ma_slow", 21)),
+                sizep=float(cfg.get("size_pct", 50.0)),
+                inpm=cfg.get("input_mode", "quote"),
+                mode=cfg.get("mode", "isolated"),
+                lev=int(cfg.get("leverage", 10)),
+                tpct=float(cfg.get("tp_pct", 2.0)),
+                spct=float(cfg.get("sl_pct", 1.0)),
+                trpct=float(cfg.get("trail_pct", 0.5)),
+                cd_s=int(cfg.get("cooldown_s", 30)),
+                dry=bool(cfg.get("dry", True)),
+                budget_ui=float(cfg.get("budget_ui", 0.0)),
+
+                # RSI / HTF / ATR / FIX / BRK
+                use_rsi=bool(cfg.get("use_rsi", False)),
+                rsi_len=int(cfg.get("rsi_len", 14)),
+                rsi_bmin=float(cfg.get("rsi_bmin", 45.0)),
+                rsi_bmax=float(cfg.get("rsi_bmax", 70.0)),
+                rsi_smin=float(cfg.get("rsi_smin", 30.0)),
+                rsi_smax=float(cfg.get("rsi_smax", 55.0)),
+
+                use_htf=bool(cfg.get("use_htf", False)),
+                htf_tf=cfg.get("htf_tf", "1h"),
+
+                use_atr=bool(cfg.get("use_atr", False)),
+                atr_n=int(cfg.get("atr_n", 14)),
+                mul_sl=float(cfg.get("atr_mul_sl", 1.2)),
+                mul_tp1=float(cfg.get("atr_mul_tp1", 1.5)),
+                mul_tp2=float(cfg.get("atr_mul_tp2", 2.5)),
+                mul_tr=float(cfg.get("atr_mul_tr", 0.9)),
+
+                use_fixed=bool(cfg.get("use_fixed", False)),
+
+                use_brk=bool(cfg.get("use_brk", False)),
+                brk_n=int(cfg.get("brk_n", 20)),
+                brk_buf=float(cfg.get("brk_buf", 0.05)),
+                brk_with_trend=bool(cfg.get("brk_with_trend", True)),
+
+                # Z-score
+                use_zscore=bool(cfg.get("use_zscore", False)),
+                z_len=int(cfg.get("z_len", 40)),
+                z_points=int(cfg.get("z_points", 100)),
+
+                use_live=bool(cfg.get("use_live", True)),
+                live_shock_pct=float(cfg.get("live_shock_pct", 1.0)),
+                live_shock_atr=float(cfg.get("live_shock_atr", 1.2)),
+                drift_max_ui=float(cfg.get("drift_max_pct", 0.0)),
+                max_open=int(cfg.get("max_open", 0)),
+                pause_new=bool(cfg.get("pause_new", False)),
+                auto_borrow=bool(cfg.get("auto_borrow", False)),
+                invert_ema=bool(cfg.get("invert_ema", False)),
+                ema_hyst_pct=float(cfg.get("ema_hyst_pct", 1.0)),
+            )
+
+            # FIXED vs ATR ütközés feloldása
+            if ns.use_fixed and ns.use_atr:
+                ns.use_fixed = False
+
+            return ns
 
         def _manage_positions_for_side(side: str):
             """
@@ -6395,10 +6618,11 @@ class CryptoBotApp:
 
             entry = float(pos['entry']); sz = float(pos['size'])
 
-            # symbol widget helyett cfg-ből
+            # symbol widget helyett cfg-ből – lock alatt olvasva
             try:
-                cfg_sym = getattr(self, "_mb_cfg", {}) or {}
-                symbol_safe = cfg_sym.get("symbol", DEFAULT_SYMBOL)
+                with self._mb_lock:
+                    cfg_sym = getattr(self, "_mb_cfg", {}) or {}
+                    symbol_safe = cfg_sym.get("symbol", DEFAULT_SYMBOL)
             except Exception:
                 symbol_safe = None
 
@@ -6448,21 +6672,23 @@ class CryptoBotApp:
             try:
                 import time as _t
                 try:
-                    cfg_sym = getattr(self, "_mb_cfg", {}) or {}
-                    symbol_safe = normalize_symbol(cfg_sym.get("symbol", DEFAULT_SYMBOL))
+                    with self._mb_lock:
+                        cfg_sym = getattr(self, "_mb_cfg", {}) or {}
+                        symbol_safe = normalize_symbol(cfg_sym.get("symbol", DEFAULT_SYMBOL))
                 except Exception:
                     symbol_safe = "UNKNOWN"
 
-                self._sim_history.append({
-                    "partial": True,
-                    "symbol": symbol_safe,
-                    "side": side,
-                    "entry": float(entry),
-                    "exit": float(px),
-                    "size_closed": float(close_sz),
-                    "pnl": float(pnl),
-                    "ts": _t.time(),
-                })
+                with self._mb_lock:
+                    self._sim_history.append({
+                        "partial": True,
+                        "symbol": symbol_safe,
+                        "side": side,
+                        "entry": float(entry),
+                        "exit": float(px),
+                        "size_closed": float(close_sz),
+                        "pnl": float(pnl),
+                        "ts": _t.time(),
+                    })
             except Exception:
                 pass
 
@@ -6529,66 +6755,61 @@ class CryptoBotApp:
         try:
             while self._mb_running:
                 try:
-                    # --- CFG beállítások beolvasása (NEM widget!) ---
-                    cfg = getattr(self, "_mb_cfg", {}) or {}
+                    # --- 1) CFG beállítások beolvasása egy helyről ---
+                    cfg_ns = _load_cfg()
 
-                    symbol = normalize_symbol(cfg.get("symbol", DEFAULT_SYMBOL))
-                    tf     = cfg.get("tf", "1m")
-                    fa     = int(cfg.get("ma_fast", 9))
-                    slw    = int(cfg.get("ma_slow", 21))
-                    sizep  = float(cfg.get("size_pct", 50.0))
-                    inpm   = cfg.get("input_mode", "quote")
-                    mode   = cfg.get("mode", "isolated")
-                    lev    = int(cfg.get("leverage", 10))
-                    tpct   = float(cfg.get("tp_pct", 2.0))
-                    spct   = float(cfg.get("sl_pct", 1.0))
-                    trpct  = float(cfg.get("trail_pct", 0.5))
-                    cd_s   = int(cfg.get("cooldown_s", 30))
-                    dry    = bool(cfg.get("dry", True))
-                    budget_ui = float(cfg.get("budget_ui", 0.0))
+                    symbol = cfg_ns.symbol
+                    tf     = cfg_ns.tf
+                    fa     = cfg_ns.fa
+                    slw    = cfg_ns.slw
+                    sizep  = cfg_ns.sizep
+                    inpm   = cfg_ns.inpm
+                    mode   = cfg_ns.mode
+                    lev    = cfg_ns.lev
+                    tpct   = cfg_ns.tpct
+                    spct   = cfg_ns.spct
+                    trpct  = cfg_ns.trpct
+                    cd_s   = cfg_ns.cd_s
+                    dry    = cfg_ns.dry
+                    budget_ui = cfg_ns.budget_ui
 
-                    # RSI / HTF / ATR / FIX / BRK
-                    use_rsi  = bool(cfg.get("use_rsi", False))
-                    rsi_len  = int(cfg.get("rsi_len", 14))
-                    rsi_bmin = float(cfg.get("rsi_bmin", 45.0))
-                    rsi_bmax = float(cfg.get("rsi_bmax", 70.0))
-                    rsi_smin = float(cfg.get("rsi_smin", 30.0))
-                    rsi_smax = float(cfg.get("rsi_smax", 55.0))
+                    use_rsi  = cfg_ns.use_rsi
+                    rsi_len  = cfg_ns.rsi_len
+                    rsi_bmin = cfg_ns.rsi_bmin
+                    rsi_bmax = cfg_ns.rsi_bmax
+                    rsi_smin = cfg_ns.rsi_smin
+                    rsi_smax = cfg_ns.rsi_smax
 
-                    use_htf = bool(cfg.get("use_htf", False))
-                    htf_tf  = cfg.get("htf_tf", "1h")
+                    use_htf = cfg_ns.use_htf
+                    htf_tf  = cfg_ns.htf_tf
 
-                    use_atr = bool(cfg.get("use_atr", False))
-                    atr_n   = int(cfg.get("atr_n", 14))
-                    mul_sl  = float(cfg.get("atr_mul_sl", 1.2))
-                    mul_tp1 = float(cfg.get("atr_mul_tp1", 1.5))
-                    mul_tp2 = float(cfg.get("atr_mul_tp2", 2.5))
-                    mul_tr  = float(cfg.get("atr_mul_tr", 0.9))
+                    use_atr = cfg_ns.use_atr
+                    atr_n   = cfg_ns.atr_n
+                    mul_sl  = cfg_ns.mul_sl
+                    mul_tp1 = cfg_ns.mul_tp1
+                    mul_tp2 = cfg_ns.mul_tp2
+                    mul_tr  = cfg_ns.mul_tr
 
-                    use_fixed = bool(cfg.get("use_fixed", False))
+                    use_fixed = cfg_ns.use_fixed
 
-                    use_brk   = bool(cfg.get("use_brk", False))
-                    brk_n     = int(cfg.get("brk_n", 20))
-                    brk_buf   = float(cfg.get("brk_buf", 0.05))
-                    brk_with_trend = bool(cfg.get("brk_with_trend", True))
+                    use_brk   = cfg_ns.use_brk
+                    brk_n     = cfg_ns.brk_n
+                    brk_buf   = cfg_ns.brk_buf
+                    brk_with_trend = cfg_ns.brk_with_trend
 
-                    if use_fixed and use_atr:
-                        use_fixed = False
+                    use_zscore = cfg_ns.use_zscore
+                    z_len      = cfg_ns.z_len
+                    z_points   = cfg_ns.z_points
 
-                    # Z-score filter
-                    use_zscore = bool(cfg.get("use_zscore", False))
-                    z_len      = int(cfg.get("z_len", 40))
-                    z_points   = int(cfg.get("z_points", 100))
-
-                    use_live       = bool(cfg.get("use_live", True))
-                    live_shock_pct = float(cfg.get("live_shock_pct", 1.0))
-                    live_shock_atr = float(cfg.get("live_shock_atr", 1.2))
-                    drift_max_ui   = float(cfg.get("drift_max_pct", 0.0))
-                    max_open       = int(cfg.get("max_open", 0))
-                    pause_new      = bool(cfg.get("pause_new", False))
-                    auto_borrow    = bool(cfg.get("auto_borrow", False))
-                    invert_ema     = bool(cfg.get("invert_ema", False))
-                    ema_hyst_pct   = float(cfg.get("ema_hyst_pct", 1.0))
+                    use_live       = cfg_ns.use_live
+                    live_shock_pct = cfg_ns.live_shock_pct
+                    live_shock_atr = cfg_ns.live_shock_atr
+                    drift_max_ui   = cfg_ns.drift_max_ui
+                    max_open       = cfg_ns.max_open
+                    pause_new      = cfg_ns.pause_new
+                    auto_borrow    = cfg_ns.auto_borrow
+                    invert_ema     = cfg_ns.invert_ema
+                    ema_hyst_pct   = cfg_ns.ema_hyst_pct
 
                     # --- K-Line WS: ÖSSZES szükséges TF egy helyen ---
                     required_tfs = [tf]
@@ -6624,7 +6845,7 @@ class CryptoBotApp:
                         pass
 
                     # --- OHLCV frissítés csak ha új candle jött ---  ### WS-REST-OPT
-                    now_ts = int(time.time())
+                    now_ts = _safe_now_ts()
 
                     # gyertya hossza másodpercben
                     tf_sec = {
@@ -6705,9 +6926,10 @@ class CryptoBotApp:
                     # --- cache-eljük a realtime árakat más funkcióknak is (manual close / PnL / history) ---
                     try:
                         if self._is_pos_num(last_px_rt) and last_px_rt > 0:
-                            if not hasattr(self, "_mb_last_rt_px"):
-                                self._mb_last_rt_px = {}
-                            self._mb_last_rt_px[symbol] = float(last_px_rt)
+                            with self._mb_lock:
+                                if not hasattr(self, "_mb_last_rt_px"):
+                                    self._mb_last_rt_px = {}
+                                self._mb_last_rt_px[symbol] = float(last_px_rt)
 
                             # History floating PnL frissítése ugyanazzal a rt-vel (Tk főszálon)
                             try:
@@ -6728,7 +6950,9 @@ class CryptoBotApp:
                     except Exception:
                         drift_pct = float("nan")
 
-                    open_now = len(self._sim_pos_long) + len(self._sim_pos_short)
+                    # pozíciók száma lock alatt, mert GUI is módosíthat
+                    with self._mb_lock:
+                        open_now = len(self._sim_pos_long) + len(self._sim_pos_short)
 
                     atr_val = None
                     if use_atr:
@@ -6861,92 +7085,111 @@ class CryptoBotApp:
                                 combined_sig = "hold"
                     # --- /Z-score filter ---
 
-                    try:
-                        now_ts = int(time.time())
-                    except Exception:
-                        now_ts = 0
-                    cd_left = 0
-                    try:
-                        cd_left = max(0, cd_s - (now_ts - self._mb_last_cross_ts))
-                    except Exception:
-                        pass
+                    # --- Cooldown + drift + hold okok + filters sor ---
 
-                    filters_line = (
-                        f"filters: rsi={'ON' if use_rsi else 'OFF'}"
-                        + (f"[buy:{rsi_bmin:.1f}-{rsi_bmax:.1f} sell:{rsi_smin:.1f}-{rsi_smax:.1f}]" if use_rsi else "")
-                        + f", htf={'ON' if use_htf else 'OFF'}({trend_htf:+d})"
-                        + f", brk={'ON' if use_brk else 'OFF'}"
-                        + f", live_px={'ON' if use_live else 'OFF'}"
-                        + f", zscore={'ON' if use_zscore else 'OFF'}"
-                        + f", cd_left={cd_left}s"
-                    )
+                    # cooldown (cd_left + cd_ok)
+                    cd_left, cd_ok = _cooldown_status(self._mb_last_cross_ts, cd_s)
 
+                    # EMA trend
                     ema_up = (ef_l > es_l)
                     ema_dn = (ef_l < es_l)
+
+                    # RSI blokkolás
                     rsi_ok_buy = True
                     rsi_ok_sell = True
                     if use_rsi and rsi_val is not None:
                         rsi_ok_buy  = (rsi_bmin <= rsi_val <= rsi_bmax)
                         rsi_ok_sell = (rsi_smin <= rsi_val <= rsi_smax)
 
-                    drift_ok = True
-                    drift_over_txt = None
-                    try:
-                        if drift_max_ui > 0 and drift_pct == drift_pct:
-                            drift_ok = (abs(drift_pct) <= drift_max_ui)
-                            if not drift_ok:
-                                drift_over_txt = f"drift>{drift_max_ui:.2f}%"
-                    except Exception:
-                        pass
+                    # drift státusz
+                    drift_ok, drift_over_txt = _drift_status(drift_pct, drift_max_ui)
 
-                    cd_ok = True
-                    try:
-                        now_ts = int(time.time())
-                        cd_ok = (now_ts - self._mb_last_cross_ts) >= cd_s
-                    except Exception:
-                        pass
+                    # HTF blokk (EMA jel HTF miatt lett HOLD)
+                    htf_block = (use_htf and sig_raw in ("buy", "sell") and (sig == "hold"))
 
-                    htf_block = (use_htf and sig_raw in ('buy','sell') and (sig == 'hold'))
-
-                    reasons = []
-                    if not (ema_up or ema_dn):
-                        reasons.append("no_ema_trend")
-                    if not cd_ok:
-                        reasons.append("cooldown")
-                    if drift_over_txt and not drift_ok:
-                        reasons.append(drift_over_txt)
-                    if ema_up and not rsi_ok_buy:
-                        reasons.append("rsi_block_buy")
-                    if ema_dn and not rsi_ok_sell:
-                        reasons.append("rsi_block_sell")
-                    if htf_block:
-                        reasons.append("htf_block")
-                    # ha az eredeti jel buy/sell volt, de a Z-score filterből HOLD lett:
-                    if use_zscore and combined_sig_raw in ("buy", "sell") and combined_sig == "hold":
-                        reasons.append("zscore_block")
-
-                    log_line = (
-                        f"[{symbol} {tf}] Élő ár={last_px_rt:.6f} Gyertya ár={last_px:.6f} "
-                        f"EMA({fa})={ef_l:.4f}/EMA({slw})={es_l:.4f}"
+                    # HOLD okok
+                    reasons = _build_hold_reasons(
+                        ema_up=ema_up,
+                        ema_dn=ema_dn,
+                        cd_ok=cd_ok,
+                        drift_ok=drift_ok,
+                        drift_over_txt=drift_over_txt,
+                        rsi_ok_buy=rsi_ok_buy,
+                        rsi_ok_sell=rsi_ok_sell,
+                        htf_block=htf_block,
+                        use_zscore=use_zscore,
+                        combined_sig_raw=combined_sig_raw,
+                        combined_sig=combined_sig,
                     )
-                    if use_htf:
-                        log_line += f" HTF={trend_htf:+d}"
-                    if use_rsi and rsi_val is not None:
-                        log_line += f" RSI({rsi_len})={rsi_val:.2f}"
-                    if use_brk and not (math.isnan(hh) or math.isnan(ll)):
-                        log_line += f" BRK[{brk_n}] HH={hh:.4f} LL={ll:.4f} ↑{up_lvl:.4f} ↓{dn_lvl:.4f}"
-                    if drift_pct == drift_pct:
-                        log_line += f" drift={drift_pct:.2f}%"
-                    log_line += f" | POOL used/bal={self._pool_used_quote:.2f}/{self._pool_balance_quote:.2f}"
-                    log_line += f" | OPEN={open_now}/{('∞' if max_open==0 else max_open)}"
 
-                    # Ha HOLD és vannak okok, fűzzük hozzá a sor végére, ne külön sorba.
-                    if combined_sig in (None, "", "hold") and reasons:
-                        log_line += " | hold_reasons=" + ",".join(reasons)
+                    # filters összefoglaló sor
+                    filters_line = _build_filters_line(
+                        use_rsi=use_rsi,
+                        rsi_bmin=rsi_bmin,
+                        rsi_bmax=rsi_bmax,
+                        rsi_smin=rsi_smin,
+                        rsi_smax=rsi_smax,
+                        use_htf=use_htf,
+                        trend_htf=trend_htf,
+                        use_brk=use_brk,
+                        use_live=use_live,
+                        use_zscore=use_zscore,
+                        cd_left=cd_left,
+                    )
+
+                    # --- Log sor felépítés + hold_from + logolási policy ---
+                    # pool snapshot loghoz – pool attr-ok olvasása lock alatt
+                    with self._mb_lock:
+                        pool_used_for_log = float(self._pool_used_quote)
+                        pool_bal_for_log  = float(self._pool_balance_quote)
+
+                    log_line = _log_status_line(
+                        symbol=symbol,
+                        tf=tf,
+                        fa=fa,
+                        slw=slw,
+                        last_px=last_px,
+                        last_px_rt=last_px_rt,
+                        ef_l=ef_l,
+                        es_l=es_l,
+                        use_htf=use_htf,
+                        trend_htf=trend_htf,
+                        use_rsi=use_rsi,
+                        rsi_len=rsi_len,
+                        rsi_val=rsi_val,
+                        use_brk=use_brk,
+                        brk_n=brk_n,
+                        hh=hh,
+                        ll=ll,
+                        up_lvl=up_lvl,
+                        dn_lvl=dn_lvl,
+                        drift_pct=drift_pct,
+                        open_now=open_now,
+                        max_open=max_open,
+                        pool_used=pool_used_for_log,
+                        pool_balance=pool_bal_for_log,
+                    )
+
+                    # melyik jelből lett HOLD? (amúgy buy/sell)
+                    orig_sig = None
+                    if combined_sig_raw in ("buy", "sell"):
+                        orig_sig = combined_sig_raw
+                    elif sig_raw in ("buy", "sell"):
+                        orig_sig = sig_raw
+
+                    # Ha HOLD, akkor fűzzük hozzá a "hold_from" + okok
+                    if combined_sig in (None, "", "hold"):
+                        extras = []
+                        if orig_sig in ("buy", "sell"):
+                            extras.append(f"hold_from={orig_sig}")
+                        if reasons:
+                            extras.append("hold_reasons=" + ",".join(reasons))
+                        if extras:
+                            log_line += " | " + " ".join(extras)
 
                     # ================== STÁTUSZ LOG VEZÉRLÉS (JAVÍTOTT) ==================
                     verbose_on = bool(getattr(self, "_mb_log_verbose", False))
-                    
+
                     # Előző állapot lekérése a dedup-hoz
                     last_sig_log = getattr(self, "_mb_last_status_sig", "")
                     last_px_log  = float(getattr(self, "_mb_last_status_px", 0.0) or 0.0)
@@ -6960,25 +7203,23 @@ class CryptoBotApp:
                                 self._safe_log(
                                     log_line.rstrip() + f"  → {combined_sig} | {filters_line}\n"
                                 )
-                        
+
                         # Állapot frissítése a következő körhöz
                         self._mb_last_status_sig = combined_sig
                         self._mb_last_status_px  = float(last_px_rt or last_px or 0.0)
-                        
-                        # FONTOS: Itt NEM használunk continue-t, hogy a kód tovább tudjon menni 
-                        # a lenti pozíció-menedzsmentre és új nyitásra!
 
                     # 2) Ha BE van kapcsolva a részletes log (VERBOSE ON)
                     else:
                         try:
                             delay_s = int(getattr(self, "_mb_log_delay", 5))
-                            if delay_s <= 0: delay_s = 5
+                            if delay_s <= 0:
+                                delay_s = 5
                         except Exception:
                             delay_s = 5
 
                         should_log = True
                         try:
-                            now_ts_log   = int(time.time())
+                            now_ts_log   = _safe_now_ts()
                             last_ts_log  = getattr(self, "_mb_last_status_log_ts", 0)
 
                             if combined_sig in ("buy", "sell"):
@@ -7050,18 +7291,18 @@ class CryptoBotApp:
                                 # 1. A részletes logolás (verbose) BE van kapcsolva
                                 # 2. ÉS eltelt legalább 30 másodperc az utolsó ilyen üzenet óta
                                 
-                                now_ts = int(time.time())
+                                now_ts_skip = int(time.time())
                                 last_skip_ts = getattr(self, "_mb_last_skip_log_ts", 0)
                                 
                                 # Itt állíthatod a ritkítást (most 30 másodperc)
-                                if verbose_on and (now_ts - last_skip_ts > 30):
+                                if verbose_on and (now_ts_skip - last_skip_ts > 30):
                                     self._safe_log(
                                         f"⏭ {combined_sig.upper()} jel átugorva: már van nyitott "
                                         f"{combined_sig.upper()} pozíció hasonló áron "
                                         f"(entry={existing_entry:.6f}, now={last_px_rt:.6f}, "
                                         f"diff={diff_pct:.3f}%, tol={tol_pct_val:.3f}%). (Ritkítva 30s)\n"
                                     )
-                                    self._mb_last_skip_log_ts = now_ts
+                                    self._mb_last_skip_log_ts = now_ts_skip
                                 
                                 opened = False
                                 time.sleep(1)
@@ -7076,7 +7317,11 @@ class CryptoBotApp:
                             except Exception:
                                 pass
 
-                        free_pool = max(0.0, self._pool_balance_quote - self._pool_used_quote)
+                        # keret snapshot lock alatt
+                        with self._mb_lock:
+                            _pool_bal = float(self._pool_balance_quote)
+                            _pool_used = float(self._pool_used_quote)
+                        free_pool = max(0.0, _pool_bal - _pool_used)
                         sizep_to_use = max(0.0, min(100.0, float(sizep)))
 
                         size = None
