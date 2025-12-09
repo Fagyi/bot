@@ -30,7 +30,7 @@ import websocket  # websocket-client
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 from tkinter import font as tkfont
-from decimal import Decimal, ROUND_DOWN, ROUND_UP, getcontext
+from decimal import Decimal, ROUND_DOWN, ROUND_UP, getcontext, ROUND_FLOOR, ROUND_CEILING, InvalidOperation
 import ttkbootstrap as tb
 
 # Matplotlib
@@ -951,6 +951,25 @@ class KucoinSDKWrapper:
         self._price_cache = {}
         self._price_ttl = 3.0
 
+    # --- DECIMAL HELPEREK KUCOIN AMOUNT/PRICE FORMÁZÁSHOZ ---
+    def _dec_floor(self, x, step: Decimal | None = None) -> Decimal:
+        """
+        x-et step-re padlózza Decimal-ben. Ha step None vagy <=0 → csak Decimal(x).
+        """
+        x_dec = D(x)
+        if not step or D(step) <= 0:
+            return x_dec
+        step_dec = D(step)
+        return (x_dec // step_dec) * step_dec
+
+    def _dec_str(self, x: Decimal) -> str:
+        """
+        KuCoin felé küldhető decimális string (felesleges nullák nélkül).
+        """
+        # normalize → tudja leszedni a fölös nullákat, de nem exponenciális formában küldünk
+        x_n = x.normalize()
+        return format(x_n, "f")
+
     # ----- Symbols meta -----
     def _fetch_symbols_meta(self) -> Dict[str, Dict[str, Decimal]]:
         """
@@ -1088,11 +1107,16 @@ class KucoinSDKWrapper:
         from_type / to_type: 'MAIN', 'TRADE', 'MARGIN', 'ISOLATED', 'MARGIN_V2', 'ISOLATED_V2'
         symbol: csak ISOLATED/ISOLATED_V2 esetén kötelező (pl. 'SOL-USDT')
         """
+        # --- Decimal amount safe ---
+        amt_dec = D(amount)
+        # 8 tizedes bőven elég a transferhez, lefelé kerekítve
+        amt_dec = amt_dec.quantize(D("0.00000001"), rounding=ROUND_DOWN)
+
         body = {
             "clientOid": uuid.uuid4().hex,
             "type": transfer_type,           # INTERNAL = saját számláid között
             "currency": currency.upper(),
-            "amount": str(amount),
+            "amount": self._dec_str(amt_dec),
             "fromAccountType": from_type,
             "toAccountType": to_type,
         }
@@ -1308,16 +1332,25 @@ class KucoinSDKWrapper:
         if self.public_mode: raise RuntimeError("Publikus módban nem küldhető order.")
         if not (size_base or funds_quote):
             raise ValueError("Adj meg legalább 'size_base' vagy 'funds_quote' értéket.")
+
+        meta = self.get_symbol_meta(symbol)
+        base_step = meta.get("baseInc", D("0.00000001"))
+        quote_step = meta.get("quoteInc", D("0.00000001"))
+
         body = {
             "clientOid": uuid.uuid4().hex,
             "symbol": symbol,
             "side": side,
-            "type": "market"
+            "type": "market",
         }
         if size_base is not None:
-            body["size"] = str(size_base)
+            size_dec = self._dec_floor(size_base, base_step)
+            if size_dec > 0:
+                body["size"] = self._dec_str(size_dec)
         if funds_quote is not None:
-            body["funds"] = str(funds_quote)
+            funds_dec = self._dec_floor(funds_quote, quote_step)
+            if funds_dec > 0:
+                body["funds"] = self._dec_str(funds_dec)
         return self._rest_post("/api/v1/orders", body)
 
     # ----- Margin order (HF margin endpoint) -----
@@ -1333,15 +1366,40 @@ class KucoinSDKWrapper:
             if mode == "cross": leverage = min(int(leverage), 5)
             else: leverage = min(int(leverage), 10)
 
-        body = {
-            "clientOid": uuid.uuid4().hex, "symbol": symbol, "side": side, "type": "market",
-            "isIsolated": (mode == "isolated"), "autoBorrow": bool(auto_borrow), "autoRepay": bool(auto_repay),
+        # --- Symbol meta → lépésközök Decimal-ben ---
+        meta = self.get_symbol_meta(symbol)
+        base_step: Decimal = meta.get("baseInc", D("0.00000001"))
+        quote_step: Decimal = meta.get("quoteInc", D("0.00000001"))
+
+        body: dict[str, Any] = {
+            "clientOid": uuid.uuid4().hex,
+            "symbol": symbol,
+            "side": side,
+            "type": "market",
+            "isIsolated": (mode == "isolated"),
+            "autoBorrow": bool(auto_borrow),
+            "autoRepay": bool(auto_repay),
         }
+
+        # --- Size (BASE) padlózása lot_step-re ---
         if size_base is not None:
-            body["size"] = str(size_base)
+            size_dec_in = D(size_base)
+            size_dec = self._dec_floor(size_dec_in, base_step)
+            if size_dec <= 0:
+                raise ValueError("A számolt BASE méret 0 vagy negatív a lot_step padlózás után.")
+            body["size"] = self._dec_str(size_dec)
+
+        # --- Funds (QUOTE) padlózása quote_step-re ---
         if funds_quote is not None:
-            body["funds"] = str(funds_quote)
-        if leverage is not None: body["leverage"] = leverage
+            funds_dec_in = D(funds_quote)
+            funds_dec = self._dec_floor(funds_dec_in, quote_step)
+            if funds_dec <= 0:
+                raise ValueError("A számolt QUOTE funds 0 vagy negatív a quote_step padlózás után.")
+            body["funds"] = self._dec_str(funds_dec)
+
+        if leverage is not None:
+            body["leverage"] = leverage
+
         return self._rest_post("/api/v3/hf/margin/order", body)
 
     def get_margin_fills_by_order(
@@ -1394,8 +1452,15 @@ class KucoinSDKWrapper:
         Main <-> Trade (spot) közti átvezetés.
         from_type/to_type: 'main' | 'trade'
         """
-        body = {"clientOid": uuid.uuid4().hex, "currency": currency, "amount": str(amount),
-                "from": from_type, "to": to_type}
+        amt_dec = D(amount).quantize(D("0.00000001"), rounding=ROUND_DOWN)
+        body = {
+            "clientOid": uuid.uuid4().hex,
+            "currency": currency,
+            "amount": self._dec_str(amt_dec),
+            "from": from_type,
+            "to": to_type,
+        }
+
         return self._rest_post("/api/v2/accounts/inner-transfer", body)
 
 # ========= GUI =========
@@ -5372,57 +5437,93 @@ class CryptoBotApp:
         """
         # --- Market lépésközök / min értékek beolvasása ---
         try:
-            lot_step, price_step, min_base, min_funds, quote_step = self._mb_get_market_steps(symbol)
+            lot_step_f, price_step_f, min_base_f, min_funds_f, quote_step_f = self._mb_get_market_steps(symbol)
         except Exception:
-            lot_step = price_step = None
-            min_base = min_funds = None
-            quote_step = 0.01
+            lot_step_f = price_step_f = None
+            min_base_f = min_funds_f = None
+            quote_step_f = 0.01
 
-        # --- Locale-safe Decimal padlózás helper ---
-        def _floor_dec(x: float, step: float) -> float:
+        # --- float → Decimal normalizálás ---
+        def _to_dec_or_none(v):
+            if v is None:
+                return None
+            try:
+                return D(v)
+            except Exception:
+                try:
+                    return D(str(v))
+                except Exception:
+                    return None
+
+        lot_step   = _to_dec_or_none(lot_step_f)   if lot_step_f   else None
+        price_step = _to_dec_or_none(price_step_f) if price_step_f else None
+        min_base   = _to_dec_or_none(min_base_f)   if min_base_f   else None
+        min_funds  = _to_dec_or_none(min_funds_f)  if min_funds_f  else None
+        quote_step = _to_dec_or_none(quote_step_f) if quote_step_f else _to_dec_or_none("0.01")
+
+        if lot_step is not None and lot_step <= 0:
+            lot_step = None
+        if price_step is not None and price_step <= 0:
+            price_step = None
+        if quote_step is not None and quote_step <= 0:
+            quote_step = None
+
+        sb = _to_dec_or_none(size_base)
+        fq = _to_dec_or_none(funds_quote)
+        px = _to_dec_or_none(price)
+
+        # --- Decimal floor/ceil helper lépésközre ---
+        def _floor_dec_dec(x: Decimal | None, step: Decimal | None) -> Decimal | None:
+            if x is None:
+                return None
             if not step or step <= 0:
-                return float(x)
-            from decimal import Decimal
-            q = Decimal(str(step))
-            return float((Decimal(str(x)) // q) * q)
+                return x
+            try:
+                q = step
+                return (x / q).to_integral_value(rounding=ROUND_FLOOR) * q
+            except (InvalidOperation, ZeroDivisionError):
+                return None
 
-        def _ceil_dec(x: float, step: float) -> float:
+        def _ceil_dec_dec(x: Decimal | None, step: Decimal | None) -> Decimal | None:
+            if x is None:
+                return None
             if not step or step <= 0:
-                return float(x)
-            from decimal import Decimal, ROUND_CEILING
-            q = Decimal(str(step))
-            return float((Decimal(str(x)).quantize(q, rounding=ROUND_CEILING)))
+                return x
+            try:
+                q = step
+                return (x / q).to_integral_value(rounding=ROUND_CEILING) * q
+            except (InvalidOperation, ZeroDivisionError):
+                return None
 
-        sb = size_base
-        fq = funds_quote
-
-        safety = 1.0
+        # --- Safety faktor (Decimal-ben) ---
+        safety = D("1.0")
         try:
             import os
-            safety = float(os.getenv("MB_CLOSE_FUNDS_SAFETY", "1.015"))  # +1.5% alapértelmezett ráhagyás
-            if safety < 1.0:
-                safety = 1.0
+            s_raw = os.getenv("MB_CLOSE_FUNDS_SAFETY", "1.015")
+            safety = D(str(s_raw))
+            if safety < D("1"):
+                safety = D("1")
         except Exception:
-            safety = 1.015
- 
+            safety = D("1.015")
+
         # --- BUY oldali speciális ág: ha nincs funds, de van size és ár → size→funds konverzió záráshoz ---
         #     Cél: Market BUY-hoz a tőzsde funds-ot vár; a worker és a live close size-ot ad át → itt alakítjuk át.
-        if side == "buy" and fq is None and sb is not None and price and price > 0:
+        if side == "buy" and fq is None and sb is not None and px is not None and px > 0:
             try:
                 # 1) a size-et előbb lot_step-re padlózzuk
                 if lot_step:
-                    sb = _floor_dec(float(sb), float(lot_step))
+                    sb = _floor_dec_dec(sb, lot_step)
                 if sb is not None and sb > 0:
                     # 2) funds becslés: size * price * safety, quote_step-re felfelé kerekítve
-                    est_f = float(sb) * float(price) * float(safety)
-                    fq = _ceil_dec(est_f, float(quote_step or 0.0))
+                    est_f = sb * px * safety
+                    fq = _ceil_dec_dec(est_f, quote_step)
                     # 3) minFunds guard
-                    if min_funds and fq < float(min_funds):
+                    if fq is not None and min_funds and fq < min_funds:
                         fq = None
                     # 4) minBase guard visszaellenőrzéssel: (floor(fq/price, lot_step) >= min_base)
-                    if fq is not None and lot_step and price and price > 0 and min_base:
-                        est_size = _floor_dec(float(fq) / float(price), float(lot_step))
-                        if float(est_size) < float(min_base):
+                    if fq is not None and lot_step and px is not None and px > 0 and min_base:
+                        est_size = _floor_dec_dec(fq / px, lot_step)
+                        if est_size is None or est_size < min_base:
                             fq = None
                     # BUY marketnél innentől funds az elsődleges, a size-ot nem küldjük
                     sb = None
@@ -5430,13 +5531,11 @@ class CryptoBotApp:
                 # ha bármi gond, essünk vissza az eredeti (alább lévő) ágakra
                 pass
 
-
         # --- BASE (méret) tisztítás (SELL oldali küldéshez) ---
         if sb is not None:
             try:
                 if lot_step:
-                    sb = _floor_dec(float(sb), float(lot_step))
-                sb = float(sb)
+                    sb = _floor_dec_dec(sb, lot_step)
             except Exception:
                 sb = None
 
@@ -5444,7 +5543,7 @@ class CryptoBotApp:
             try:
                 if sb is None or sb <= 0:
                     sb = None
-                elif min_base and float(sb) < float(min_base):
+                elif min_base and sb < min_base:
                     sb = None
             except Exception:
                 sb = None
@@ -5452,19 +5551,18 @@ class CryptoBotApp:
         # --- FUNDS (QUOTE) tisztítás (BUY oldali küldéshez) ---
         if fq is not None:
             try:
-                fq = float(fq)
                 if fq <= 0:
                     fq = None
                 else:
                     # exchange szerinti quote_step-re padlózás (nem fix 0.01!)
-                    fq = _floor_dec(fq, float(quote_step))
+                    fq = _floor_dec_dec(fq, quote_step)
                     # minFunds guard – ha alatta, eldob
-                    if min_funds and fq < float(min_funds):
+                    if fq is not None and min_funds and fq < min_funds:
                         fq = None
                     # minBase guard a funds→méret becslésével (ha van ár)
-                    if fq is not None and price and price > 0 and lot_step:
-                        est_size = _floor_dec(fq / float(price), float(lot_step))
-                        if min_base and est_size < float(min_base):
+                    if fq is not None and px is not None and px > 0 and lot_step:
+                        est_size = _floor_dec_dec(fq / px, lot_step)
+                        if est_size is not None and min_base and est_size < min_base:
                             fq = None
             except Exception:
                 fq = None
@@ -5472,7 +5570,11 @@ class CryptoBotApp:
         # Ha mindkettő None → nem küldhető
         if sb is None and fq is None:
             return None, None
-        return sb, fq
+
+        # Visszatérés float-ként, hogy a meglévő kódot ne kelljen átírni
+        sb_out = float(sb) if sb is not None else None
+        fq_out = float(fq) if fq is not None else None
+        return sb_out, fq_out
 
     def mb_start(self):
         """Margin bot indítás (dry-runban is futhat)."""
@@ -7862,7 +7964,21 @@ class CryptoBotApp:
                     cap_quote = budget_quote if budget_quote > 0 else avail_quote
                 else:
                     if auto_borrow:
-                        cap_quote = budget_quote if budget_quote > 0 else avail_quote
+                        if budget_quote > 0:
+                            # Kiemelten: AUTO-BORROW + BUDGET → avail_quote teljesen ignorálva
+                            cap_quote = budget_quote
+                        else:
+                            # NINCS budget UI → konzervatív fallback: marad az avail_quote,
+                            # de logoljuk, hogy a teljes hitelkeretet NEM használja ki.
+                            cap_quote = avail_quote
+                            try:
+                                self._safe_log(
+                                    "ℹ️ AUTO-BORROW aktív, de mb_budget=0. "
+                                    "A méretezés csak az elérhető QUOTE egyenleget veszi figyelembe, "
+                                    "a teljes hitelkeretet nem.\n"
+                                )
+                            except Exception:
+                                pass
                     else:
                         if budget_quote > 0:
                             cap_quote = min(avail_quote, budget_quote)
@@ -7932,7 +8048,6 @@ class CryptoBotApp:
         """Decimal-al padlózzuk a mennyiséget a lépésközre (float hibák nélkül)."""
         if step <= 0: 
             return float(x)
-        from decimal import Decimal
         q = Decimal(str(step))
         return float((Decimal(str(x)) // q) * q)
 
