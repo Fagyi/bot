@@ -25,6 +25,7 @@ import requests
 import pandas as pd
 import numpy as np
 import websocket  # websocket-client
+import sqlite3
 
 # Tkinter
 import tkinter as tk
@@ -116,6 +117,130 @@ def split_symbol(s: str) -> tuple[str, str]:
         raise ValueError(f"Érvénytelen symbol: '{s}' (várt forma: BASE-QUOTE)")
     base, quote = s.split("-", 1)
     return base, quote
+
+class BotDatabase:
+    def __init__(self, db_name="bot_trades.db"):
+        self.db_name = db_name
+        self._init_db()
+
+    def _init_db(self):
+        """Létrehozza a táblát, ha nem létezik."""
+        conn = sqlite3.connect(self.db_name)
+        c = conn.cursor()
+        # Tároljuk a pozíció minden lényeges adatát.
+        # Az 'extra_data' egy JSON mező lesz a flexibilis adatoknak (pl. SL, TP, peak, mgmt mode).
+        c.execute('''CREATE TABLE IF NOT EXISTS trades (
+                        order_id TEXT PRIMARY KEY,
+                        symbol TEXT,
+                        side TEXT,
+                        entry_price REAL,
+                        size REAL,
+                        commit_usdt REAL,
+                        fee_reserved REAL,
+                        status TEXT,
+                        timestamp REAL,
+                        extra_data TEXT
+                    )''')
+        conn.commit()
+        conn.close()
+
+    def add_position(self, pos: dict):
+        """Új nyitott pozíció mentése."""
+        conn = sqlite3.connect(self.db_name)
+        c = conn.cursor()
+
+        # Kiemeljük a fix mezőket, a többit JSON-be csomagoljuk
+        extra = {k: v for k, v in pos.items() if k not in
+                 ['oid', 'order_id', 'id', 'symbol', 'side', 'entry', 'size', 'commit_usdt', 'fee_reserved', 'ts']}
+
+        # Biztosítjuk, hogy legyen order_id
+        oid = str(pos.get('oid') or pos.get('order_id') or pos.get('id') or f"sim_{pos.get('ts')}")
+
+        try:
+            c.execute('''INSERT OR REPLACE INTO trades
+                         (order_id, symbol, side, entry_price, size, commit_usdt, fee_reserved, status, timestamp, extra_data)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                      (oid,
+                       pos.get('symbol', ''), # Ha nincs a pos-ban symbol, majd update-eljük
+                       pos.get('side'),
+                       float(pos.get('entry', 0)),
+                       float(pos.get('size', 0)),
+                       float(pos.get('commit_usdt', 0)),
+                       float(pos.get('fee_reserved', 0)),
+                       'OPEN',
+                       float(pos.get('ts', 0) or 0),
+                       json.dumps(extra)
+                      ))
+            conn.commit()
+        except Exception as e:
+            print(f"DB Error add_position: {e}")
+        finally:
+            conn.close()
+
+    def close_position(self, order_id: str, exit_price: float, pnl: float, reason: str):
+        """Pozíció státuszának frissítése CLOSED-ra."""
+        conn = sqlite3.connect(self.db_name)
+        c = conn.cursor()
+
+        # Frissítjük a JSON adatot is a zárási infókkal
+        try:
+            c.execute("SELECT extra_data FROM trades WHERE order_id=?", (str(order_id),))
+            row = c.fetchone()
+            if row:
+                data = json.loads(row[0])
+                data.update({'exit_price': exit_price, 'pnl': pnl, 'close_reason': reason, 'closed_at': _time.time()})
+                c.execute('''UPDATE trades
+                             SET status='CLOSED', extra_data=?
+                             WHERE order_id=?''', (json.dumps(data), str(order_id)))
+                conn.commit()
+        except Exception as e:
+            print(f"DB Error close_position: {e}")
+        finally:
+            conn.close()
+
+    def get_open_positions(self):
+        """Visszaadja az összes OPEN státuszú pozíciót dict listaként."""
+        conn = sqlite3.connect(self.db_name)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM trades WHERE status='OPEN'")
+        rows = c.fetchall()
+        conn.close()
+
+        positions = []
+        for row in rows:
+            # Visszaépítjük a dict-et a bot számára
+            pos = {
+                'oid': row['order_id'],
+                'symbol': row['symbol'], # Fontos, hogy mentsük a symbolt
+                'side': row['side'],
+                'entry': row['entry_price'],
+                'size': row['size'],
+                'commit_usdt': row['commit_usdt'],
+                'fee_reserved': row['fee_reserved'],
+                'ts': row['timestamp']
+            }
+            # Extra adatok (sl, tp, peak, mgmt, stb.) visszamergelése
+            if row['extra_data']:
+                try:
+                    extra = json.loads(row['extra_data'])
+                    pos.update(extra)
+                except:
+                    pass
+            positions.append(pos)
+        return positions
+
+    def update_position_size(self, order_id: str, new_size: float, new_commit: float):
+        conn = sqlite3.connect(self.db_name)
+        c = conn.cursor()
+        try:
+            c.execute("UPDATE trades SET size=?, commit_usdt=? WHERE order_id=?",
+                      (new_size, new_commit, str(order_id)))
+            conn.commit()
+        except Exception as e:
+            print(f"DB Update Error: {e}")
+        finally:
+            conn.close()
 
 class KucoinTickerWS:
     """
@@ -1818,6 +1943,9 @@ class CryptoBotApp:
         self._mt_price_job = None
         self._mt_start_price_loop()
         self._mt_on_input_change()
+
+        # Adatbázis kezelés
+        self.db = BotDatabase()
 
         # --- Margin Bot (auto) ---
         self._build_margin_bot_tab()
@@ -5734,29 +5862,66 @@ class CryptoBotApp:
         if not hasattr(self, "_mb_lock"):
             self._mb_lock = threading.Lock()
 
-        # --- Reset minden futás előtt ---  (LOCK ALATT)
+        # --- Reset és DB betöltés ---  (LOCK ALATT)
         with self._mb_lock:
+            # 1. Lista reset, mint eddig
             self._sim_pos_long = []
             self._sim_pos_short = []
             self._sim_history = []
             self._sim_pnl_usdt = 0.0
 
-            # --- Hard reset minden run előtt (különösen pool és bar state) ---
-            # töröljük, hogy a worker ÚJRA építse a keretet
+            # Pool attribútumok törlése, hogy a worker újraépítse
             try:
                 delattr(self, "_pool_balance_quote")
-            except Exception:
-                pass
-            try:
                 delattr(self, "_pool_used_quote")
             except Exception:
                 pass
 
-            # azonnali aktivitás – ne szűrje ki "ugyanaz a gyertya"
-            self._mb_last_bar_ts = {}
-            # opcionális cache-ek nullázása (ha korábban be lettek vezetve)
+            # Egyéb belső állapotok resetje (meglévő kódod)
+            if hasattr(self, "_mb_last_bar_ts"):
+                self._mb_last_bar_ts = {}
             if hasattr(self, "_mb_last_rt_px"):
                 self._mb_last_rt_px = {}
+
+            # 2. ÚJ RÉSZ: Pozíciók betöltése DB-ből
+            used_capital = 0.0
+            try:
+                open_trades = self.db.get_open_positions()
+                restored_count = 0
+
+                # A betöltés előtt olvassuk ki a jelenlegi párt a GUI-ból
+                current_symbol_norm = normalize_symbol(self.mb_symbol.get())
+
+                for pos in open_trades:
+                    # BIZTONSÁGI SZŰRÉS: csak az aktuális párral egyezőeket vesszük fel
+                    db_symbol = normalize_symbol(pos.get('symbol', ''))
+
+                    if db_symbol != current_symbol_norm:
+                        self._safe_log(
+                            f"⚠️ Eltérő pár a DB-ben ({db_symbol}) vs GUI ({current_symbol_norm}) - pozíció kihagyva.\n"
+                        )
+                        continue
+
+                    side = pos.get('side')
+                    if side == 'buy':
+                        self._sim_pos_long.append(pos)
+                    elif side == 'sell':
+                        self._sim_pos_short.append(pos)
+
+                    # Pool számítás korrekció
+                    commit = float(pos.get('commit_usdt', 0.0))
+                    fee_res = float(pos.get('fee_reserved', 0.0))
+                    used_capital += (commit + fee_res)
+                    restored_count += 1
+
+                if restored_count:
+                    self._safe_log(
+                        f"♻️ DB-ből visszaállítva: {restored_count} nyitott pozíció ({current_symbol_norm}).\n"
+                    )
+
+            except Exception as e:
+                self._safe_log(f"❌ Hiba a DB betöltésekor: {e}\n")
+                used_capital = 0.0  # Fallback
 
             # belső állapotok, ha hiányoznának
             if not hasattr(self, "_sim_pnl_usdt"):
@@ -5766,11 +5931,14 @@ class CryptoBotApp:
             if not hasattr(self, "_sim_pos_short"):
                 self._sim_pos_short = []
             if not hasattr(self, "_mb_last_bar_ts"):
-                self._mb_last_bar_ts = {}   # {(symbol, tf): ts}
+                self._mb_last_bar_ts = {}
             if not hasattr(self, "_mb_last_cross_ts"):
                 self._mb_last_cross_ts = 0
             if not hasattr(self, "_mb_last_signal"):
                 self._mb_last_signal = "hold"
+
+        # lock-on KÍVÜL tároljuk el, hogy a worker fel tudja használni
+        self._restored_pool_usage = used_capital
 
         # --- CFG SNAPSHOT: minden UI-olvasás itt, FŐ SZÁLBAN! ---
         try:
@@ -6011,6 +6179,12 @@ class CryptoBotApp:
             except Exception:
                 symbol_safe = "UNKNOWN"
 
+            # Mielőtt törlöd a listából (del lst[idx]), mentsd el az OID-t
+            try:
+                closed_oid = str(pos.get('oid') or pos.get('order_id') or pos.get('id'))
+            except Exception:
+                closed_oid = None
+
             try:
                 import time as _t
                 self._sim_history.append({
@@ -6034,6 +6208,14 @@ class CryptoBotApp:
 
             # végül töröljük a pozíciót a listából
             del lst[idx]
+
+            # --- DB frissítés ---
+            if closed_oid:
+                try:
+                    # PNL és exit ár mentése
+                    self.db.close_position(closed_oid, exit_px, pnl, reason)
+                except Exception as e:
+                    self._safe_log(f"⚠️ DB Close Error: {e}\n")
 
         # --- lockon kívül: log + history exit update ---
         self._safe_log(
@@ -6313,8 +6495,13 @@ class CryptoBotApp:
                     )
             with self._mb_lock:
                 self._pool_balance_quote = float(init_pool)
-                self._pool_used_quote = 0.0
-            self._safe_log(f"🏦 Pool init: balance={self._pool_balance_quote:.2f} {quote0}, used={self._pool_used_quote:.2f}\n")
+                self._pool_used_quote = getattr(self, "_restored_pool_usage", 0.0)
+
+            # Takarítás
+            if hasattr(self, "_restored_pool_usage"):
+                delattr(self, "_restored_pool_usage")
+
+            self._safe_log(f"🏦 Pool init (reloaded): balance={self._pool_balance_quote:.2f} {quote0}, used={self._pool_used_quote:.2f}\n")
 
         # --- belső helperek: lista oldalszerint, nyitás/zárás multi, menedzsment per-pozíció ---
         def _pos_list(side: str):
@@ -6705,9 +6892,11 @@ class CryptoBotApp:
                 'fee_open_actual': float(fee_open_actual),# ha van tényleges nyitási díj
                 'fee_close_actual': 0.0,
                 'fee_reserved': float(fee_reserved),      # a pool-ból lefoglalt díj (actual>0 ? actual : est)
-                'mgmt': 'none'
+                'mgmt': 'none',
+                'ts': time.time(),
             }
             pos.update({k: v for k, v in (extra or {}).items()})
+            pos['symbol'] = symbol
             if atr_pack is not None:
                 mul_sl, mul_tp1, mul_tp2, trail_mul, atr_val = atr_pack
                 if side == 'buy':
@@ -6725,6 +6914,11 @@ class CryptoBotApp:
             with self._mb_lock:
                 _pos_list(side).append(pos)
                 self._pool_used_quote += float(commit_usdt) + float(fee_reserved)
+                # --- Mentés adatbázisba ---
+                try:
+                    self.db.add_position(pos)
+                except Exception as e:
+                    self._safe_log(f"⚠️ DB Save Error: {e}\n")
 
             fee_log = fee_open_actual if fee_open_actual > 0 else fee_open_est
             self._safe_log(
@@ -6812,6 +7006,14 @@ class CryptoBotApp:
                     })
             except Exception:
                 pass
+
+            # DB frissítése a csökkentett mérettel
+            try:
+                # order_id kinyerése
+                oid = str(pos.get('oid') or pos.get('order_id') or pos.get('id'))
+                self.db.update_position_size(oid, float(pos['size']), float(pos['commit_usdt']))
+            except Exception as e:
+                self._safe_log(f"⚠️ DB Update Partial Error: {e}\n")
 
             self._safe_log(
                 f"🔹 PARTIAL 50% | entry={entry:.6f} → exit={px:.6f} | "
