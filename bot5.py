@@ -7661,16 +7661,16 @@ class CryptoBotApp:
                         else:
                             # Egységes méretszámítás, akár 'quote', akár 'base' módban vagyunk
                             size, funds = self._mb_compute_size(
-                                symbol=cfg["symbol"],
+                                symbol=cfg_ns.symbol,
                                 side=side,
                                 price=px_for_mgmt,
-                                size_pct=cfg["size_pct"],
-                                input_mode=cfg["input_mode"],
-                                mode=cfg["mode"],
-                                leverage=cfg["leverage"],
-                                budget_quote=cfg["budget_ui"],
-                                dry=cfg["dry"],
-                                auto_borrow=cfg["auto_borrow"],
+                                size_pct=cfg_ns.sizep,
+                                input_mode=cfg_ns.inpm,
+                                mode=cfg_ns.mode,
+                                leverage=cfg_ns.lev,
+                                budget_quote=cfg_ns.budget_ui,
+                                dry=cfg_ns.dry,
+                                auto_borrow=cfg_ns.auto_borrow,
                                 lot_step=lot_step,
                                 price_step=price_step,
                             )
