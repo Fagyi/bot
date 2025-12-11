@@ -1206,10 +1206,10 @@ class KucoinSDKWrapper:
 
         base_url = "https://api.kucoin.com"
         url = base_url + path
-        
+
         # A test-et JSON stringgé alakítjuk
         payload_json = json.dumps(body, separators=(",", ":"))
-        
+
         # A meglévő aláíró logikát hívjuk, body-val
         headers = self._rest_sign_headers("POST", path, "", payload_json)
 
@@ -1992,11 +1992,11 @@ class CryptoBotApp:
         value (float): Bruttó érték USD-ben (Elérhető + Tartott) * Árfolyam
         pnl (float): Nettó érték USD-ben (Value - Kötelezettség_USD)
         """
-        
+
         # Ez a teljes Nettó Darabszám (Quantity) a Kötelezettségek levonása után.
         # Ez a táblázat 'Nettó Összesen' oszlopába kerül.
         total_quantity = avail + holds - liability
-        
+
         # A sorban a Bevétel (value) és a PNL (pnl) a kapott USD értékek, 
         # a többi pedig darabszám.
         return (ccy, 
@@ -2801,7 +2801,7 @@ class CryptoBotApp:
             if ws is not None and ws.is_running():
                 # Lekérjük a WS adatot
                 ws_data = ws.get_ohlcv(tf, limit=limit)
-                
+
                 # JAVÍTÁS: Csak akkor fogadjuk el a WS-t, ha van benne elég adat a számításokhoz!
                 # Ha pl. frissen indult, lehet, hogy csak 1-2 gyertya van benne.
                 # A MA(26)-hoz minimum 26 kell, de a biztonság kedvéért 50-et kérünk.
@@ -3043,7 +3043,7 @@ class CryptoBotApp:
         try:
             # kurzor állítás a fő szálon
             self.root.after(0, lambda: self.root.config(cursor="watch"))
-            
+
             # 1. Adatgyűjtés (ez a lassú rész)
             sym = normalize_symbol(self.mt_symbol.get())
             base, quote = split_symbol(sym)
@@ -3069,7 +3069,7 @@ class CryptoBotApp:
                     new_size = f"{(avail_base * pct / 100.0):.6f}"
                 else:  # 'quote'
                     new_funds = f"{(avail_quote * pct / 100.0):.2f}"
-            
+
             elif action_type == 'max':
                 side = str(value)
                 if side == 'sell':
@@ -3092,7 +3092,7 @@ class CryptoBotApp:
                     self.mt_funds.config(state=tk.NORMAL)
                     self.mt_size.delete(0, tk.END)
                     self.mt_funds.delete(0, tk.END)
-                    
+
                     if new_size is not None:
                         self.mt_size.insert(0, new_size)
                     if new_funds is not None:
@@ -3100,7 +3100,7 @@ class CryptoBotApp:
 
                     # Visszaállítjuk a mezők állapotát az input mód alapján
                     self._mt_on_input_change()
-                    
+
                     # Becslés frissítése (itt már a get_best_price-ből jövő px megy be)
                     self._mt_update_estimate(px)
                 except Exception as e:
@@ -3137,16 +3137,16 @@ class CryptoBotApp:
             # Vízszintes pozíció kiszámítása (0.0 -> 1.0)
             # Biztosítjuk, hogy a határokon belül maradjon
             clicked_percent = max(0.0, min(1.0, event.x / width))
-            
+
             from_ = float(widget.cget("from"))
             to_ = float(widget.cget("to"))
-            
+
             value = from_ + (to_ - from_) * clicked_percent
-            
+
             # Azonnal beállítjuk a csúszka értékét
             # A 'round' biztosítja, hogy egész számot kapjunk (0-100)
             self.mt_pct.set(int(round(value)))
-            
+
             # NEM hívunk hálózati frissítést itt,
             # azt majd a ButtonRelease-1 (felengedés) esemény kezeli!
         except Exception:
@@ -3394,7 +3394,7 @@ class CryptoBotApp:
                 self.log("ℹ️ Publikus mód: csak piaci adatok")
             else:
                 self.log("🔐 Privát mód: spot/margin elérhető")
-                
+
                 # Extra capability dump
                 try:
                     moa = None
@@ -3424,14 +3424,14 @@ class CryptoBotApp:
         try:
             # 1. Egyenleg frissítése (ez magában elindítja a háttérszálat)
             self._mb_refresh_available()
-            
+
             # 2. Chart frissítése (piaci adat lekérdezése)
             self._mb_draw_chart()
         except Exception as e:
             # Csak logoljuk, ha valamiért itt elhasal, de ne akadályozza a bot indulását
             self.log(f"❌ Automatikus Margin Bot frissítési hiba a start után: {e}")
         threading.Thread(target=self.loop, daemon=True).start()
-    
+
     def stop_bot(self):
         self.is_running = False
         self.set_status("Leállítva")
@@ -4555,7 +4555,7 @@ class CryptoBotApp:
             command=self.mb_reload_cfg,
         )
         apply_btn.grid(row=r, column=0, columnspan=2, sticky="we", pady=(10,0))
-        
+
         # ===== jobb oszlop: felül fülek (History / Bot napló), alul mini-diagram =====
         right = ttk.Frame(root)
         right.grid(row=0, column=1, sticky="nsew", padx=(6,10), pady=10)
@@ -7613,10 +7613,10 @@ class CryptoBotApp:
                                 # Csak akkor logolunk, ha:
                                 # 1. A részletes logolás (verbose) BE van kapcsolva
                                 # 2. ÉS eltelt legalább 30 másodperc az utolsó ilyen üzenet óta
-                                
+
                                 now_ts_skip = int(time.time())
                                 last_skip_ts = getattr(self, "_mb_last_skip_log_ts", 0)
-                                
+
                                 # Itt állíthatod a ritkítást (most 30 másodperc)
                                 if verbose_on and (now_ts_skip - last_skip_ts > 30):
                                     self._safe_log(
@@ -7626,7 +7626,7 @@ class CryptoBotApp:
                                         f"diff={diff_pct:.3f}%, tol={tol_pct_val:.3f}%). (Ritkítva 30s)\n"
                                     )
                                     self._mb_last_skip_log_ts = now_ts_skip
-                                
+
                                 opened = False
                                 time.sleep(1)
                                 continue
@@ -8255,7 +8255,7 @@ class CryptoBotApp:
         Ez pontosabb és jobban egyezik a TradingView értékeivel.
         """
         import pandas as pd
-        
+
         h = df['h'].astype(float)
         l = df['l'].astype(float)
         c = df['c'].astype(float)
@@ -8265,9 +8265,9 @@ class CryptoBotApp:
         tr1 = h - l
         tr2 = (h - prev_c).abs()
         tr3 = (l - prev_c).abs()
-        
+
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        
+
         # Sima EMA (ewm span) helyett RMA (alpha = 1/n)
         atr = self._rma(tr, n)
         return atr
@@ -8374,7 +8374,6 @@ class CryptoBotApp:
         z_change = z_score.diff()
 
         return z_score, z_change
-
 
     def apply_zscore_strategy(
         self,
@@ -8756,7 +8755,7 @@ class CryptoBotApp:
                 self.stop_bot() 
         except Exception as e:
             pass # Hiba esetén is megyünk tovább
-            
+
         try:
             # Margin bot leállítása
             if getattr(self, "_mb_running", False):
