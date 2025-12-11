@@ -1997,10 +1997,10 @@ class CryptoBotApp:
         # Ez a táblázat 'Nettó Összesen' oszlopába kerül.
         total_quantity = avail + holds - liability
 
-        # A sorban a Bevétel (value) és a PNL (pnl) a kapott USD értékek, 
+        # A sorban a Bevétel (value) és a PNL (pnl) a kapott USD értékek,
         # a többi pedig darabszám.
-        return (ccy, 
-                acc_type, 
+        return (ccy,
+                acc_type,
                 f"{avail:,.8f}",     # Elérhető darabszám
                 f"{holds:,.8f}",      # Tartott darabszám
                 f"{value:,.2f}",      # Bevétel (Value/USD) - BRUTTÓ ÉRTÉK
@@ -3131,7 +3131,7 @@ class CryptoBotApp:
         try:
             widget = event.widget
             width = widget.winfo_width()
-            if width <= 0: 
+            if width <= 0:
                 return # Widget még nem látható
 
             # Vízszintes pozíció kiszámítása (0.0 -> 1.0)
@@ -4665,7 +4665,7 @@ class CryptoBotApp:
         # --- itt már MINDEN bal oldali widget létezik ---
         _bind_mousewheel_recursively(scroll_frame)
 
-        if not hasattr(self, "_mb_stopping"): 
+        if not hasattr(self, "_mb_stopping"):
             self._mb_stopping = False
 
     def _bg(self, fn, ok, err=None):
@@ -6444,7 +6444,7 @@ class CryptoBotApp:
 
         return 0.0
 
-    # === MarginBot – fő ciklus, HTF-filter + ATR menedzsment + RSI szűrő === 
+    # === MarginBot – fő ciklus, HTF-filter + ATR menedzsment + RSI szűrő ===
     def _mb_worker(self):
         import time, math, pandas as pd, threading
         from types import SimpleNamespace as NS
@@ -7281,7 +7281,7 @@ class CryptoBotApp:
                     if use_atr:
                         atr_series = self._mb_atr(df, n=atr_n)
                         atr_val = float(atr_series.iloc[-1])
-                        self._mb_last_atr_val = atr_val 
+                        self._mb_last_atr_val = atr_val
 
                     closes_for_sig = df['c'].astype(float).tolist()
                     # hiszterézis mult kivonva cfg-ből → nincs Tk az _mb_signal_from_ema_live-ben
@@ -8599,7 +8599,7 @@ class CryptoBotApp:
 
     def _mb_floor_to_step_dec(self, x: float, step: float) -> float:
         """Decimal-al padlózzuk a mennyiséget a lépésközre (float hibák nélkül)."""
-        if step <= 0: 
+        if step <= 0:
             return float(x)
         q = Decimal(str(step))
         return float((Decimal(str(x)) // q) * q)
@@ -8752,7 +8752,7 @@ class CryptoBotApp:
         try:
             # Dashboard bot leállítása
             if getattr(self, "is_running", False):
-                self.stop_bot() 
+                self.stop_bot()
         except Exception as e:
             pass # Hiba esetén is megyünk tovább
 
