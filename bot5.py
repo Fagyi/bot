@@ -169,7 +169,7 @@ class BotDatabase:
                        float(pos.get('fee_reserved', 0)),
                        'OPEN',
                        float(pos.get('ts', 0) or 0),
-                       json.dumps(extra)
+                       json.dumps(extra, ensure_ascii=False, default=str),
                       ))
             conn.commit()
         except Exception as e:
@@ -191,7 +191,7 @@ class BotDatabase:
                 data.update({'exit_price': exit_price, 'pnl': pnl, 'close_reason': reason, 'closed_at': _time.time()})
                 c.execute('''UPDATE trades
                              SET status='CLOSED', extra_data=?
-                             WHERE order_id=?''', (json.dumps(data), str(order_id)))
+                             WHERE order_id=?''', (json.dumps(data, ensure_ascii=False, default=str), str(order_id)))
                 conn.commit()
         except Exception as e:
             print(f"DB Error close_position: {e}")
