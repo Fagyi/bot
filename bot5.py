@@ -5421,55 +5421,6 @@ class CryptoBotApp:
             except Exception:
                 continue
 
-    def _mb_hist_pnl_tick(self):
-        """
-        History floating PnL frissítése.
-        Feltételezzük, hogy a főszálról hívódik (pl. root.after vagy workerből call_in_main).
-        """
-        if getattr(self, "_mb_hist_pnl_inflight", False):
-            return
-        self._mb_hist_pnl_inflight = True
-
-        try:
-            # Szimbólum kinyerése (MarginBot / MarginTrade beállításból)
-            try:
-                symbol = normalize_symbol(
-                    self._mb_get_str("mb_symbol", self._mb_get_str("mt_symbol", DEFAULT_SYMBOL))
-                )
-            except Exception:
-                symbol = None
-
-            if not symbol:
-                return
-
-            # Utolsó ár a history PnL-hez – egységes helperrel:
-            # get_best_price: WS → cache → REST.
-            try:
-                rt = float(self.get_best_price(symbol))
-                if (not self._is_pos_num(rt)) or rt <= 0:
-                    return
-            except Exception:
-                return
-
-            # Itt már a Tk főszálon vagyunk (ha így hívod),
-            # nyugodtan frissíthetjük közvetlenül a TreeView-t.
-            try:
-                rt_val = float(rt or 0.0)
-            except Exception:
-                rt_val = 0.0
-            if rt_val <= 0:
-                return
-
-            # Ha van külön helpered:
-            #   self._mb_hist_apply_pnl(rt_val)
-            # Ha nincs, akkor itt bent maradhat a korábbi PnL-számoló loopod.
-            self._mb_hist_apply_pnl(rt_val)
-
-        finally:
-            self._mb_hist_pnl_inflight = False
-            # Nincs automatikus időzítés, a worker / history refresh hívja, ha kell.
-            self._mb_hist_pnl_job = None
-
     def _mb_hist_on_rclick(self, event):
         """Jobb klikk a LIVE History táblán – kontextusmenü (csak a kattintott sorra)."""
         tv = getattr(self, "_mb_hist_tv", None)
