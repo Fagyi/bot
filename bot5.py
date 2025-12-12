@@ -7655,14 +7655,15 @@ class CryptoBotApp:
 
                         # KERET: teljes szabad pool – a %-ot _mb_compute_size fogja alkalmazni
                         max_quote_for_trade = free_pool
-
+                        lot_step, price_step, min_base, min_funds, quote_step = self._mb_get_market_steps(symbol)
+                        
                         if max_quote_for_trade <= 0.0:
                             self._safe_log("ℹ️ Nincs szabad pool a nyitáshoz (keret limit). Kimarad.\n")
                         else:
                             # Egységes méretszámítás, akár 'quote', akár 'base' módban vagyunk
                             size, funds = self._mb_compute_size(
                                 symbol=cfg_ns.symbol,
-                                side=side,
+                                side=combined_sig,
                                 price=px_for_mgmt,
                                 size_pct=cfg_ns.sizep,
                                 input_mode=cfg_ns.inpm,
@@ -7693,7 +7694,6 @@ class CryptoBotApp:
                                 commit_usdt = 0.0
                                 nominal_q = 0.0
 
-                            lot_step, price_step, min_base, min_funds, quote_step = self._mb_get_market_steps(symbol)
                             open_size = self._mb_floor_to_step_dec(open_size, lot_step)
 
                             self._safe_log(
