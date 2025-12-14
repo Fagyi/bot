@@ -1593,8 +1593,12 @@ class CryptoBotApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self._ex_lock = threading.RLock()
+        self._ohlcv_lock = threading.RLock()
         self.root.title("KuCoin Universal SDK Bot (SPOT + Margin)")
         self.root.geometry("1280x930")
+
+        self._ohlcv_cache: dict[tuple[str,str], dict[str, object]] = {}
+        self._ohlcv_cache_maxlen = 600  # igény szerint (200-nál nagyobb legyen)
 
         # ---- Funds / Margin cache alapértelmezett állapota ----
         # Így az _mb_refresh_available hívható akkor is, ha még nem volt teljes "Összes egyenleg frissítése".
@@ -2787,48 +2791,94 @@ class CryptoBotApp:
                 self._safe_log(f"❌ K-Line WS indítási hiba: {e}\n")
                 self._mb_kline_ws = None
 
-    def _mb_get_ohlcv(self, symbol: str, tf: str, limit: int = 200):
-        """
-        Közös OHLCV beszerzés:
-          1) Ha van élő K-Line WS ÉS van elég adat (min. 50 gyertya) → onnan
-          2) Egyébként lokális public REST fallback
-        """
-        ohlcv = []
+    def _ohlcv_merge_into_cache(self, symbol: str, tf: str, new_rows: list[list[float]]):
+        symbol = normalize_symbol(symbol)
+        key = (symbol, tf)
 
-        # 1) WebSocket cache
-        ws = getattr(self, "_mb_kline_ws", None)
-        try:
-            if ws is not None and ws.is_running():
-                # Lekérjük a WS adatot
-                ws_data = ws.get_ohlcv(tf, limit=limit)
+        if not new_rows:
+            return
 
-                # JAVÍTÁS: Csak akkor fogadjuk el a WS-t, ha van benne elég adat a számításokhoz!
-                # Ha pl. frissen indult, lehet, hogy csak 1-2 gyertya van benne.
-                # A MA(26)-hoz minimum 26 kell, de a biztonság kedvéért 50-et kérünk.
-                if len(ws_data) >= min(limit, 50):
-                    ohlcv = ws_data
-        except Exception:
-            ohlcv = []
+        # normalizált, ts szerint rendezett bemenet
+        new_rows = sorted(new_rows, key=lambda r: int(r[0]))
 
-        # 2) Fallback: Ha a WS üres vagy kevés az adat, jöjjön a REST
-        if not ohlcv:
-            try:
-                # Ha már van inicializált exchange (akár public módban), használjuk azt
-                # így nem kell mindig új kapcsolatot építeni.
-                ex = getattr(self, "exchange", None)
-                if ex:
-                    with self._ex_lock:
-                        ohlcv = ex.fetch_ohlcv(symbol, tf, limit=limit)
+        with self._ohlcv_lock:
+            rec = self._ohlcv_cache.get(key)
+            if rec is None:
+                rec = {"rows": [], "last_ts": 0}
+                self._ohlcv_cache[key] = rec
+
+            rows: list[list[float]] = list(rec["rows"])  # type: ignore[assignment]
+
+            # gyors index ts->pos a meglévőre
+            idx = {int(r[0]): i for i, r in enumerate(rows)}
+
+            for r in new_rows:
+                ts = int(r[0])
+                if ts in idx:
+                    rows[idx[ts]] = r  # csere (ugyanaz a candle új értékkel)
                 else:
-                    # Ha még nincs exchange (nagyon a futás elején), csinálunk egy ideigleneset
-                    local_ex = KucoinSDKWrapper(public_mode=True, log_fn=self.log)
-                    ohlcv = local_ex.fetch_ohlcv(symbol, tf, limit=limit)
-            except Exception as e:
-                # Opcionális: logolhatjuk, ha a REST is elhasal
-                # print(f"REST ohlcv fallback error: {e}")
-                ohlcv = []
+                    rows.append(r)      # új candle
 
-        return ohlcv or []
+            rows.sort(key=lambda r: int(r[0]))
+
+            # maxlen trim (csak a legrégebbit dobjuk)
+            maxlen = int(getattr(self, "_ohlcv_cache_maxlen", 600))
+            if maxlen > 0 and len(rows) > maxlen:
+                rows = rows[-maxlen:]
+
+            rec["rows"] = rows
+            rec["last_ts"] = int(rows[-1][0]) if rows else 0
+
+    def _ohlcv_seed_if_needed(self, symbol: str, tf: str, seed_n: int = 200):
+        symbol = normalize_symbol(symbol)
+        key = (symbol, tf)
+
+        with self._ohlcv_lock:
+            rec = self._ohlcv_cache.get(key)
+            if rec and isinstance(rec.get("rows"), list) and len(rec["rows"]) >= seed_n:
+                return  # már van elég adat
+
+        # REST seed (csak egyszer)
+        try:
+            with self._ex_lock:
+                rows = self.exchange.fetch_ohlcv(symbol, tf, limit=seed_n)
+        except Exception:
+            rows = []
+
+        self._ohlcv_merge_into_cache(symbol, tf, rows)
+
+    def _ohlcv_update_from_ws(self, symbol: str, tf: str):
+        ws = getattr(self, "_mb_kline_ws", None)
+        if ws is None or not ws.is_running():
+            return
+        try:
+            # elég pár utolsó candle a merge-hez
+            ws_rows = ws.get_ohlcv(tf, limit=5)
+        except Exception:
+            ws_rows = []
+        self._ohlcv_merge_into_cache(symbol, tf, ws_rows)
+
+    def _get_ohlcv_cached(self, symbol: str, tf: str, limit: int = 200) -> list[list[float]]:
+        symbol = normalize_symbol(symbol)
+
+        # 1) seed
+        self._ohlcv_seed_if_needed(symbol, tf, seed_n=200)
+
+        # 2) ws merge
+        self._ohlcv_update_from_ws(symbol, tf)
+
+        # 3) kiadás cache-ből
+        key = (symbol, tf)
+        with self._ohlcv_lock:
+            rec = self._ohlcv_cache.get(key) or {}
+            rows = list(rec.get("rows") or [])
+
+        if limit and limit > 0:
+            return rows[-limit:]
+        return rows
+
+    def _mb_get_ohlcv(self, symbol: str, tf: str, limit: int = 200):
+        return self._get_ohlcv_cached(symbol, tf, limit=limit)
 
     # ---- Z-score segédfüggvények ----
     def _mb_ohlcv_to_df(self, ohlcv, tz_unit: str = "ms"):
@@ -4470,6 +4520,32 @@ class CryptoBotApp:
         self.mb_rsi_sell_max.delete(0, tk.END); self.mb_rsi_sell_max.insert(0, "55")
         self.mb_rsi_sell_max.pack(side=tk.LEFT, padx=(2,0))
         r += 1
+
+        # --- ADX trend szűrő – oldalazás ellen (trend-follow) ---
+        adx_box = ttk.Labelframe(form, text="ADX trend szűrő (oldalazás ellen)", padding=6)
+        adx_box.grid(row=r, column=0, columnspan=2, sticky="we", pady=(8,0))
+        adx_row = ttk.Frame(adx_box); adx_row.pack(anchor="w")
+
+        self.mb_use_adx = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            adx_row,
+            text="ADX filter bekapcsolása (csak ha ADX > küszöb)",
+            variable=self.mb_use_adx,
+            command=self._mb_toggle_adx_widgets
+        ).pack(side=tk.LEFT)
+
+        ttk.Label(adx_row, text="ADX periódus:").pack(side=tk.LEFT, padx=(12,2))
+        self.mb_adx_len = ttk.Spinbox(adx_row, from_=5, to=50, increment=1, width=6)
+        self.mb_adx_len.delete(0, tk.END); self.mb_adx_len.insert(0, "14")
+        self.mb_adx_len.pack(side=tk.LEFT, padx=(0,10))
+
+        ttk.Label(adx_row, text="Min ADX küszöb:").pack(side=tk.LEFT, padx=(0,2))
+        self.mb_adx_min = ttk.Spinbox(adx_row, from_=5, to=60, increment=1, width=6)
+        self.mb_adx_min.delete(0, tk.END); self.mb_adx_min.insert(0, "20")
+        self.mb_adx_min.pack(side=tk.LEFT)
+
+        r += 1
+        self._mb_toggle_adx_widgets()
 
         # HTF trend filter – kapcsoló + HTF TF
         htf_box = ttk.Labelframe(form, text="HTF trend filter (EMA alapú)", padding=6)
@@ -6503,6 +6579,10 @@ class CryptoBotApp:
             drift_over_txt: str | None,
             rsi_ok_buy: bool,
             rsi_ok_sell: bool,
+            use_adx: bool,
+            adx_ok: bool,
+            adx_val: float | None,
+            adx_min: float,
             htf_block: bool,
             use_zscore: bool,
             combined_sig_raw: str | None,
@@ -6522,10 +6602,16 @@ class CryptoBotApp:
                 reasons.append("rsi_block_sell")
             if htf_block:
                 reasons.append("htf_block")
-            # ha az eredeti jel buy/sell volt, de a Z-score filterből HOLD lett:
             if use_zscore and combined_sig_raw in ("buy", "sell") and combined_sig == "hold":
                 reasons.append("zscore_block")
-
+            if use_adx and combined_sig_raw in ("buy", "sell") and not adx_ok:
+                try:
+                    if adx_val is None:
+                        reasons.append(f"adx<{float(adx_min):g}")
+                    else:
+                        reasons.append(f"adx={float(adx_val):.1f}<{float(adx_min):g}")
+                except Exception:
+                    reasons.append("adx_block")
             return reasons
 
         def _build_filters_line(
@@ -6534,6 +6620,10 @@ class CryptoBotApp:
             rsi_bmax: float,
             rsi_smin: float,
             rsi_smax: float,
+            use_adx: bool,
+            adx_len: int,
+            adx_min: float,
+            adx_val: float | None,
             use_htf: bool,
             trend_htf: int,
             use_brk: bool,
@@ -6550,6 +6640,17 @@ class CryptoBotApp:
                 )
             else:
                 parts.append("rsi=OFF")
+
+            if use_adx:
+                try:
+                    if adx_val is None:
+                        parts.append(f"adx=ON({int(adx_len)}) n/a(>{float(adx_min):g})")
+                    else:
+                        parts.append(f"adx=ON({int(adx_len)}) {float(adx_val):.1f}(>{float(adx_min):g})")
+                except Exception:
+                    parts.append("adx=ON(?)")
+            else:
+                parts.append("adx=OFF")
 
             parts.append(f"htf={'ON' if use_htf else 'OFF'}({trend_htf:+d})")
             parts.append(f"brk={'ON' if use_brk else 'OFF'}")
@@ -6608,7 +6709,7 @@ class CryptoBotApp:
             )
             return " ".join(parts)
 
-        def _has_nearby_pos(side: str, px: float, tol_pct: float = 0.1):
+        def _has_nearby_pos(side: str, px: float, tol_pct: float = 0.1, symbol_filter: str | None = None):
             """
             Van-e már nyitott pozíció ugyanazon az oldalon (buy/sell),
             amelynek entry ára tol_pct %-nál közelebb van az aktuális árhoz.
@@ -6627,6 +6728,8 @@ class CryptoBotApp:
             with self._mb_lock:
                 arr = self._sim_pos_long if side == "buy" else self._sim_pos_short
                 for pos in arr:
+                    if symbol_filter and (pos.get("symbol") != symbol_filter):
+                        continue
                     try:
                         e = float(pos.get("entry") or 0.0)
                     except Exception:
@@ -6670,6 +6773,10 @@ class CryptoBotApp:
                 rsi_bmax=float(cfg.get("rsi_bmax", 70.0)),
                 rsi_smin=float(cfg.get("rsi_smin", 30.0)),
                 rsi_smax=float(cfg.get("rsi_smax", 55.0)),
+
+                use_adx=bool(cfg.get("use_adx", False)),
+                adx_len=int(cfg.get("adx_len", 14)),
+                adx_min=float(cfg.get("adx_min", 20.0)),
 
                 use_htf=bool(cfg.get("use_htf", False)),
                 htf_tf=cfg.get("htf_tf", "1h"),
@@ -6772,7 +6879,7 @@ class CryptoBotApp:
                                 side,
                                 pos,
                                 px_for_mgmt,
-                                symbol=symbol,
+                                symbol=(pos.get("symbol") or symbol),
                                 mode=mode,
                                 lev=lev,
                             )
@@ -6815,8 +6922,7 @@ class CryptoBotApp:
                     )
                     continue
 
-        def _open_sim(side: str, entry_px: float, size_base: float, commit_usdt: float,
-                      atr_pack=None, fixed_pack=None, **extra):
+        def _open_sim(side: str, entry_px: float, size_base: float, commit_usdt: float, atr_pack=None, fixed_pack=None, symbol_for_pos: str | None = None, **extra):
             fee_rate = self._mb_get_taker_fee()
             fee_open_est = self._mb_est_fee_quote(entry_px, size_base, fee_rate)
 
@@ -6847,7 +6953,7 @@ class CryptoBotApp:
                 'ts': time.time(),
             }
             pos.update({k: v for k, v in (extra or {}).items()})
-            pos['symbol'] = symbol
+            pos['symbol'] = symbol_for_pos or symbol
             if atr_pack is not None:
                 mul_sl, mul_tp1, mul_tp2, trail_mul, atr_val = atr_pack
                 if side == 'buy':
@@ -6884,18 +6990,14 @@ class CryptoBotApp:
 
             entry = float(pos['entry']); sz = float(pos['size'])
 
-            # symbol widget helyett cfg-ből – lock alatt olvasva
             try:
-                with self._mb_lock:
-                    cfg_sym = getattr(self, "_mb_cfg", {}) or {}
-                    symbol_safe = cfg_sym.get("symbol", DEFAULT_SYMBOL)
+                symbol_safe = normalize_symbol(pos.get("symbol") or DEFAULT_SYMBOL)
             except Exception:
                 symbol_safe = None
 
             try:
-                lot_step, _price_step, _min_base, _min_funds, _quote_step = self._mb_get_market_steps(
-                    normalize_symbol(symbol_safe or "BTC-USDT")
-                )
+                sym = symbol_safe or DEFAULT_SYMBOL
+                lot_step, _price_step, _min_base, _min_funds, _quote_step = self._mb_get_market_steps(sym)
             except Exception:
                 lot_step = 0.0
 
@@ -6937,13 +7039,6 @@ class CryptoBotApp:
 
             try:
                 import time as _t
-                try:
-                    with self._mb_lock:
-                        cfg_sym = getattr(self, "_mb_cfg", {}) or {}
-                        symbol_safe = normalize_symbol(cfg_sym.get("symbol", DEFAULT_SYMBOL))
-                except Exception:
-                    symbol_safe = "UNKNOWN"
-
                 with self._mb_lock:
                     self._sim_history.append({
                         "partial": True,
@@ -7000,7 +7095,6 @@ class CryptoBotApp:
         def _manage_fixed_on_pos(pos: dict, last_px: float) -> bool:
             side  = pos['side']
             entry = float(pos['entry'])
-            sz    = float(pos['size'])
             # last_px itt is px_for_mgmt → WS-alapú, ha elérhető  ### WS-PEAK
             if side == 'buy' and last_px > pos['peak']: pos['peak'] = float(last_px)
             if side == 'sell' and last_px < pos['peak']: pos['peak'] = float(last_px)
@@ -7053,6 +7147,10 @@ class CryptoBotApp:
                     rsi_bmax = cfg_ns.rsi_bmax
                     rsi_smin = cfg_ns.rsi_smin
                     rsi_smax = cfg_ns.rsi_smax
+
+                    use_adx = cfg_ns.use_adx
+                    adx_len = cfg_ns.adx_len
+                    adx_min = cfg_ns.adx_min
 
                     use_htf = cfg_ns.use_htf
                     htf_tf  = cfg_ns.htf_tf
@@ -7137,13 +7235,14 @@ class CryptoBotApp:
                         need_refresh = True
                     else:
                         # ha túl vagyunk a candle végén → új candle
-                        if now_ts - prev_ts >= tf_sec:
+                        if now_ts >= (prev_ts + tf_sec):
                             need_refresh = True
 
                     if need_refresh or not hasattr(self, "_mb_last_df"):
                         # OHLCV beszerzés WS-ből, vagy fallback REST-ből
                         try:
-                            ohlcv = self._mb_get_ohlcv(symbol, tf, limit=200)
+                            need_n = max(200, adx_len * 4, z_len * 3 + z_points, slw * 3)
+                            ohlcv = self._mb_get_ohlcv(symbol, tf, limit=need_n)
                         except Exception:
                             with self._ex_lock:
                                 ohlcv = self.exchange.fetch_ohlcv(symbol, tf, limit=200)
@@ -7154,13 +7253,16 @@ class CryptoBotApp:
                             continue
 
                         df = pd.DataFrame(ohlcv, columns=['ts','o','h','l','c','v'])
-                        last_ts = int(df['ts'].iloc[-1])
-                        self._mb_last_bar_ts[key] = last_ts
+                        last_ts_ms = int(df['ts'].iloc[-1])
+                        last_ts_s  = int(last_ts_ms // 1000)
+                        self._mb_last_bar_ts[key] = last_ts_s
                         # fontos: itt MÉG nem cache-eljük self._mb_last_df-et,
                         # előbb ráengedjük a realtime (WS) árat a legutóbbi gyertyára
                     else:
                         df = self._mb_last_df.copy()
-                        last_ts = int(df["ts"].iloc[-1])
+                        last_ts_ms = int(df["ts"].iloc[-1])
+                        last_ts_s  = last_ts_ms // 1000
+                        self._mb_last_bar_ts[key] = last_ts_s
 
                     closes = df['c'].astype(float).tolist()
                     last_px = float(closes[-1])
@@ -7172,7 +7274,10 @@ class CryptoBotApp:
                         time.sleep(2)
                         continue
 
-                    used_ws_price = False  # ### WS-FLAG: jelezzük, ha a last_px_rt tényleg websocketből jött
+                    used_ws_price = False  # ### WS-FLAG: True csak akkor, ha a last_px_rt TICKER-WS-ből jött (drift ehhez kötött)
+
+                    # --- indikátor DF (lezárt gyertyák!) ---
+                    df_ind = df.copy()
 
                     # --- Websocket ár preferált, get_best_price csak fallbackként ---  ### WS-PRIMARY
                     try:
@@ -7194,6 +7299,24 @@ class CryptoBotApp:
                             rt_best = float(self.get_best_price(symbol))
                             if self._is_pos_num(rt_best) and rt_best > 0:
                                 last_px_rt = rt_best
+
+                    except Exception:
+                        pass
+
+                    # cache: CSAK LEZÁRT GYERTYA (itt már megvan a last_px_rt is)
+                    self._mb_last_df = df_ind
+
+                    # --- realtime DF (EMA / log / döntés) ---
+                    # FONTOS: itt már végleges a last_px_rt
+                    df_rt = df_ind.copy()
+                    try:
+                        if self._is_pos_num(last_px_rt) and float(last_px_rt) > 0:
+                            df_rt.at[df_rt.index[-1], "c"] = float(last_px_rt)
+                            h0 = float(df_rt.at[df_rt.index[-1], "h"])
+                            l0 = float(df_rt.at[df_rt.index[-1], "l"])
+                            c0 = float(df_rt.at[df_rt.index[-1], "c"])
+                            df_rt.at[df_rt.index[-1], "h"] = max(h0, c0)
+                            df_rt.at[df_rt.index[-1], "l"] = min(l0, c0)
                     except Exception:
                         pass
 
@@ -7230,11 +7353,11 @@ class CryptoBotApp:
 
                     atr_val = None
                     if use_atr:
-                        atr_series = self._mb_atr(df, n=atr_n)
+                        atr_series = self._mb_atr(df_rt, n=atr_n)
                         atr_val = float(atr_series.iloc[-1])
                         self._mb_last_atr_val = atr_val
 
-                    closes_for_sig = df['c'].astype(float).tolist()
+                    closes_for_sig = df_rt['c'].astype(float).tolist()
                     # hiszterézis mult kivonva cfg-ből → nincs Tk az _mb_signal_from_ema_live-ben
                     atr_eps_mult = max(0.0, ema_hyst_pct) / 100.0
                     sig_raw, ef_l, es_l = self._mb_signal_from_ema_live(
@@ -7256,7 +7379,7 @@ class CryptoBotApp:
 
                     rsi_val = None
                     if use_rsi:
-                        rsi_series = self._mb_rsi(df['c'], n=rsi_len)
+                        rsi_series = self._mb_rsi(df_ind['c'], n=rsi_len)
                         rsi_val = float(rsi_series.iloc[-1])
                         if sig == 'buy':
                             if not (rsi_bmin <= rsi_val <= rsi_bmax):
@@ -7267,8 +7390,8 @@ class CryptoBotApp:
 
                     brk_sig, hh, ll, up_lvl, dn_lvl = ("hold", float("nan"), float("nan"), float("nan"), float("nan"))
                     if use_brk:
-                        # _mb_breakout_signal már az élő high/low-val módosított df-et látja  ### WS-HIGH/LOW
-                        brk_sig, hh, ll, up_lvl, dn_lvl = self._mb_breakout_signal(df, brk_n, brk_buf)
+                        # breakout-hoz érdemes a realtime high/low-t használni
+                        brk_sig, hh, ll, up_lvl, dn_lvl = self._mb_breakout_signal(df_rt, brk_n, brk_buf)
                         if brk_with_trend and use_htf:
                             if (brk_sig == 'buy' and trend_htf < 0) or (brk_sig == 'sell' and trend_htf > 0):
                                 brk_sig = 'hold'
@@ -7327,8 +7450,10 @@ class CryptoBotApp:
                         pass
 
                     # --- Eredeti kombó jel (EMA+RSI+HTF+BRK+shock) ---
-                    combined_sig = brk_sig if brk_sig in ('buy', 'sell') else sig
-                    combined_sig_raw = combined_sig  # Z-score előtt eltesszük az "eredeti" jelet
+                    # FONTOS: ezt még a filterek (Z-score/ADX) ELŐTT eltesszük logoláshoz
+                    combined_sig_base = brk_sig if brk_sig in ("buy", "sell") else sig
+                    combined_sig = combined_sig_base
+                    combined_sig_raw = combined_sig_base  # tényleg a filterek előtti alapjel
 
                     # --- Z-score filter (opcionális) ---
                     z_dir = "hold"
@@ -7340,7 +7465,7 @@ class CryptoBotApp:
                                 tf,
                                 length=z_len,
                                 data_points=z_points,
-                                df=df,
+                                df=df_ind,
                             )
                         except Exception:
                             z_sig, z_quad = 0, None
@@ -7357,7 +7482,20 @@ class CryptoBotApp:
                         if combined_sig in ("buy", "sell"):
                             if z_dir == "hold" or z_dir != combined_sig:
                                 combined_sig = "hold"
-                    # --- /Z-score filter ---
+
+                    # ADX (mindig számoljuk, hogy logban és döntésben is stabil legyen)
+                    adx_val = None
+                    adx_ok = True
+                    if use_adx:
+                        try:
+                            adx_val = self._mb_adx(df_ind, length=adx_len)
+                            adx_ok = (adx_val is not None and float(adx_val) >= float(adx_min))
+                        except Exception:
+                            adx_val = None
+                            adx_ok = True  # hiba esetén inkább ne blokkoljon
+
+                    if use_adx and combined_sig in ("buy", "sell") and (not adx_ok):
+                        combined_sig = "hold"
 
                     # --- Cooldown + drift + hold okok + filters sor ---
 
@@ -7390,6 +7528,10 @@ class CryptoBotApp:
                         drift_over_txt=drift_over_txt,
                         rsi_ok_buy=rsi_ok_buy,
                         rsi_ok_sell=rsi_ok_sell,
+                        use_adx=use_adx,
+                        adx_ok=adx_ok,
+                        adx_val=adx_val,
+                        adx_min=adx_min,
                         htf_block=htf_block,
                         use_zscore=use_zscore,
                         combined_sig_raw=combined_sig_raw,
@@ -7403,6 +7545,10 @@ class CryptoBotApp:
                         rsi_bmax=rsi_bmax,
                         rsi_smin=rsi_smin,
                         rsi_smax=rsi_smax,
+                        use_adx=use_adx,
+                        adx_len=adx_len,
+                        adx_min=adx_min,
+                        adx_val=adx_val,
                         use_htf=use_htf,
                         trend_htf=trend_htf,
                         use_brk=use_brk,
@@ -7528,6 +7674,12 @@ class CryptoBotApp:
                     _manage_positions_for_side("buy")
                     _manage_positions_for_side("sell")
 
+                    # --- OPEN COUNT frissítés a nyitási döntés ELŐTT ---
+                    # (A menedzsment ugyanebben a ciklusban zárhatott pozíciókat,
+                    # ezért a korábban számolt open_now elavulhat.)
+                    with self._mb_lock:
+                        open_now = len(self._sim_pos_long) + len(self._sim_pos_short)
+
                     # --- ÚJ NYITÁS (cooldown + pool limit) ---
                     now = int(time.time())
                     if combined_sig in ('buy','sell') and (now - self._mb_last_cross_ts >= cd_s):
@@ -7557,7 +7709,8 @@ class CryptoBotApp:
                             found, existing_entry, diff_pct = _has_nearby_pos(
                                 combined_sig,
                                 last_px_rt,
-                                tol_pct=tol_pct_val,   # UI-ból jön a százalék
+                                tol_pct=tol_pct_val,
+                                symbol_filter=symbol,
                             )
                             if found:
                                 # --- SPAM CSÖKKENTÉS ---
@@ -7590,6 +7743,10 @@ class CryptoBotApp:
                                     last_px_rt = rt
                             except Exception:
                                 pass
+
+                        # FONTOS: ha itt frissült a last_px_rt, akkor a nyitáshoz használt ár is frissüljön
+                        px_for_mgmt = last_px_rt if (self._is_pos_num(last_px_rt) and last_px_rt > 0) else last_px
+                        entry_px = float(px_for_mgmt)
 
                         # keret snapshot lock alatt
                         with self._mb_lock:
@@ -7634,21 +7791,50 @@ class CryptoBotApp:
                                 # QUOTE mód: funds = commit_usdt
                                 commit_usdt = float(funds)
                                 nominal_q   = commit_usdt * max(1, lev)
-                                open_size   = nominal_q / max(last_px_rt, 1e-12)
+                                open_size   = nominal_q / max(px_for_mgmt, 1e-12)
                             elif size is not None and size > 0:
                                 # BASE mód: size = darabszám
                                 open_size   = float(size)
-                                nominal_q   = open_size * last_px_rt
+                                nominal_q   = open_size * px_for_mgmt
                                 commit_usdt = nominal_q / max(1, lev)
                             else:
                                 open_size = 0.0
                                 commit_usdt = 0.0
                                 nominal_q = 0.0
 
+                            # --- POOL CLAMP: commit/nominal/size ráhúzása a free_pool-ra ---
+                            # Cél: a tényleges felhasználás ne tudjon nagyobb lenni, mint a szabad pool. A sanitizer logikát nem bántjuk: nominal_q / open_size konzisztens marad.
+                            try:
+                                lev_eff = max(1, int(lev))
+                                free_pool_eff = max(0.0, float(free_pool))
+
+                                # 1) fee headroom becslés (1 pass), hogy commit+fee se lépje túl a pool-t
+                                fee_rate = self._mb_get_taker_fee()
+                                fee_est = 0.0
+                                if self._is_pos_num(open_size) and open_size > 0:
+                                    fee_est = float(self._mb_est_fee_quote(entry_px, float(open_size), float(fee_rate)))
+                                max_commit = max(0.0, free_pool_eff - max(0.0, fee_est))
+
+                                # 2) commit clamp
+                                if self._is_pos_num(commit_usdt) and commit_usdt > max_commit:
+                                    commit_usdt = max_commit
+
+                                # 3) ebből újraszámoljuk a nominalt és a size-t (konzisztens input a sanitizernek)
+                                nominal_q = float(commit_usdt) * float(lev_eff)
+                                open_size = float(nominal_q) / max(float(px_for_mgmt), 1e-12)
+
+                                # 4) lépésre kerekítés után még egyszer korrigáljuk a nominal/commit-et, hogy a padlózás után is konzisztens legyen minden
+                                open_size = self._mb_floor_to_step_dec(open_size, lot_step)
+                                nominal_q = float(open_size) * float(px_for_mgmt)
+                                commit_usdt = float(nominal_q) / float(lev_eff)
+                            except Exception:
+                                # hiba esetén inkább ne dobjon el mindent, marad az eredeti számítás
+                                pass
+                            # open_size már padlózva van a clamp blokkban (ha az lefutott), de ha ott exception volt, itt még biztosan padlózzuk:
                             open_size = self._mb_floor_to_step_dec(open_size, lot_step)
 
                             self._safe_log(
-                                f"📈 Jel: {combined_sig.upper()} | price={last_px_rt:.6f} | size%={sizep_to_use:.2f} | "
+                                f"📈 Jel: {combined_sig.upper()} | price={px_for_mgmt:.6f} | size%={sizep_to_use:.2f} | "
                                 f"nominal={nominal_q:.2f} | commit={commit_usdt:.2f} | free_pool={free_pool:.2f} | "
                                 f"lev={lev} | mode={mode} dry={dry}\n"
                             )
@@ -7664,7 +7850,7 @@ class CryptoBotApp:
                                         pre_funds_nominal = float(nominal_q)
                                         _sb, _fq = self._mb_sanitize_order(
                                             symbol=symbol, side='buy',
-                                            price=last_px_rt,
+                                            price=px_for_mgmt,
                                             size_base=None,
                                             funds_quote=pre_funds_nominal
                                         )
@@ -7673,7 +7859,7 @@ class CryptoBotApp:
                                             self._safe_log("ℹ️ SIM BUY eldobva (sanitizer funds/minFunds/quote_step miatt).\n")
                                         else:
                                             size_to_send = self._mb_floor_to_step_dec(
-                                                float(funds_to_send) / max(last_px_rt, 1e-12), float(lot_step or 0.0)
+                                                float(funds_to_send) / max(px_for_mgmt, 1e-12), float(lot_step or 0.0)
                                             )
                                             if min_base and size_to_send < float(min_base):
                                                 self._safe_log("ℹ️ SIM BUY eldobva (méret < minBase a padlózás után).\n")
@@ -7681,7 +7867,7 @@ class CryptoBotApp:
                                     else:
                                         _sb, _fq = self._mb_sanitize_order(
                                             symbol=symbol, side='sell',
-                                            price=last_px_rt,
+                                            price=px_for_mgmt,
                                             size_base=float(open_size),
                                             funds_quote=None
                                         )
@@ -7695,16 +7881,16 @@ class CryptoBotApp:
                                             sz_sim = float(size_to_send)
                                         else:
                                             sz_sim = float(size_to_send)
-                                            commit_sim = (sz_sim * float(last_px_rt)) / max(lev, 1)
+                                            commit_sim = (sz_sim * float(px_for_mgmt)) / max(lev, 1)
 
                                         if use_atr and atr_val is not None:
                                             atr_pack = (mul_sl, mul_tp1, mul_tp2, mul_tr, atr_val)
-                                            _open_sim(combined_sig, last_px_rt, sz_sim, commit_sim, atr_pack=atr_pack)
+                                            _open_sim(combined_sig, entry_px, sz_sim, commit_sim, atr_pack=atr_pack, symbol_for_pos=symbol)
                                         elif use_fixed:
                                             fixed_pack = (tpct, spct, trpct)
-                                            _open_sim(combined_sig, last_px_rt, sz_sim, commit_sim, fixed_pack=fixed_pack)
+                                            _open_sim(combined_sig, entry_px, sz_sim, commit_sim, fixed_pack=fixed_pack, symbol_for_pos=symbol)
                                         else:
-                                            _open_sim(combined_sig, last_px_rt, sz_sim, commit_sim)
+                                            _open_sim(combined_sig, entry_px, sz_sim, commit_sim, symbol_for_pos=symbol)
                                         opened = True
                                 else:
                                     try:
@@ -7715,7 +7901,7 @@ class CryptoBotApp:
                                             _pre_funds = nominal_q
                                             _sb, _fq = self._mb_sanitize_order(
                                                 symbol=symbol, side='buy',
-                                                price=last_px_rt,
+                                                price=px_for_mgmt,
                                                 size_base=None,
                                                 funds_quote=_pre_funds
                                             )
@@ -7724,7 +7910,7 @@ class CryptoBotApp:
                                             _pre_size = open_size
                                             _sb, _fq = self._mb_sanitize_order(
                                                 symbol=symbol, side='sell',
-                                                price=last_px_rt,
+                                                price=px_for_mgmt,
                                                 size_base=_pre_size,
                                                 funds_quote=None
                                             )
@@ -7790,7 +7976,7 @@ class CryptoBotApp:
                                             fb, commit_real_ws, fee_open_actual = self._mb_resolve_open_fill(
                                                 order_id=str(order_key),
                                                 side=combined_sig,
-                                                req_price=last_px_rt,
+                                                req_price=entry_px,
                                                 req_size=size_req,
                                                 req_funds=funds_req,
                                                 lev=lev,
@@ -7808,11 +7994,11 @@ class CryptoBotApp:
                                                 # --- 2) Fallback: régi becslés a sanitizer output alapján ---
                                                 if funds_to_send is not None:
                                                     commit_used = float(funds_to_send) / max(lev, 1)
-                                                    size_now = self._sdiv(float(funds_to_send), last_px_rt, 0.0)
+                                                    size_now = self._sdiv(float(funds_to_send), px_for_mgmt, 0.0)
                                                     size_now = self._mb_floor_to_step_dec(size_now, float(lot_step_now or 0.0))
                                                 else:
                                                     size_now = float(size_to_send)
-                                                    commit_used = self._sdiv(size_now * float(last_px_rt), lev, 0.0)
+                                                    commit_used = self._sdiv(size_now * float(px_for_mgmt), lev, 0.0)
 
                                             if commit_used is None or commit_used <= 0:
                                                 # végső fallback: marad az eredeti commit_usdt
@@ -7820,7 +8006,7 @@ class CryptoBotApp:
 
                                             # --- Fee becslés / tényleges ---
                                             _fee_rate = self._mb_get_taker_fee()
-                                            _fee_open_est = self._mb_est_fee_quote(last_px_rt, size_now, _fee_rate)
+                                            _fee_open_est = self._mb_est_fee_quote(entry_px, size_now, _fee_rate)
 
                                             fee_open_actual = float(fee_open_actual or 0.0)
                                             _fee_for_pnl = fee_open_actual if fee_open_actual > 0.0 else _fee_open_est
@@ -7832,7 +8018,7 @@ class CryptoBotApp:
                                                 rt_now = self.get_best_price(symbol)
 
                                                 if self._is_pos_num(rt_now) and rt_now > 0:
-                                                    gross = (rt_now - last_px_rt) * size_now * \
+                                                    gross = (rt_now - entry_px) * size_now * \
                                                             (1 if combined_sig == 'buy' else -1)
                                                     pnl_est = gross - float(_fee_for_pnl)
                                             except Exception:
@@ -7841,7 +8027,7 @@ class CryptoBotApp:
                                             # History: fee = tényleges, ha elérhető, különben a becsült
                                             self._mb_hist_add_open(
                                                 order_id=str(order_key),
-                                                side=combined_sig, entry=last_px_rt,
+                                                side=combined_sig, entry=entry_px,
                                                 size=size_now,
                                                 lev=lev, fee=float(_fee_for_pnl),
                                                 pnl_est=pnl_est
@@ -7849,13 +8035,14 @@ class CryptoBotApp:
 
                                             # SIM pool/pozíció: commit_used + fee_open_actual/becslés
                                             _open_sim(
-                                                combined_sig, last_px_rt,
+                                                combined_sig, entry_px,
                                                 size_now, commit_used,
                                                 atr_pack=(mul_sl, mul_tp1, mul_tp2, mul_tr, atr_val) if (use_atr and atr_val is not None) else None,
                                                 fixed_pack=(tpct, spct, trpct) if use_fixed else None,
                                                 fee_open_actual_override=fee_open_actual if fee_open_actual > 0.0 else 0.0,
                                                 fee_reserved_override=_fee_for_pnl,
                                                 oid=str(order_key),
+                                                symbol_for_pos=symbol,
                                             )
                                             opened = True
 
@@ -7964,6 +8151,20 @@ class CryptoBotApp:
         except Exception:
             pass
 
+    def _mb_toggle_adx_widgets(self):
+        """ADX filter UI enable/disable."""
+        try:
+            on = bool(self.mb_use_adx.get())
+        except Exception:
+            on = False
+        st = "normal" if on else "disabled"
+        for w in (getattr(self, "mb_adx_len", None), getattr(self, "mb_adx_min", None)):
+            try:
+                if w is not None:
+                    w.configure(state=st)
+            except Exception:
+                pass
+ 
     def _mb_toggle_htf_widgets(self):
         """HTF filter ki/be – a HTF TF combobox engedélyezése/tiltása."""
         try:
@@ -8243,6 +8444,67 @@ class CryptoBotApp:
         rs = avg_gain / avg_loss.replace(0, 1e-12) # Nullával osztás védelem
         rsi = 100 - (100 / (1 + rs))
         return rsi
+
+    def _mb_adx(self, df, length: int = 14) -> float | None:
+        """
+        Stabil ADX (Wilder / RMA).
+        df oszlopok: 'h','l','c'
+        Vissza: utolsó ADX érték vagy None.
+        """
+        try:
+            import numpy as np
+            import pandas as pd
+
+            n = int(max(2, int(length or 14)))
+            if df is None or len(df) < n * 2:
+                return None
+
+            high = pd.to_numeric(df["h"], errors="coerce")
+            low  = pd.to_numeric(df["l"], errors="coerce")
+            close= pd.to_numeric(df["c"], errors="coerce")
+
+            # ha túl sok a NaN, ne számoljunk
+            if high.isna().all() or low.isna().all() or close.isna().all():
+                return None
+
+            up   = high.diff()
+            down = -low.diff()
+
+            plus_dm  = up.where((up > down) & (up > 0), 0.0)
+            minus_dm = down.where((down > up) & (down > 0), 0.0)
+
+            tr1 = (high - low).abs()
+            tr2 = (high - close.shift(1)).abs()
+            tr3 = (low  - close.shift(1)).abs()
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+            atr = self._rma(tr, n)
+            atr = atr.replace(0.0, np.nan)  # pd.NA helyett np.nan (stabilabb dtype)
+
+            pdi = 100.0 * (self._rma(plus_dm, n)  / atr)
+            mdi = 100.0 * (self._rma(minus_dm, n) / atr)
+
+            denom = (pdi + mdi).replace(0.0, np.nan)
+            dx = (100.0 * (pdi - mdi).abs() / denom).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+            adx = self._rma(dx, n)
+            if adx is None or len(adx) == 0:
+                return None
+
+            val = float(adx.iloc[-1])
+            if not np.isfinite(val):
+                return None
+            return val
+
+        except Exception as e:
+            # egyszeri, nem-spammelő debug (hogy lásd mi volt a baj)
+            try:
+                if not hasattr(self, "_adx_err_logged"):
+                    self._adx_err_logged = True
+                    self._safe_log(f"⚠️ ADX számítási hiba: {e}\n")
+            except Exception:
+                pass
+            return None
 
     # ---------- HTF trend filter (Biztonságosabb) ----------
     def _mb_trend_filter(
@@ -8600,6 +8862,11 @@ class CryptoBotApp:
             "rsi_bmax": self._mb_get_float('mb_rsi_buy_max', 70.0),
             "rsi_smin": self._mb_get_float('mb_rsi_sell_min', 30.0),
             "rsi_smax": self._mb_get_float('mb_rsi_sell_max', 55.0),
+
+            # ADX (oldalazás / trend szűrő)
+            "use_adx": bool(getattr(self, "mb_use_adx", tk.BooleanVar(value=False)).get()),
+            "adx_len": self._mb_get_int('mb_adx_len', 14),
+            "adx_min": self._mb_get_float('mb_adx_min', 20.0),
 
             # HTF
             "use_htf": bool(getattr(self, "mb_use_htf", tk.BooleanVar(value=False)).get()),
