@@ -8459,45 +8459,55 @@ class CryptoBotApp:
             if df is None or len(df) < n * 2:
                 return None
 
-            high = pd.to_numeric(df["h"], errors="coerce")
-            low  = pd.to_numeric(df["l"], errors="coerce")
-            close= pd.to_numeric(df["c"], errors="coerce")
+            # --- Biztos numerikus input (float) ---
+            high  = pd.to_numeric(df["h"], errors="coerce").astype("float64")
+            low   = pd.to_numeric(df["l"], errors="coerce").astype("float64")
+            close = pd.to_numeric(df["c"], errors="coerce").astype("float64")
 
-            # ha túl sok a NaN, ne számoljunk
             if high.isna().all() or low.isna().all() or close.isna().all():
                 return None
 
             up   = high.diff()
             down = -low.diff()
 
-            plus_dm  = up.where((up > down) & (up > 0), 0.0)
-            minus_dm = down.where((down > up) & (down > 0), 0.0)
+            plus_dm  = up.where((up > down) & (up > 0), 0.0).astype("float64")
+            minus_dm = down.where((down > up) & (down > 0), 0.0).astype("float64")
 
             tr1 = (high - low).abs()
             tr2 = (high - close.shift(1)).abs()
             tr3 = (low  - close.shift(1)).abs()
-            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).astype("float64")
 
             atr = self._rma(tr, n)
-            atr = atr.replace(0.0, np.nan)  # pd.NA helyett np.nan (stabilabb dtype)
+            if atr is None or len(atr) == 0:
+                return None
+            atr = pd.to_numeric(atr, errors="coerce").astype("float64").replace(0.0, np.nan)
 
-            pdi = 100.0 * (self._rma(plus_dm, n)  / atr)
-            mdi = 100.0 * (self._rma(minus_dm, n) / atr)
+            pdi = self._rma(plus_dm, n)
+            mdi = self._rma(minus_dm, n)
+            if pdi is None or mdi is None:
+                return None
+
+            pdi = (100.0 * (pd.to_numeric(pdi, errors="coerce").astype("float64") / atr))
+            mdi = (100.0 * (pd.to_numeric(mdi, errors="coerce").astype("float64") / atr))
 
             denom = (pdi + mdi).replace(0.0, np.nan)
-            dx = (100.0 * (pdi - mdi).abs() / denom).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+            # --- Itt volt a FutureWarning forrása: tegyük garantáltan numerikussá fillna előtt ---
+            dx = (100.0 * (pdi - mdi).abs() / denom)
+            dx = dx.replace([np.inf, -np.inf], np.nan)
+            dx = pd.to_numeric(dx, errors="coerce").fillna(0.0).astype("float64")
 
             adx = self._rma(dx, n)
             if adx is None or len(adx) == 0:
                 return None
 
-            val = float(adx.iloc[-1])
+            val = float(pd.to_numeric(adx.iloc[-1], errors="coerce"))
             if not np.isfinite(val):
                 return None
             return val
 
         except Exception as e:
-            # egyszeri, nem-spammelő debug (hogy lásd mi volt a baj)
             try:
                 if not hasattr(self, "_adx_err_logged"):
                     self._adx_err_logged = True
