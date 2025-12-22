@@ -4386,7 +4386,7 @@ class CryptoBotApp:
             sig, quad = self._compute_zscore_signal(
                 symbol, tf, length=length, data_points=points
             )
-            txt_map = {1: "LONG", -1: "SHORT", 0: "SEMLEGES"}
+            txt_map = {1: "LONG", -1: "SHORT", 0: "HOLD"}
             txt = txt_map.get(sig, "ismeretlen")
 
             extra = ""
@@ -6633,6 +6633,7 @@ class CryptoBotApp:
         ) -> str:
             parts: list[str] = []
 
+            # RSI filter
             if use_rsi:
                 parts.append(
                     f"rsi=ON[buy:{rsi_bmin:.1f}-{rsi_bmax:.1f} "
@@ -6641,23 +6642,28 @@ class CryptoBotApp:
             else:
                 parts.append("rsi=OFF")
 
+            # ADX filter formázása: adx=ON(14) 25.7(>20)
             if use_adx:
-                try:
-                    if adx_val is None:
-                        parts.append(f"adx=ON({int(adx_len)}) n/a(>{float(adx_min):g})")
-                    else:
-                        parts.append(f"adx=ON({int(adx_len)}) {float(adx_val):.1f}(>{float(adx_min):g})")
-                except Exception:
-                    parts.append("adx=ON(?)")
+                val_str = f"{adx_val:.1f}" if adx_val is not None else "n/a"
+                parts.append(f"adx=ON({int(adx_len)})(>{float(adx_min):g})")
             else:
                 parts.append("adx=OFF")
 
-            parts.append(f"htf={'ON' if use_htf else 'OFF'}({trend_htf:+d})")
+            # HTF filter formázása: htf=ON(-1)
+            if use_htf:
+                parts.append(f"htf=ON")
+            else:
+                parts.append("htf=OFF")
+
             parts.append(f"brk={'ON' if use_brk else 'OFF'}")
             parts.append(f"live_px={'ON' if use_live else 'OFF'}")
+            
+            # Z-score filter formázása: csak ON/OFF (érték fent van)
             parts.append(f"zscore={'ON' if use_zscore else 'OFF'}")
+            
             parts.append(f"cd_left={cd_left}s")
 
+            # Prefix változott: 'filters:'
             return "filters: " + ", ".join(parts)
 
         def _log_status_line(
@@ -6674,6 +6680,11 @@ class CryptoBotApp:
             use_rsi: bool,
             rsi_len: int,
             rsi_val: float | None,
+            use_adx: bool,          # ÚJ PARAMÉTER
+            adx_len: int,           # ÚJ PARAMÉTER
+            adx_val: float | None,  # ÚJ PARAMÉTER
+            use_zscore: bool,       # ÚJ PARAMÉTER
+            z_dir: str,             # ÚJ PARAMÉTER (buy/sell/hold szövegesen)
             use_brk: bool,
             brk_n: int,
             hh: float,
@@ -6686,19 +6697,40 @@ class CryptoBotApp:
             pool_used: float,
             pool_balance: float,
         ) -> str:
+            # Formátum követése: [PÁR TF] Élő ár=... Gyertya ár=...
             parts: list[str] = [
                 f"[{symbol} {tf}] Élő ár={last_px_rt:.6f}",
                 f"Gyertya ár={last_px:.6f}",
                 f"EMA({fa})={ef_l:.4f}/EMA({slw})={es_l:.4f}",
             ]
+            
+            # HTF érték megjelenítése a felső logban
             if use_htf:
                 parts.append(f"HTF={trend_htf:+d}")
+                
+            # RSI érték
             if use_rsi and rsi_val is not None:
                 parts.append(f"RSI({rsi_len})={rsi_val:.2f}")
+                
+            # ADX érték megjelenítése a felső logban: ADX(14)=25.7
+            if use_adx and adx_val is not None:
+                parts.append(f"ADX({adx_len})={adx_val:.1f}")
+
+            # Z-score érték (irány) megjelenítése a felső logban
+            if use_zscore:
+                # z_dir értéke 'buy', 'sell' vagy 'hold' -> konvertáljuk 'LONG', 'SHORT', 'HOLD'-re vagy angolra
+                z_display = z_dir.upper() if z_dir != "hold" else "HOLD"
+                if z_dir == "buy": z_display = "LONG"
+                if z_dir == "sell": z_display = "SHORT"
+                parts.append(f"Z-SCORE={z_display}")
+
+            # Breakout adatok
             if use_brk and not (math.isnan(hh) or math.isnan(ll)):
                 parts.append(
                     f"BRK[{brk_n}] HH={hh:.4f} LL={ll:.4f} ↑{up_lvl:.4f} ↓{dn_lvl:.4f}"
                 )
+                
+            # Drift és Pool adatok
             if drift_pct == drift_pct:
                 parts.append(f"drift={drift_pct:.2f}%")
             parts.append(
@@ -7557,12 +7589,13 @@ class CryptoBotApp:
                         cd_left=cd_left,
                     )
 
-                    # --- Log sor felépítés + hold_from + logolási policy ---
-                    # pool snapshot loghoz – pool attr-ok olvasása lock alatt
+                    # --- Log sor felépítés ---
+                    # pool snapshot loghoz
                     with self._mb_lock:
                         pool_used_for_log = float(self._pool_used_quote)
                         pool_bal_for_log  = float(self._pool_balance_quote)
 
+                    # Felső sor hívása az új paraméterekkel (ADX, Z-score)
                     log_line = _log_status_line(
                         symbol=symbol,
                         tf=tf,
@@ -7577,6 +7610,11 @@ class CryptoBotApp:
                         use_rsi=use_rsi,
                         rsi_len=rsi_len,
                         rsi_val=rsi_val,
+                        use_adx=use_adx,          # Átadva
+                        adx_len=adx_len,          # Átadva
+                        adx_val=adx_val,          # Átadva
+                        use_zscore=use_zscore,    # Átadva
+                        z_dir=z_dir,              # Átadva (pl. "buy", "sell", "hold")
                         use_brk=use_brk,
                         brk_n=brk_n,
                         hh=hh,
@@ -7590,85 +7628,90 @@ class CryptoBotApp:
                         pool_balance=pool_bal_for_log,
                     )
 
-                    # melyik jelből lett HOLD? (amúgy buy/sell)
-                    orig_sig = None
-                    if combined_sig_raw in ("buy", "sell"):
-                        orig_sig = combined_sig_raw
-                    elif sig_raw in ("buy", "sell"):
-                        orig_sig = sig_raw
+                    # Filter sor hívása
+                    filters_line = _build_filters_line(
+                        use_rsi=use_rsi,
+                        rsi_bmin=rsi_bmin,
+                        rsi_bmax=rsi_bmax,
+                        rsi_smin=rsi_smin,
+                        rsi_smax=rsi_smax,
+                        use_adx=use_adx,
+                        adx_len=adx_len,
+                        adx_min=adx_min,
+                        adx_val=adx_val,
+                        use_htf=use_htf,
+                        trend_htf=trend_htf,
+                        use_brk=use_brk,
+                        use_live=use_live,
+                        use_zscore=use_zscore,
+                        cd_left=cd_left,
+                    )
 
-                    # Ha HOLD, akkor fűzzük hozzá a "hold_from" + okok
+                    # HOLD okok formázása: "hold_reasons=... › hold"
+                    # Csak akkor írjuk ki a hold okokat, ha a végső jel 'hold', de volt alapjel
+                    final_suffix = ""
+                    
                     if combined_sig in (None, "", "hold"):
-                        extras = []
-                        if orig_sig in ("buy", "sell"):
-                            extras.append(f"hold_from={orig_sig}")
+                        reasons_str = ""
                         if reasons:
-                            extras.append("hold_reasons=" + ",".join(reasons))
-                        if extras:
-                            log_line += " | " + " ".join(extras)
+                            reasons_str = "hold_reasons=" + ", ".join(reasons)
+                        
+                        # Ha van hold indok, akkor fűzzük hozzá a nyilat
+                        if reasons_str:
+                             final_suffix = f" | {reasons_str}  › hold"
+                        elif combined_sig == "hold":
+                             # Ha nincs konkrét indok (pl. alapból sem volt jel), csak simán hold vagy üres
+                             final_suffix = " › hold"
+                    else:
+                        # Ha van jel (buy/sell)
+                        final_suffix = f"  › {combined_sig}"
 
-                    # ================== STÁTUSZ LOG VEZÉRLÉS (JAVÍTOTT) ==================
+                    full_log_string = f"{log_line}\n{filters_line}\n{final_suffix}\n"
+
+                    # ================== STÁTUSZ LOG VEZÉRLÉS ==================
+                    # A korábbi logika szerint, csak a 'log_line.rstrip() + ...' helyett a 'full_log_string'-et használjuk
                     verbose_on = bool(getattr(self, "_mb_log_verbose", False))
-
-                    # Előző állapot lekérése a dedup-hoz
                     last_sig_log = getattr(self, "_mb_last_status_sig", "")
                     last_px_log  = float(getattr(self, "_mb_last_status_px", 0.0) or 0.0)
 
-                    # 1) Ha KI van kapcsolva a részletes log (Csendes mód)
                     if not verbose_on:
-                        # SPAM VÉDELEM: Csak akkor logolunk, ha a jelzés VÁLTOZOTT az előzőhöz képest.
-                        # Így ha pl. cooldown miatt beragad a 'buy', nem írja ki 100x.
                         if combined_sig in ("buy", "sell"):
                             if combined_sig != last_sig_log:
-                                self._safe_log(
-                                    log_line.rstrip() + f"  → {combined_sig} | {filters_line}\n"
-                                )
-
-                        # Állapot frissítése a következő körhöz
+                                self._safe_log(full_log_string) # Módosított string
                         self._mb_last_status_sig = combined_sig
                         self._mb_last_status_px  = float(last_px_rt or last_px or 0.0)
-
-                    # 2) Ha BE van kapcsolva a részletes log (VERBOSE ON)
                     else:
+                        # (A verbose logikád marad a régi, csak a kiírt string változik)
                         try:
                             delay_s = int(getattr(self, "_mb_log_delay", 5))
-                            if delay_s <= 0:
-                                delay_s = 5
-                        except Exception:
-                            delay_s = 5
-
+                            if delay_s <= 0: delay_s = 5
+                        except Exception: delay_s = 5
+                        
                         should_log = True
                         try:
-                            now_ts_log   = _safe_now_ts()
-                            last_ts_log  = getattr(self, "_mb_last_status_log_ts", 0)
-
+                            now_ts_log = _safe_now_ts()
+                            last_ts_log = getattr(self, "_mb_last_status_log_ts", 0)
                             if combined_sig in ("buy", "sell"):
-                                # Éles jel esetén mindig logolunk (hogy lássuk, miért nem köt, pl. cooldown)
                                 should_log = True
                             else:
-                                # HOLD / egyéb eset ritkítása
                                 dt = now_ts_log - last_ts_log
                                 px_move_pct = 0.0
                                 if self._is_pos_num(last_px_log) and self._is_pos_num(last_px_rt) and last_px_rt > 0:
                                     px_move_pct = abs(last_px_rt - last_px_log) / last_px_log * 100.0
-
-                                # Csak akkor logolunk, ha letelt az idő VAGY nagyot mozdult az ár
                                 if dt < delay_s and combined_sig == last_sig_log and px_move_pct < 0.2:
                                     should_log = False
                                 else:
                                     should_log = True
 
                             if should_log:
-                                self._mb_last_status_log_ts  = now_ts_log
-                                self._mb_last_status_sig     = combined_sig
-                                self._mb_last_status_px      = float(last_px_rt or last_px or 0.0)
+                                self._mb_last_status_log_ts = now_ts_log
+                                self._mb_last_status_sig = combined_sig
+                                self._mb_last_status_px = float(last_px_rt or last_px or 0.0)
                         except Exception:
                             should_log = True
 
                         if should_log:
-                            self._safe_log(
-                                log_line.rstrip() + f"  → {combined_sig} | {filters_line}\n"
-                            )
+                            self._safe_log(full_log_string) # Módosított string
 
                     # BUY / SELL pozíciók közös menedzsmentje
                     _manage_positions_for_side("buy")
@@ -8526,7 +8569,7 @@ class CryptoBotApp:
         invert: bool | None = None,
     ) -> int:
         """
-        HTF Filter: +1 (Bull), -1 (Bear), 0 (Semleges/Hiba).
+        HTF Filter: +1 (Bull), -1 (Bear), 0 (HOLD/Hiba).
 
         JAVÍTVA:
           - NEM indít WebSocketet, azt a fő worker (_mb_worker) intézi.
@@ -8608,7 +8651,7 @@ class CryptoBotApp:
         """Z-score stratégia alkalmazása.
 
         Visszatérés:
-            signal:  1 = long, -1 = short, 0 = semleges
+            signal:  1 = long, -1 = short, 0 = hold
             quadrant_info: dict a statisztikákkal
         """
         z_score, z_change = self.compute_zscore_strategy(df, length=length, source=source)
