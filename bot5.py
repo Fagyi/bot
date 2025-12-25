@@ -4678,7 +4678,8 @@ class CryptoBotApp:
         try:
             self._mb_hist_tv.tag_configure("win",  background="#d9ffdb")
             self._mb_hist_tv.tag_configure("loss", background="#ffd9d9")
-            self._mb_hist_tv.tag_configure("flat", background="")
+            self._mb_hist_tv.tag_configure("win_floating",  background="#f1fff3")
+            self._mb_hist_tv.tag_configure("loss_floating", background="#fff1f1")
         except Exception:
             pass
 
@@ -5394,15 +5395,8 @@ class CryptoBotApp:
                 if not hasattr(self, "_mb_hist_rows_by_oid"):
                     self._mb_hist_rows_by_oid = {}
 
-                # PnL alapján tag (ha van érték)
-                tags = ()
-                try:
-                    if pnl_est is not None:
-                        _p = float(pnl_est)
-                        tags = ("win",) if _p > 0 else (("loss",) if _p < 0 else ("flat",))
-                except Exception:
-                    tags = ()
-                iid = tv.insert("", "end", values=row, tags=tags)
+                # Beszúráskor nincs színezés (nem végleges eredmény)
+                iid = tv.insert("", "end", values=row)
                 if oid != "-":
                     self._mb_hist_rows_by_oid[oid] = iid
 
@@ -5466,8 +5460,12 @@ class CryptoBotApp:
                 try:
                     pnl_txt = vals[PNL_IDX]
                     _p = float(str(pnl_txt).replace(",", "")) if pnl_txt not in ("", None) else 0.0
-                    tag = ("win",) if _p > 0 else (("loss",) if _p < 0 else ("flat",))
-                    tv.item(iid, tags=tag)
+                    if _p > 0:
+                        tv.item(iid, tags=("win",))
+                    elif _p < 0:
+                        tv.item(iid, tags=("loss",))
+                    else:
+                        tv.item(iid, tags=())
                 except Exception:
                     pass
             except Exception:
@@ -5522,8 +5520,12 @@ class CryptoBotApp:
                 try:
                     pnl_txt = vals[PNL_IDX]
                     _p = float(str(pnl_txt).replace(",", "")) if pnl_txt not in ("", None) else 0.0
-                    tag = ("win",) if _p > 0 else (("loss",) if _p < 0 else ("flat",))
-                    tv.item(iid, tags=tag)
+                    if _p > 0:
+                        tv.item(iid, tags=("win_floating",))
+                    elif _p < 0:
+                        tv.item(iid, tags=("loss_floating",))
+                    else:
+                        tv.item(iid, tags=())
                 except Exception:
                     pass
             except Exception:
