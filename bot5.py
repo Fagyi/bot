@@ -4195,7 +4195,7 @@ class CryptoBotApp:
         self.nb.add(self.tab_mbot, text="Margin Bot")
         root = self.tab_mbot
         root.grid_columnconfigure(0, weight=0, minsize=800)  # bal: form
-        root.grid_columnconfigure(1, weight=1)  # jobb: history+chart
+        root.grid_columnconfigure(1, weight=1)              # jobb: history+chart
         root.grid_rowconfigure(0, weight=1)
 
         # ===== bal oszlop: SCROLL-OZHATÓ konténer =====
@@ -4215,7 +4215,7 @@ class CryptoBotApp:
         canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
 
         # Scrollregion frissítés
-        def _on_scroll_frame_config(event):
+        def _on_scroll_frame_config(_event):
             canvas.configure(scrollregion=canvas.bbox("all"))
         scroll_frame.bind("<Configure>", _on_scroll_frame_config)
 
@@ -4229,7 +4229,7 @@ class CryptoBotApp:
             for child in widget.winfo_children():
                 _bind_mousewheel_recursively(child)
 
-        # ===== bal oszlop: beállítások (form) – IDE jön a régi tartalom =====
+        # ===== bal oszlop: beállítások (form) =====
         form = ttk.Labelframe(
             scroll_frame,
             text="Margin bot – beállítások",
@@ -4237,113 +4237,185 @@ class CryptoBotApp:
             style="Card.TLabelframe",
         )
         form.grid(row=0, column=0, sticky="nwe")
+        form.grid_columnconfigure(0, weight=1)
+
+        # --- ÚJ: belső fülek (Alap / Haladó) ---
+        cfg_nb = ttk.Notebook(form)
+        cfg_nb.grid(row=0, column=0, sticky="we")
+
+        tab_basic = ttk.Frame(cfg_nb)
+        tab_adv = ttk.Frame(cfg_nb)
+        cfg_nb.add(tab_basic, text="Alap beállítások")
+        cfg_nb.add(tab_adv, text="Haladó beállítások")
+
         for i in range(2):
-            form.grid_columnconfigure(i, weight=1)
+            tab_basic.grid_columnconfigure(i, weight=1)
+            tab_adv.grid_columnconfigure(i, weight=1)
+
+        basic = tab_basic
+        adv = tab_adv
+
         r = 0
+        r_adv = 0
+
+        # ====== ALAP BEÁLLÍTÁSOK (basic) ======
 
         # mód választó
         self.mb_mode = tk.StringVar(value="isolated")
-        mrow = ttk.Frame(form); mrow.grid(row=r, column=0, columnspan=2, sticky="w")
+        mrow = ttk.Frame(basic)
+        mrow.grid(row=r, column=0, columnspan=2, sticky="w")
         ttk.Radiobutton(
             mrow, text="Isolated", variable=self.mb_mode, value="isolated",
             command=lambda: (self._mb_sync_lev_cap(), self._mb_refresh_available())
-        ).pack(side=tk.LEFT, padx=(0,12))
+        ).pack(side=tk.LEFT, padx=(0, 12))
         ttk.Radiobutton(
             mrow, text="Cross", variable=self.mb_mode, value="cross",
             command=lambda: (self._mb_sync_lev_cap(), self._mb_refresh_available())
         ).pack(side=tk.LEFT)
         r += 1
 
-        ttk.Label(form, text="Pár").grid(row=r, column=0, sticky="w", pady=(4,0))
-        # Egy soron belüli konténer, hogy a Pár combó és a Max pozíció egymás mellett legyen
-        row_pair = ttk.Frame(form)
-        row_pair.grid(row=r, column=1, pady=(4,0), sticky="w")
-        # Pár combó
-        self.mb_symbol = ttk.Combobox(row_pair, values=self.symbols, width=12, state='readonly')
+        ttk.Label(basic, text="Pár").grid(row=r, column=0, sticky="w", pady=(4, 0))
+        row_pair = ttk.Frame(basic)
+        row_pair.grid(row=r, column=1, pady=(4, 0), sticky="w")
+
+        self.mb_symbol = ttk.Combobox(row_pair, values=self.symbols, width=12, state="readonly")
         self.mb_symbol.set(DEFAULT_SYMBOL)
         self.mb_symbol.pack(side="left")
-        # Max pozíció (0 = korlátlan) – KÖZVETLENÜL a Pár mellett
+
         ttk.Label(row_pair, text="  Max pozíció:").pack(side="left")
         self.mb_max_open = ttk.Spinbox(row_pair, from_=0, to=999, width=6)
-        self.mb_max_open.pack(side="left", padx=(4,0))
-        # alapértelmezett érték
-        self.mb_max_open.delete(0, "end"); self.mb_max_open.insert(0, "0")
-        # párváltáskor frissítsük az elérhető egyenleget
+        self.mb_max_open.pack(side="left", padx=(4, 0))
+        self.mb_max_open.delete(0, "end")
+        self.mb_max_open.insert(0, "0")
+
         self.mb_symbol.bind("<<ComboboxSelected>>", self._mb_refresh_available)
         r += 1
 
         # Idősík
-        ttk.Label(form, text="Idősík").grid(row=r, column=0, sticky="w", pady=(4,0))
-        self.mb_tf = ttk.Combobox(form, state="readonly", width=10,
-                                  values=["1m","3m","5m","15m","30m","1h","4h","1d"])
+        ttk.Label(basic, text="Idősík").grid(row=r, column=0, sticky="w", pady=(4, 0))
+        self.mb_tf = ttk.Combobox(
+            basic, state="readonly", width=10,
+            values=["1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"],
+        )
         self.mb_tf.set("1m")
-        self.mb_tf.grid(row=r, column=1, sticky="w", pady=(4,0))
-        # fül felépítése után egyszer töltsük be az elérhető egyenleget
+        self.mb_tf.grid(row=r, column=1, sticky="w", pady=(4, 0))
+
         self.root.after(50, self._mb_refresh_available)
         r += 1
 
-        # EMA (rövid/hosszú) – a worker mb_ma_fast/mb_ma_slow nevét használja
-        ttk.Label(form, text="EMA (rövid / hosszú)").grid(row=r, column=0, sticky="w", pady=(2,0))
-        ema_row = ttk.Frame(form); ema_row.grid(row=r, column=1, sticky="w", pady=(2,0))
+        # EMA (rövid/hosszú)
+        ttk.Label(basic, text="EMA (rövid / hosszú)").grid(row=r, column=0, sticky="w", pady=(2, 0))
+        ema_row = ttk.Frame(basic)
+        ema_row.grid(row=r, column=1, sticky="w", pady=(2, 0))
+
         self.mb_ma_fast = ttk.Spinbox(ema_row, from_=2, to=500, width=6)
-        self.mb_ma_fast.delete(0, tk.END); self.mb_ma_fast.insert(0, "12")
+        self.mb_ma_fast.delete(0, tk.END)
+        self.mb_ma_fast.insert(0, "12")
         self.mb_ma_fast.pack(side=tk.LEFT)
+
         ttk.Label(ema_row, text=" ").pack(side=tk.LEFT)
+
         self.mb_ma_slow = ttk.Spinbox(ema_row, from_=3, to=1000, width=6)
-        self.mb_ma_slow.delete(0, tk.END); self.mb_ma_slow.insert(0, "26")
+        self.mb_ma_slow.delete(0, tk.END)
+        self.mb_ma_slow.insert(0, "26")
         self.mb_ma_slow.pack(side=tk.LEFT)
 
-        # Invert checkbox ugyanebben a sorban
-        ttk.Label(ema_row, text="   ").pack(side=tk.LEFT)  # kis elválasztó
+        ttk.Label(ema_row, text="   ").pack(side=tk.LEFT)
         self.mb_invert_ema = tk.BooleanVar(value=False)
-        ttk.Checkbutton(ema_row, text="Invert EMA jel-logika", variable=self.mb_invert_ema)\
-           .pack(side=tk.LEFT, padx=(4,0))
-        r += 1  # <-- csak egyszer léptetünk itt
+        ttk.Checkbutton(
+            ema_row,
+            text="Invert EMA jel-logika",
+            variable=self.mb_invert_ema,
+        ).pack(side=tk.LEFT, padx=(4, 0))
+        r += 1
 
-        # EMA jel-szűrő paraméterek – KÖVETKEZŐ SOR (nincs extra r+=1 előtte!)
-        ttk.Label(form, text="EMA Hysteresis (Zajszűrés):").grid(row=r, column=0, sticky="w", pady=(6,0))
-        ema_f_row = ttk.Frame(form)
-        ema_f_row.grid(row=r, column=1, sticky="w", pady=(6,0))
+        # EMA Hysteresis
+        ttk.Label(basic, text="EMA Hysteresis (Zajszűrés):").grid(row=r, column=0, sticky="w", pady=(6, 0))
+        ema_f_row = ttk.Frame(basic)
+        ema_f_row.grid(row=r, column=1, sticky="w", pady=(6, 0))
+
         self.mb_ema_hyst_pct = ttk.Spinbox(ema_f_row, from_=0.0, to=100, width=6)
-        self.mb_ema_hyst_pct.delete(0, tk.END); self.mb_ema_hyst_pct.insert(0, "1.00")
+        self.mb_ema_hyst_pct.delete(0, tk.END)
+        self.mb_ema_hyst_pct.insert(0, "1.00")
         self.mb_ema_hyst_pct.pack(side=tk.LEFT)
         r += 1
 
-        # Tőkeáttét (worker: mb_leverage) + kompat alias a _mb_sync_lev_cap-hez
-        ttk.Label(form, text="Tőkeáttét").grid(row=r, column=0, sticky="w", pady=(6,0))
-        self.mb_leverage = ttk.Spinbox(form, from_=1, to=10, width=6)
-        self.mb_leverage.delete(0, tk.END); self.mb_leverage.insert(0, "10")
-        self.mb_leverage.grid(row=r, column=1, sticky="w", pady=(6,0))
+        # Tőkeáttét
+        ttk.Label(basic, text="Tőkeáttét").grid(row=r, column=0, sticky="w", pady=(6, 0))
+        self.mb_leverage = ttk.Spinbox(basic, from_=1, to=10, width=6)
+        self.mb_leverage.delete(0, tk.END)
+        self.mb_leverage.insert(0, "10")
+        self.mb_leverage.grid(row=r, column=1, sticky="w", pady=(6, 0))
         self.mb_lev = self.mb_leverage
         r += 1
 
-        # Méret % és input mód (QUOTE/BASE) + opcionális QUOTE keret
-        ttk.Label(form, text="Méret (%, QUOTE/BASE szerint)").grid(row=r, column=0, sticky="w", pady=(6,0))
-        size_row = ttk.Frame(form); size_row.grid(row=r, column=1, sticky="w", pady=(6,0))
+        # Méret % + input mód
+        ttk.Label(basic, text="Méret (%, QUOTE/BASE szerint)").grid(row=r, column=0, sticky="w", pady=(6, 0))
+        size_row = ttk.Frame(basic)
+        size_row.grid(row=r, column=1, sticky="w", pady=(6, 0))
+
         self.mb_size_pct = ttk.Spinbox(size_row, from_=1, to=100, width=6)
-        self.mb_size_pct.delete(0, tk.END); self.mb_size_pct.insert(0, "25")
+        self.mb_size_pct.delete(0, tk.END)
+        self.mb_size_pct.insert(0, "25")
         self.mb_size_pct.pack(side=tk.LEFT)
-        ttk.Label(size_row, text="  mód:").pack(side=tk.LEFT, padx=(6,2))
-        self.mb_input_mode = ttk.Combobox(size_row, state="readonly", width=7, values=["quote","base"])
-        self.mb_input_mode.set("quote"); self.mb_input_mode.pack(side=tk.LEFT)
+
+        ttk.Label(size_row, text="  mód:").pack(side=tk.LEFT, padx=(6, 2))
+        self.mb_input_mode = ttk.Combobox(size_row, state="readonly", width=7, values=["quote", "base"])
+        self.mb_input_mode.set("quote")
+        self.mb_input_mode.pack(side=tk.LEFT)
         r += 1
 
-        ttk.Label(form, text="Keret (QUOTE) – opcionális").grid(row=r, column=0, sticky="w", pady=(2,0))
-        # mező + elérhető egyenleg egysorban
-        _row_budget = ttk.Frame(form); _row_budget.grid(row=r, column=1, sticky="w", pady=(2,0))
-        self.mb_budget = ttk.Entry(_row_budget, width=12)  # ha üres: elérhető QUOTE-ot használ
+        ttk.Label(basic, text="Keret (QUOTE) – opcionális").grid(row=r, column=0, sticky="w", pady=(2, 0))
+        _row_budget = ttk.Frame(basic)
+        _row_budget.grid(row=r, column=1, sticky="w", pady=(2, 0))
+
+        self.mb_budget = ttk.Entry(_row_budget, width=12)
         self.mb_budget.pack(side=tk.LEFT)
-        ttk.Label(_row_budget, text="  Elérhető:").pack(side=tk.LEFT, padx=(8,2))
+
+        ttk.Label(_row_budget, text="  Elérhető:").pack(side=tk.LEFT, padx=(8, 2))
         self.mb_avail_var = tk.StringVar(value="–")
         self.mb_avail_lbl = ttk.Label(_row_budget, textvariable=self.mb_avail_var)
         self.mb_avail_lbl.pack(side=tk.LEFT)
         r += 1
 
-        # --- Z-score filter / konfluencia (EMA/RSI mellé) ---
-        z_box = ttk.Labelframe(form, text="Z-score filter / konfluencia", padding=6)
-        z_box.grid(row=r, column=0, columnspan=2, sticky="we", pady=(8, 0))
+        # checkboxok
+        ch = ttk.Frame(basic)
+        ch.grid(row=r, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
-        # 1. sor: checkbox + rövid magyarázó szöveg
+        self.mb_autob = tk.BooleanVar(value=True)
+        ttk.Checkbutton(ch, text="Auto-borrow/repay", variable=self.mb_autob).pack(side=tk.LEFT, padx=(10))
+
+        self.mb_allow_short = tk.BooleanVar(value=True)
+        ttk.Checkbutton(ch, text="Short engedélyezése", variable=self.mb_allow_short).pack(side=tk.LEFT, padx=(10))
+
+        self.mb_pause_new = tk.BooleanVar(value=False)
+        ttk.Checkbutton(ch, text="Új nyitás szünetel", variable=self.mb_pause_new).pack(side=tk.LEFT, padx=(10))
+
+        self.mb_dry = tk.BooleanVar(value=True)
+        ttk.Checkbutton(ch, text="Dry-run (nem küld ordert)", variable=self.mb_dry).pack(side=tk.LEFT, padx=(10))
+        r += 1
+
+        # Start / Stop
+        btns = ttk.Frame(basic)
+        btns.grid(row=r, column=0, columnspan=2, sticky="we", pady=(10, 0))
+        self.mb_start_btn = ttk.Button(btns, text="Start bot", command=self.mb_start)
+        self.mb_start_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        self.mb_stop_btn = ttk.Button(btns, text="Stop bot", command=self.mb_stop, state=tk.DISABLED)
+        self.mb_stop_btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        r += 1
+
+        apply_btn = ttk.Button(
+            basic,
+            text="Beállítások frissítése / paraméterek állítása ( futó botra )",
+            command=self.mb_reload_cfg,
+        )
+        apply_btn.grid(row=r, column=0, columnspan=2, sticky="we", pady=(10, 0))
+
+        # ====== HALADÓ BEÁLLÍTÁSOK (adv): Z-score -> Cooldown ======
+
+        z_box = ttk.Labelframe(adv, text="Z-score filter / konfluencia", padding=6)
+        z_box.grid(row=r_adv, column=0, columnspan=2, sticky="we", pady=(8, 0))
+
         z_row1 = ttk.Frame(z_box)
         z_row1.pack(anchor="w")
 
@@ -4352,10 +4424,9 @@ class CryptoBotApp:
             z_row1,
             text="Z-score filter használata",
             variable=self.mb_use_zscore,
-            command=self._mb_toggle_zscore_widgets,   # állapotváltáskor spinbox enable/disable
+            command=self._mb_toggle_zscore_widgets,
         ).pack(side=tk.LEFT)
 
-        # 2. sor: paraméterek (Hossz, Pontok) + teszt gomb
         z_row2 = ttk.Frame(z_box)
         z_row2.pack(anchor="w", pady=(4, 0))
 
@@ -4383,9 +4454,7 @@ class CryptoBotApp:
             except Exception:
                 points = 100
 
-            sig, quad = self._compute_zscore_signal(
-                symbol, tf, length=length, data_points=points
-            )
+            sig, quad = self._compute_zscore_signal(symbol, tf, length=length, data_points=points)
             txt_map = {1: "LONG", -1: "SHORT", 0: "HOLD"}
             txt = txt_map.get(sig, "ismeretlen")
 
@@ -4398,246 +4467,274 @@ class CryptoBotApp:
                 )
             self.mb_z_label.configure(text=f"Z-score jelzés: {txt}{extra}")
 
-        ttk.Button(
-            z_row2,
-            text="Z-score teszt",
-            command=_mb_test_zscore,
-        ).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Button(z_row2, text="Z-score teszt", command=_mb_test_zscore).pack(side=tk.LEFT, padx=(10, 0))
 
-        # 3. sor: jelzés kiírása
         z_row3 = ttk.Frame(z_box)
         z_row3.pack(anchor="w", pady=(4, 0))
         self.mb_z_label = ttk.Label(z_row3, text="Z-score jelzés: n/a")
         self.mb_z_label.pack(side=tk.LEFT)
-
-        r += 1
+        r_adv += 1
 
         # Fix SL / TP / Trailing – opcionális (ATR nélkül)
-        fixed_box = ttk.Labelframe(form, text="Fix SL / TP / Trailing (ATR nélkül)", padding=6)
-        fixed_box.grid(row=r, column=0, columnspan=2, sticky="we", pady=(8,0))
-        fixed_row1 = ttk.Frame(fixed_box); fixed_row1.pack(anchor="w")
+        fixed_box = ttk.Labelframe(adv, text="Fix SL / TP / Trailing (ATR nélkül)", padding=6)
+        fixed_box.grid(row=r_adv, column=0, columnspan=2, sticky="we", pady=(8, 0))
+        fixed_row1 = ttk.Frame(fixed_box)
+        fixed_row1.pack(anchor="w")
 
-        self.mb_use_fixed = tk.BooleanVar(value=True)  # új kapcsoló
-        ttk.Checkbutton(fixed_row1, text="Fix menedzsment használata", variable=self.mb_use_fixed,
-                        command=self._mb_on_fixed_changed).pack(side=tk.LEFT)
+        self.mb_use_fixed = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            fixed_row1,
+            text="Fix menedzsment használata",
+            variable=self.mb_use_fixed,
+            command=self._mb_on_fixed_changed,
+        ).pack(side=tk.LEFT)
 
-        fixed_row2 = ttk.Frame(fixed_box); fixed_row2.pack(anchor="w", pady=(4,0))
+        fixed_row2 = ttk.Frame(fixed_box)
+        fixed_row2.pack(anchor="w", pady=(4, 0))
+
         ttk.Label(fixed_row2, text="SL %").pack(side=tk.LEFT)
         self.mb_sl_pct = ttk.Spinbox(fixed_row2, from_=0, to=50, increment=0.1, width=6)
-        self.mb_sl_pct.delete(0, tk.END); self.mb_sl_pct.insert(0, "5.0")
-        self.mb_sl_pct.pack(side=tk.LEFT, padx=(2,8))
+        self.mb_sl_pct.delete(0, tk.END)
+        self.mb_sl_pct.insert(0, "5.0")
+        self.mb_sl_pct.pack(side=tk.LEFT, padx=(2, 8))
 
         ttk.Label(fixed_row2, text="TP %").pack(side=tk.LEFT)
         self.mb_tp_pct = ttk.Spinbox(fixed_row2, from_=0, to=50, increment=0.1, width=6)
-        self.mb_tp_pct.delete(0, tk.END); self.mb_tp_pct.insert(0, "1.0")
-        self.mb_tp_pct.pack(side=tk.LEFT, padx=(2,8))
+        self.mb_tp_pct.delete(0, tk.END)
+        self.mb_tp_pct.insert(0, "1.0")
+        self.mb_tp_pct.pack(side=tk.LEFT, padx=(2, 8))
 
         ttk.Label(fixed_row2, text="Trailing %").pack(side=tk.LEFT)
         self.mb_trail_pct = ttk.Spinbox(fixed_row2, from_=0, to=20, increment=0.1, width=6)
-        self.mb_trail_pct.delete(0, tk.END); self.mb_trail_pct.insert(0, "0")
-        self.mb_trail_pct.pack(side=tk.LEFT, padx=(2,0))
-        r += 1
+        self.mb_trail_pct.delete(0, tk.END)
+        self.mb_trail_pct.insert(0, "0")
+        self.mb_trail_pct.pack(side=tk.LEFT, padx=(2, 0))
+        r_adv += 1
 
-        # --- LIVE kitörés / shock (intra-bar) ---
-        live_box = ttk.Labelframe(form, text="LIVE kitörés / shock (intra-bar)", padding=6)
-        live_box.grid(row=r, column=0, columnspan=2, sticky="we", pady=(8,0))
-        live_row1 = ttk.Frame(live_box); live_row1.pack(anchor="w")
+        # LIVE kitörés / shock (intra-bar)
+        live_box = ttk.Labelframe(adv, text="LIVE kitörés / shock (intra-bar)", padding=6)
+        live_box.grid(row=r_adv, column=0, columnspan=2, sticky="we", pady=(8, 0))
+        live_row1 = ttk.Frame(live_box)
+        live_row1.pack(anchor="w")
 
         self.mb_use_live = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             live_row1,
             text="Élő ár figyelése (breakout/shock)",
             variable=self.mb_use_live,
-            command=self._mb_toggle_live_widgets   # <<< ÚJ: állapot váltáskor hívjuk
+            command=self._mb_toggle_live_widgets,
         ).pack(side=tk.LEFT)
 
-        ttk.Label(live_row1, text="  Shock %:").pack(side=tk.LEFT, padx=(10,2))
+        ttk.Label(live_row1, text="  Shock %:").pack(side=tk.LEFT, padx=(10, 2))
         self.mb_live_shock_pct = ttk.Spinbox(live_row1, from_=0.0, to=10.0, increment=0.05, width=6)
-        self.mb_live_shock_pct.delete(0, tk.END); self.mb_live_shock_pct.insert(0, "1.00")
+        self.mb_live_shock_pct.delete(0, tk.END)
+        self.mb_live_shock_pct.insert(0, "1.00")
         self.mb_live_shock_pct.pack(side=tk.LEFT)
 
-        ttk.Label(live_row1, text="  Shock ATR×:").pack(side=tk.LEFT, padx=(10,2))
+        ttk.Label(live_row1, text="  Shock ATR×:").pack(side=tk.LEFT, padx=(10, 2))
         self.mb_live_shock_atr = ttk.Spinbox(live_row1, from_=0.0, to=5.0, increment=0.05, width=6)
-        self.mb_live_shock_atr.delete(0, tk.END); self.mb_live_shock_atr.insert(0, "1.20")
+        self.mb_live_shock_atr.delete(0, tk.END)
+        self.mb_live_shock_atr.insert(0, "1.20")
         self.mb_live_shock_atr.pack(side=tk.LEFT)
-        r += 1
+        r_adv += 1
 
-        # --- Breakout (kitörés) detektor – kapcsoló + paraméterek ---
-        brk_box = ttk.Labelframe(form, text="Breakout (kitörés)", padding=6)
-        brk_box.grid(row=r, column=0, columnspan=2, sticky="we", pady=(8,0))
-        brk_row1 = ttk.Frame(brk_box); brk_row1.pack(anchor="w")
+        # Breakout (kitörés)
+        brk_box = ttk.Labelframe(adv, text="Breakout (kitörés)", padding=6)
+        brk_box.grid(row=r_adv, column=0, columnspan=2, sticky="we", pady=(8, 0))
+        brk_row1 = ttk.Frame(brk_box)
+        brk_row1.pack(anchor="w")
 
         self.mb_use_brk = tk.BooleanVar(value=False)
-        ttk.Checkbutton(brk_row1, text="Breakout használata", variable=self.mb_use_brk,
-                        command=lambda: self._mb_toggle_brk_widgets()).pack(side=tk.LEFT)
+        ttk.Checkbutton(
+            brk_row1,
+            text="Breakout használata",
+            variable=self.mb_use_brk,
+            command=lambda: self._mb_toggle_brk_widgets(),
+        ).pack(side=tk.LEFT)
 
-        ttk.Label(brk_row1, text="  Lookback:").pack(side=tk.LEFT, padx=(6,2))
+        ttk.Label(brk_row1, text="  Lookback:").pack(side=tk.LEFT, padx=(6, 2))
         self.mb_brk_n = ttk.Spinbox(brk_row1, from_=5, to=200, width=6)
-        self.mb_brk_n.delete(0, tk.END); self.mb_brk_n.insert(0, "20")
+        self.mb_brk_n.delete(0, tk.END)
+        self.mb_brk_n.insert(0, "20")
         self.mb_brk_n.pack(side=tk.LEFT)
 
-        ttk.Label(brk_row1, text="  Puffer %:").pack(side=tk.LEFT, padx=(6,2))
+        ttk.Label(brk_row1, text="  Puffer %:").pack(side=tk.LEFT, padx=(6, 2))
         self.mb_brk_buf = ttk.Spinbox(brk_row1, from_=0.0, to=2.0, increment=0.01, width=6)
-        self.mb_brk_buf.delete(0, tk.END); self.mb_brk_buf.insert(0, "0.10")
+        self.mb_brk_buf.delete(0, tk.END)
+        self.mb_brk_buf.insert(0, "0.10")
         self.mb_brk_buf.pack(side=tk.LEFT)
 
         self.mb_brk_with_trend = tk.BooleanVar(value=False)
-        ttk.Checkbutton(brk_row1, text="Csak HTF trend irányába", variable=self.mb_brk_with_trend).pack(side=tk.LEFT, padx=(10,0))
-        r += 1
+        ttk.Checkbutton(
+            brk_row1,
+            text="Csak HTF trend irányába",
+            variable=self.mb_brk_with_trend,
+        ).pack(side=tk.LEFT, padx=(10, 0))
+        r_adv += 1
 
-        # RSI szűrő – kapcsoló + hossz + zónák
-        rsi_box = ttk.Labelframe(form, text="RSI szűrő", padding=6)
-        rsi_box.grid(row=r, column=0, columnspan=2, sticky="we", pady=(8,0))
+        # RSI szűrő
+        rsi_box = ttk.Labelframe(adv, text="RSI szűrő", padding=6)
+        rsi_box.grid(row=r_adv, column=0, columnspan=2, sticky="we", pady=(8, 0))
 
-        rsi_row1 = ttk.Frame(rsi_box); rsi_row1.pack(anchor="w")
+        rsi_row1 = ttk.Frame(rsi_box)
+        rsi_row1.pack(anchor="w")
         self.mb_use_rsi = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             rsi_row1,
             text="RSI használata",
             variable=self.mb_use_rsi,
-            command=self._mb_toggle_rsi_widgets      # <-- ÚJ
+            command=self._mb_toggle_rsi_widgets,
         ).pack(side=tk.LEFT)
 
-        ttk.Label(rsi_row1, text="  RSI len:").pack(side=tk.LEFT, padx=(6,2))
+        ttk.Label(rsi_row1, text="  RSI len:").pack(side=tk.LEFT, padx=(6, 2))
         self.mb_rsi_len = ttk.Spinbox(rsi_row1, from_=5, to=50, width=6)
-        self.mb_rsi_len.delete(0, tk.END); self.mb_rsi_len.insert(0, "14")
+        self.mb_rsi_len.delete(0, tk.END)
+        self.mb_rsi_len.insert(0, "14")
         self.mb_rsi_len.pack(side=tk.LEFT)
 
-        rsi_row2 = ttk.Frame(rsi_box); rsi_row2.pack(anchor="w", pady=(4,0))
+        rsi_row2 = ttk.Frame(rsi_box)
+        rsi_row2.pack(anchor="w", pady=(4, 0))
+
         ttk.Label(rsi_row2, text="BUY zóna [min,max]").pack(side=tk.LEFT)
         self.mb_rsi_buy_min = ttk.Spinbox(rsi_row2, from_=0, to=100, increment=0.5, width=6)
-        self.mb_rsi_buy_min.delete(0, tk.END); self.mb_rsi_buy_min.insert(0, "45")
-        self.mb_rsi_buy_min.pack(side=tk.LEFT, padx=(4,2))
+        self.mb_rsi_buy_min.delete(0, tk.END)
+        self.mb_rsi_buy_min.insert(0, "45")
+        self.mb_rsi_buy_min.pack(side=tk.LEFT, padx=(4, 2))
+
         self.mb_rsi_buy_max = ttk.Spinbox(rsi_row2, from_=0, to=100, increment=0.5, width=6)
-        self.mb_rsi_buy_max.delete(0, tk.END); self.mb_rsi_buy_max.insert(0, "70")
-        self.mb_rsi_buy_max.pack(side=tk.LEFT, padx=(2,12))
+        self.mb_rsi_buy_max.delete(0, tk.END)
+        self.mb_rsi_buy_max.insert(0, "70")
+        self.mb_rsi_buy_max.pack(side=tk.LEFT, padx=(2, 12))
 
         ttk.Label(rsi_row2, text="SELL zóna [min,max]").pack(side=tk.LEFT)
         self.mb_rsi_sell_min = ttk.Spinbox(rsi_row2, from_=0, to=100, increment=0.5, width=6)
-        self.mb_rsi_sell_min.delete(0, tk.END); self.mb_rsi_sell_min.insert(0, "30")
-        self.mb_rsi_sell_min.pack(side=tk.LEFT, padx=(4,2))
-        self.mb_rsi_sell_max = ttk.Spinbox(rsi_row2, from_=0, to=100, increment=0.5, width=6)
-        self.mb_rsi_sell_max.delete(0, tk.END); self.mb_rsi_sell_max.insert(0, "55")
-        self.mb_rsi_sell_max.pack(side=tk.LEFT, padx=(2,0))
-        r += 1
+        self.mb_rsi_sell_min.delete(0, tk.END)
+        self.mb_rsi_sell_min.insert(0, "30")
+        self.mb_rsi_sell_min.pack(side=tk.LEFT, padx=(4, 2))
 
-        # --- ADX trend szűrő – oldalazás ellen (trend-follow) ---
-        adx_box = ttk.Labelframe(form, text="ADX trend szűrő (oldalazás ellen)", padding=6)
-        adx_box.grid(row=r, column=0, columnspan=2, sticky="we", pady=(8,0))
-        adx_row = ttk.Frame(adx_box); adx_row.pack(anchor="w")
+        self.mb_rsi_sell_max = ttk.Spinbox(rsi_row2, from_=0, to=100, increment=0.5, width=6)
+        self.mb_rsi_sell_max.delete(0, tk.END)
+        self.mb_rsi_sell_max.insert(0, "55")
+        self.mb_rsi_sell_max.pack(side=tk.LEFT, padx=(2, 0))
+        r_adv += 1
+
+        # ADX trend szűrő
+        adx_box = ttk.Labelframe(adv, text="ADX trend szűrő (oldalazás ellen)", padding=6)
+        adx_box.grid(row=r_adv, column=0, columnspan=2, sticky="we", pady=(8, 0))
+        adx_row = ttk.Frame(adx_box)
+        adx_row.pack(anchor="w")
 
         self.mb_use_adx = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             adx_row,
             text="ADX filter bekapcsolása (csak ha ADX > küszöb)",
             variable=self.mb_use_adx,
-            command=self._mb_toggle_adx_widgets
+            command=self._mb_toggle_adx_widgets,
         ).pack(side=tk.LEFT)
 
-        ttk.Label(adx_row, text="ADX periódus:").pack(side=tk.LEFT, padx=(12,2))
+        ttk.Label(adx_row, text="ADX periódus:").pack(side=tk.LEFT, padx=(12, 2))
         self.mb_adx_len = ttk.Spinbox(adx_row, from_=5, to=50, increment=1, width=6)
-        self.mb_adx_len.delete(0, tk.END); self.mb_adx_len.insert(0, "14")
-        self.mb_adx_len.pack(side=tk.LEFT, padx=(0,10))
+        self.mb_adx_len.delete(0, tk.END)
+        self.mb_adx_len.insert(0, "14")
+        self.mb_adx_len.pack(side=tk.LEFT, padx=(0, 10))
 
-        ttk.Label(adx_row, text="Min ADX küszöb:").pack(side=tk.LEFT, padx=(0,2))
+        ttk.Label(adx_row, text="Min ADX küszöb:").pack(side=tk.LEFT, padx=(0, 2))
         self.mb_adx_min = ttk.Spinbox(adx_row, from_=5, to=60, increment=1, width=6)
-        self.mb_adx_min.delete(0, tk.END); self.mb_adx_min.insert(0, "20")
+        self.mb_adx_min.delete(0, tk.END)
+        self.mb_adx_min.insert(0, "20")
         self.mb_adx_min.pack(side=tk.LEFT)
 
-        r += 1
+        r_adv += 1
         self._mb_toggle_adx_widgets()
 
-        # HTF trend filter – kapcsoló + HTF TF
-        htf_box = ttk.Labelframe(form, text="HTF trend filter (EMA alapú)", padding=6)
-        htf_box.grid(row=r, column=0, columnspan=2, sticky="we", pady=(8,0))
-        htf_row = ttk.Frame(htf_box); htf_row.pack(anchor="w")
+        # HTF trend filter
+        htf_box = ttk.Labelframe(adv, text="HTF trend filter (EMA alapú)", padding=6)
+        htf_box.grid(row=r_adv, column=0, columnspan=2, sticky="we", pady=(8, 0))
+        htf_row = ttk.Frame(htf_box)
+        htf_row.pack(anchor="w")
 
         self.mb_use_htf = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             htf_row,
             text="HTF filter használata",
             variable=self.mb_use_htf,
-            command=self._mb_toggle_htf_widgets     # <<< ÚJ
+            command=self._mb_toggle_htf_widgets,
         ).pack(side=tk.LEFT)
 
-        ttk.Label(htf_row, text="  HTF TF:").pack(side=tk.LEFT, padx=(6,2))
+        ttk.Label(htf_row, text="  HTF TF:").pack(side=tk.LEFT, padx=(6, 2))
         self.mb_htf_tf = ttk.Combobox(
             htf_row,
             state="readonly",
             width=6,
-            values=["15m","30m","1h","4h","1d"]
+            values=["15m", "30m", "1h", "4h", "1d"],
         )
         self.mb_htf_tf.set("15m")
         self.mb_htf_tf.pack(side=tk.LEFT)
-        r += 1
+        r_adv += 1
 
-        # ATR menedzsment – kapcsoló + ATR n + szorzók
-        atr_box = ttk.Labelframe(form, text="ATR alapú menedzsment (TP1/TP2 + trailing)", padding=6)
-        atr_box.grid(row=r, column=0, columnspan=2, sticky="we", pady=(8,0))
-        atr_row1 = ttk.Frame(atr_box); atr_row1.pack(anchor="w")
+        # ATR menedzsment
+        atr_box = ttk.Labelframe(adv, text="ATR alapú menedzsment (TP1/TP2 + trailing)", padding=6)
+        atr_box.grid(row=r_adv, column=0, columnspan=2, sticky="we", pady=(8, 0))
+
+        atr_row1 = ttk.Frame(atr_box)
+        atr_row1.pack(anchor="w")
+
         self.mb_use_atr = tk.BooleanVar(value=False)
-        ttk.Checkbutton(atr_row1, text="ATR menedzsment használata", command=self._mb_on_atr_changed, variable=self.mb_use_atr).pack(side=tk.LEFT)
-        ttk.Label(atr_row1, text="  ATR n:").pack(side=tk.LEFT, padx=(6,2))
+        ttk.Checkbutton(
+            atr_row1,
+            text="ATR menedzsment használata",
+            command=self._mb_on_atr_changed,
+            variable=self.mb_use_atr,
+        ).pack(side=tk.LEFT)
+
+        ttk.Label(atr_row1, text="  ATR n:").pack(side=tk.LEFT, padx=(6, 2))
         self.mb_atr_n = ttk.Spinbox(atr_row1, from_=5, to=50, width=6)
-        self.mb_atr_n.delete(0, tk.END); self.mb_atr_n.insert(0, "14")
+        self.mb_atr_n.delete(0, tk.END)
+        self.mb_atr_n.insert(0, "14")
         self.mb_atr_n.pack(side=tk.LEFT)
 
-        atr_row2 = ttk.Frame(atr_box); atr_row2.pack(anchor="w", pady=(4,0))
+        atr_row2 = ttk.Frame(atr_box)
+        atr_row2.pack(anchor="w", pady=(4, 0))
+
         ttk.Label(atr_row2, text="SL×").pack(side=tk.LEFT)
         self.mb_atr_mul_sl = ttk.Spinbox(atr_row2, from_=0.1, to=5.0, increment=0.1, width=5)
-        self.mb_atr_mul_sl.delete(0, tk.END); self.mb_atr_mul_sl.insert(0, "1.0"); self.mb_atr_mul_sl.pack(side=tk.LEFT, padx=(2,8))
+        self.mb_atr_mul_sl.delete(0, tk.END)
+        self.mb_atr_mul_sl.insert(0, "1.0")
+        self.mb_atr_mul_sl.pack(side=tk.LEFT, padx=(2, 8))
 
         ttk.Label(atr_row2, text="TP1×").pack(side=tk.LEFT)
         self.mb_atr_mul_tp1 = ttk.Spinbox(atr_row2, from_=0.1, to=10.0, increment=0.1, width=5)
-        self.mb_atr_mul_tp1.delete(0, tk.END); self.mb_atr_mul_tp1.insert(0, "1.5"); self.mb_atr_mul_tp1.pack(side=tk.LEFT, padx=(2,8))
+        self.mb_atr_mul_tp1.delete(0, tk.END)
+        self.mb_atr_mul_tp1.insert(0, "1.5")
+        self.mb_atr_mul_tp1.pack(side=tk.LEFT, padx=(2, 8))
 
         ttk.Label(atr_row2, text="TP2×").pack(side=tk.LEFT)
         self.mb_atr_mul_tp2 = ttk.Spinbox(atr_row2, from_=0.1, to=20.0, increment=0.1, width=5)
-        self.mb_atr_mul_tp2.delete(0, tk.END); self.mb_atr_mul_tp2.insert(0, "2.5"); self.mb_atr_mul_tp2.pack(side=tk.LEFT, padx=(2,8))
+        self.mb_atr_mul_tp2.delete(0, tk.END)
+        self.mb_atr_mul_tp2.insert(0, "2.5")
+        self.mb_atr_mul_tp2.pack(side=tk.LEFT, padx=(2, 8))
 
         ttk.Label(atr_row2, text="Trail×").pack(side=tk.LEFT)
         self.mb_atr_mul_trail = ttk.Spinbox(atr_row2, from_=0.1, to=5.0, increment=0.1, width=5)
-        self.mb_atr_mul_trail.delete(0, tk.END); self.mb_atr_mul_trail.insert(0, "1.0"); self.mb_atr_mul_trail.pack(side=tk.LEFT, padx=(2,0))
-        r += 1
+        self.mb_atr_mul_trail.delete(0, tk.END)
+        self.mb_atr_mul_trail.insert(0, "1.0")
+        self.mb_atr_mul_trail.pack(side=tk.LEFT, padx=(2, 0))
+        r_adv += 1
 
         # Cooldown
-        ttk.Label(form, text="Cooldown (s)").grid(row=r, column=0, sticky="w", pady=(8,0))
-        self.mb_cooldown_s = ttk.Spinbox(form, from_=1, to=600, width=8)
-        self.mb_cooldown_s.delete(0, tk.END); self.mb_cooldown_s.insert(0, "10")
-        self.mb_cooldown_s.grid(row=r, column=1, sticky="w", pady=(8,0))
-        r += 1
-
-        # checkboxok
-        ch = ttk.Frame(form); ch.grid(row=r, column=0, columnspan=2, sticky="w", pady=(8,0))
-        self.mb_autob = tk.BooleanVar(value=True)
-        ttk.Checkbutton(ch, text="Auto-borrow/repay", variable=self.mb_autob).pack(side=tk.LEFT, padx=(0.08))
-        self.mb_allow_short = tk.BooleanVar(value=True)
-        ttk.Checkbutton(ch, text="Short engedélyezése", variable=self.mb_allow_short).pack(side=tk.LEFT, padx=(0.08))
-        self.mb_pause_new = tk.BooleanVar(value=False)
-        ttk.Checkbutton(ch, text="Új nyitás szünetel", variable=self.mb_pause_new).pack(side=tk.LEFT, padx=(0.08))
-        self.mb_dry = tk.BooleanVar(value=True)
-        ttk.Checkbutton(ch, text="Dry-run (nem küld ordert)", variable=self.mb_dry).pack(side=tk.LEFT, padx=(0.08))
-        r += 1
-
-        # Start / Stop
-        btns = ttk.Frame(form); btns.grid(row=r, column=0, columnspan=2, sticky="we", pady=(10,0))
-        self.mb_start_btn = ttk.Button(btns, text="Start bot", command=self.mb_start); self.mb_start_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,6))
-        self.mb_stop_btn  = ttk.Button(btns, text="Stop bot",  command=self.mb_stop, state=tk.DISABLED); self.mb_stop_btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        r += 1
-
-        apply_btn = ttk.Button(
-            form,
-            text="Beállítások frissítése / paraméterek állítása ( futó botra )",
-            command=self.mb_reload_cfg,
-        )
-        apply_btn.grid(row=r, column=0, columnspan=2, sticky="we", pady=(10,0))
+        ttk.Label(adv, text="Cooldown (s)").grid(row=r_adv, column=0, sticky="w", pady=(8, 0))
+        self.mb_cooldown_s = ttk.Spinbox(adv, from_=1, to=600, width=8)
+        self.mb_cooldown_s.delete(0, tk.END)
+        self.mb_cooldown_s.insert(0, "10")
+        self.mb_cooldown_s.grid(row=r_adv, column=1, sticky="w", pady=(8, 0))
+        r_adv += 1
 
         # ===== jobb oszlop: felül fülek (History / Bot napló), alul mini-diagram =====
         right = ttk.Frame(root)
-        right.grid(row=0, column=1, sticky="nsew", padx=(6,10), pady=10)
+        right.grid(row=0, column=1, sticky="nsew", padx=(6, 10), pady=10)
         right.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(0, weight=3)   # notebook (history+log)
-        right.grid_rowconfigure(1, weight=2)   # chart
+        right.grid_rowconfigure(0, weight=3)  # notebook (history+log)
+        right.grid_rowconfigure(1, weight=2)  # chart
 
         # --- Fülrendszer: History + Bot napló ---
         right_nb = ttk.Notebook(right)
@@ -4649,22 +4746,23 @@ class CryptoBotApp:
         tab_hist.grid_columnconfigure(0, weight=1)
         tab_hist.grid_rowconfigure(0, weight=1)
 
-        cols = ("timestamp","side","entry","exit","size","lev","fee","pnl","orderId")
+        cols = ("timestamp", "side", "entry", "exit", "size", "lev", "fee", "pnl", "orderId")
         self._mb_hist_tv = ttk.Treeview(tab_hist, columns=cols, show="headings", height=10)
         for c, w, text in (
             ("timestamp", 160, "Időbélyeg"),
-            ("side",       70,  "Irány"),
-            ("entry",      110, "Belépő ár"),
-            ("exit",       110, "Kilépő ár"),
-            ("size",       110, "Méret"),
-            ("lev",         90, "Tőkeáttét"),
-            ("fee",         90, "Díj"),
-            ("pnl",         90, "PNL"),
-            ("orderId",    180, "Order ID"),
+            ("side", 70, "Irány"),
+            ("entry", 110, "Belépő ár"),
+            ("exit", 110, "Kilépő ár"),
+            ("size", 110, "Méret"),
+            ("lev", 90, "Tőkeáttét"),
+            ("fee", 90, "Díj"),
+            ("pnl", 90, "PNL"),
+            ("orderId", 180, "Order ID"),
         ):
             self._mb_hist_tv.heading(c, text=text)
             self._mb_hist_tv.column(c, width=w, anchor="center")
         self._mb_hist_tv.column("orderId", width=180, anchor="center", stretch=True)
+
         vsb = ttk.Scrollbar(tab_hist, orient="vertical", command=self._mb_hist_tv.yview)
         self._mb_hist_tv.configure(yscrollcommand=vsb.set)
         self._mb_hist_tv.grid(row=0, column=0, sticky="nsew")
@@ -4676,9 +4774,9 @@ class CryptoBotApp:
 
         # PnL-alapú sor-színezés (idempotens)
         try:
-            self._mb_hist_tv.tag_configure("win",  background="#d9ffdb")
+            self._mb_hist_tv.tag_configure("win", background="#d9ffdb")
             self._mb_hist_tv.tag_configure("loss", background="#ffd9d9")
-            self._mb_hist_tv.tag_configure("win_floating",  background="#f1fff3")
+            self._mb_hist_tv.tag_configure("win_floating", background="#f1fff3")
             self._mb_hist_tv.tag_configure("loss_floating", background="#fff1f1")
         except Exception:
             pass
@@ -4693,11 +4791,11 @@ class CryptoBotApp:
 
         # --- Mini-diagram az aktuális párról (Dashboardhoz hasonló) ---
         ch_box = ttk.Labelframe(right, text="Diagram (aktuális pár)", padding=6)
-        ch_box.grid(row=1, column=0, sticky="nsew", pady=(6,0))
+        ch_box.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
         from matplotlib.figure import Figure
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-        self.mb_fig = Figure(figsize=(6,2.4), dpi=100)
-        self.mb_ax  = self.mb_fig.add_subplot(111)
+        self.mb_fig = Figure(figsize=(6, 2.4), dpi=100)
+        self.mb_ax = self.mb_fig.add_subplot(111)
         self.mb_canvas = FigureCanvasTkAgg(self.mb_fig, master=ch_box)
         self.mb_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
@@ -4708,15 +4806,15 @@ class CryptoBotApp:
 
         # Jel/cooldown állapot
         self._mb_last_cross_ts = 0
-        self._mb_last_signal = 'hold'
-        self._mb_last_bar_ts = {}   # {(symbol, tf): ts}
+        self._mb_last_signal = "hold"
+        self._mb_last_bar_ts = {}  # {(symbol, tf): ts}
         self._mb_lock = threading.Lock()
 
         # Szimulációs állapotok (ha még nem lettek máshol definiálva)
-        if not hasattr(self, '_sim_pnl_usdt'):
-            self._sim_pnl_usdt = Decimal('0')
-        if not hasattr(self, '_sim_history'):
-            self._sim_history = []            # list[dict]
+        if not hasattr(self, "_sim_pnl_usdt"):
+            self._sim_pnl_usdt = Decimal("0")
+        if not hasattr(self, "_sim_history"):
+            self._sim_history = []  # list[dict]
 
         # kezdő tőkeáttét plafon
         self._mb_sync_lev_cap()
