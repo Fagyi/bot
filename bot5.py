@@ -6700,10 +6700,10 @@ class CryptoBotApp:
 
             parts.append(f"brk={'ON' if use_brk else 'OFF'}")
             parts.append(f"live_px={'ON' if use_live else 'OFF'}")
-            
+
             # Z-score filter formázása: csak ON/OFF (érték fent van)
             parts.append(f"zscore={'ON' if use_zscore else 'OFF'}")
-            
+
             parts.append(f"cd_left={cd_left}s")
 
             # Prefix változott: 'filters:'
@@ -6746,15 +6746,15 @@ class CryptoBotApp:
                 f"Gyertya ár={last_px:.6f}",
                 f"EMA({fa})={ef_l:.4f}/EMA({slw})={es_l:.4f}",
             ]
-            
+
             # HTF érték megjelenítése a felső logban
             if use_htf:
                 parts.append(f"HTF={trend_htf:+d}")
-                
+
             # RSI érték
             if use_rsi and rsi_val is not None:
                 parts.append(f"RSI({rsi_len})={rsi_val:.2f}")
-                
+
             # ADX érték megjelenítése a felső logban: ADX(14)=25.7
             if use_adx and adx_val is not None:
                 parts.append(f"ADX({adx_len})={adx_val:.1f}")
@@ -6772,7 +6772,7 @@ class CryptoBotApp:
                 parts.append(
                     f"BRK[{brk_n}] HH={hh:.4f} LL={ll:.4f} ↑{up_lvl:.4f} ↓{dn_lvl:.4f}"
                 )
-                
+
             # Drift és Pool adatok
             if drift_pct == drift_pct:
                 parts.append(f"drift={drift_pct:.2f}%")
@@ -7693,12 +7693,12 @@ class CryptoBotApp:
                     # HOLD okok formázása: "hold_reasons=... › hold"
                     # Csak akkor írjuk ki a hold okokat, ha a végső jel 'hold', de volt alapjel
                     final_suffix = ""
-                    
+
                     if combined_sig in (None, "", "hold"):
                         reasons_str = ""
                         if reasons:
                             reasons_str = "hold_reasons=" + ", ".join(reasons)
-                        
+
                         # Ha van hold indok, akkor fűzzük hozzá a nyilat
                         if reasons_str:
                              final_suffix = f" | {reasons_str}  › hold"
@@ -7729,7 +7729,7 @@ class CryptoBotApp:
                             delay_s = int(getattr(self, "_mb_log_delay", 5))
                             if delay_s <= 0: delay_s = 5
                         except Exception: delay_s = 5
-                        
+
                         should_log = True
                         try:
                             now_ts_log = _safe_now_ts()
@@ -7850,7 +7850,7 @@ class CryptoBotApp:
                         # KERET: teljes szabad pool – a %-ot _mb_compute_size fogja alkalmazni
                         max_quote_for_trade = free_pool
                         lot_step, price_step, min_base, min_funds, quote_step = self._mb_get_market_steps(symbol)
-                        
+
                         if max_quote_for_trade <= 0.0:
                             self._safe_log("ℹ️ Nincs szabad pool a nyitáshoz (keret limit). Kimarad.\n")
                         else:
@@ -8250,7 +8250,7 @@ class CryptoBotApp:
                     w.configure(state=st)
             except Exception:
                 pass
- 
+
     def _mb_toggle_htf_widgets(self):
         """HTF filter ki/be – a HTF TF combobox engedélyezése/tiltása."""
         try:
