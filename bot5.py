@@ -4674,6 +4674,14 @@ class CryptoBotApp:
         self._mb_hist_rows_by_oid = {}
         self._mb_hist_tv.bind("<Button-3>", self._mb_hist_on_rclick)
 
+        # PnL-alapú sor-színezés (idempotens)
+        try:
+            self._mb_hist_tv.tag_configure("win",  background="#d9ffdb")
+            self._mb_hist_tv.tag_configure("loss", background="#ffd9d9")
+            self._mb_hist_tv.tag_configure("flat", background="")
+        except Exception:
+            pass
+
         # 2) Bot napló fül
         tab_log = ttk.Frame(right_nb)
         right_nb.add(tab_log, text="Bot napló")
@@ -4705,7 +4713,7 @@ class CryptoBotApp:
 
         # Szimulációs állapotok (ha még nem lettek máshol definiálva)
         if not hasattr(self, '_sim_pnl_usdt'):
-            self._sim_pnl_usdt = 0.0          # realizált PnL USDT
+            self._sim_pnl_usdt = Decimal('0')
         if not hasattr(self, '_sim_history'):
             self._sim_history = []            # list[dict]
 
@@ -5386,7 +5394,15 @@ class CryptoBotApp:
                 if not hasattr(self, "_mb_hist_rows_by_oid"):
                     self._mb_hist_rows_by_oid = {}
 
-                iid = tv.insert("", "end", values=row)
+                # PnL alapján tag (ha van érték)
+                tags = ()
+                try:
+                    if pnl_est is not None:
+                        _p = float(pnl_est)
+                        tags = ("win",) if _p > 0 else (("loss",) if _p < 0 else ("flat",))
+                except Exception:
+                    tags = ()
+                iid = tv.insert("", "end", values=row, tags=tags)
                 if oid != "-":
                     self._mb_hist_rows_by_oid[oid] = iid
 
@@ -5446,6 +5462,14 @@ class CryptoBotApp:
                     vals[PNL_IDX] = f"{float(pnl_final):.6f}"
 
                 tv.item(iid, values=tuple(vals))
+                # PnL tag frissítése (ha van érték)
+                try:
+                    pnl_txt = vals[PNL_IDX]
+                    _p = float(str(pnl_txt).replace(",", "")) if pnl_txt not in ("", None) else 0.0
+                    tag = ("win",) if _p > 0 else (("loss",) if _p < 0 else ("flat",))
+                    tv.item(iid, tags=tag)
+                except Exception:
+                    pass
             except Exception:
                 pass
 
@@ -5494,6 +5518,14 @@ class CryptoBotApp:
                 gross = (rt_val - entry) * size * (1 if side == "BUY" else -1)
                 vals[PNL_IDX] = f"{(gross - fee_est):.6f}"
                 tv.item(iid, values=tuple(vals))
+                # PnL tag frissítése (floating PnL alapján)
+                try:
+                    pnl_txt = vals[PNL_IDX]
+                    _p = float(str(pnl_txt).replace(",", "")) if pnl_txt not in ("", None) else 0.0
+                    tag = ("win",) if _p > 0 else (("loss",) if _p < 0 else ("flat",))
+                    tv.item(iid, tags=tag)
+                except Exception:
+                    pass
             except Exception:
                 continue
 
@@ -5895,7 +5927,7 @@ class CryptoBotApp:
             self._sim_pos_long = []
             self._sim_pos_short = []
             self._sim_history = []
-            self._sim_pnl_usdt = 0.0
+            self._sim_pnl_usdt = Decimal('0')
 
             # Pool attribútumok törlése, hogy a worker újraépítse
             try:
@@ -5952,7 +5984,7 @@ class CryptoBotApp:
 
             # belső állapotok, ha hiányoznának
             if not hasattr(self, "_sim_pnl_usdt"):
-                self._sim_pnl_usdt = 0.0
+                self._sim_pnl_usdt = Decimal('0')
             if not hasattr(self, "_sim_pos_long"):
                 self._sim_pos_long = []
             if not hasattr(self, "_sim_pos_short"):
@@ -6189,12 +6221,21 @@ class CryptoBotApp:
             gross = (exit_px - entry) * sz * (1 if side == 'buy' else -1)
             fee_rate = self._mb_get_taker_fee()
             f_open, f_close, f_total = self._mb_sum_fee_actual_or_est(pos, exit_px, fee_rate)
-            pnl = gross - f_total
-            self._sim_pnl_usdt       += pnl
-            self._pool_balance_quote += pnl
-            self._pool_used_quote    -= (float(pos.get('commit_usdt', 0.0)) +
-                                         float(pos.get('fee_reserved', 0.0)))
-            self._pool_used_quote     = max(0.0, self._pool_used_quote)
+
+            # Pénzügyi összesítők: Decimal (stabil, nem driftel hosszú futás alatt)
+            pnl = (Decimal(str(gross)) - Decimal(str(f_total)))
+
+            self._sim_pnl_usdt       = (Decimal(str(getattr(self, "_sim_pnl_usdt", 0))) + pnl)
+            self._pool_balance_quote = (Decimal(str(getattr(self, "_pool_balance_quote", 0))) + pnl)
+
+            used_delta = (Decimal(str(float(pos.get('commit_usdt', 0.0)) or 0.0)) +
+                          Decimal(str(float(pos.get('fee_reserved', 0.0)) or 0.0)))
+            self._pool_used_quote    = (Decimal(str(getattr(self, "_pool_used_quote", 0))) - used_delta)
+
+            # clamp: ne menjen 0 alá
+            if self._pool_used_quote < 0:
+                self._pool_used_quote = Decimal('0')
+
             total_pnl    = float(self._sim_pnl_usdt)
             pool_used    = float(self._pool_used_quote)
             pool_balance = float(self._pool_balance_quote)
@@ -6479,7 +6520,7 @@ class CryptoBotApp:
         # --- egyszeri init-ek (ha még nem léteznek) ---
         if not hasattr(self, "_sim_pos_long"):   self._sim_pos_long = []   # list[dict]
         if not hasattr(self, "_sim_pos_short"):  self._sim_pos_short = []  # list[dict]
-        if not hasattr(self, "_sim_pnl_usdt"):   self._sim_pnl_usdt = 0.0
+        if not hasattr(self, "_sim_pnl_usdt"):   self._sim_pnl_usdt = Decimal('0')
         if not hasattr(self, "_sim_history"):    self._sim_history = []
         if not hasattr(self, "_mb_last_bar_ts"): self._mb_last_bar_ts = {}
         if not hasattr(self, "_mb_last_cross_ts"): self._mb_last_cross_ts = 0
@@ -6521,8 +6562,8 @@ class CryptoBotApp:
                         f"Kezdő keret {init_pool:.2f} {quote0}-ra korlátozva.\n"
                     )
             with self._mb_lock:
-                self._pool_balance_quote = float(init_pool)
-                self._pool_used_quote = getattr(self, "_restored_pool_usage", 0.0)
+                self._pool_balance_quote = Decimal(str(init_pool))
+                self._pool_used_quote = Decimal(str(getattr(self, "_restored_pool_usage", 0.0)))
 
             # Takarítás
             if hasattr(self, "_restored_pool_usage"):
