@@ -29,7 +29,7 @@ import sqlite3
 
 # Tkinter
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox
+from tkinter import ttk, scrolledtext, messagebox, filedialog
 from tkinter import font as tkfont
 from decimal import Decimal, ROUND_DOWN, ROUND_UP, getcontext, ROUND_FLOOR, ROUND_CEILING, InvalidOperation
 import ttkbootstrap as tb
@@ -117,6 +117,19 @@ def split_symbol(s: str) -> tuple[str, str]:
         raise ValueError(f"Érvénytelen symbol: '{s}' (várt forma: BASE-QUOTE)")
     base, quote = s.split("-", 1)
     return base, quote
+
+class ConfigManager:
+    @staticmethod
+    def save_config(filepath: str, config: dict):
+        import json
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+
+    @staticmethod
+    def load_config(filepath: str) -> dict:
+        import json
+        with open(filepath, 'r', encoding='utf-8') as f:
+            return json.load(f)
 
 class BotDatabase:
     def __init__(self, db_name="bot_trades.db"):
@@ -4410,6 +4423,13 @@ class CryptoBotApp:
             command=self.mb_reload_cfg,
         )
         apply_btn.grid(row=r, column=0, columnspan=2, sticky="we", pady=(10, 0))
+
+        # Config Save/Load
+        r += 1
+        cfg_btns = ttk.Frame(basic)
+        cfg_btns.grid(row=r, column=0, columnspan=2, sticky="we", pady=(10, 0))
+        ttk.Button(cfg_btns, text="Mentés (Config)", command=self._save_cfg_to_file).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        ttk.Button(cfg_btns, text="Betöltés (Config)", command=self._load_cfg_from_file).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         # ====== HALADÓ BEÁLLÍTÁSOK (adv): Z-score -> Cooldown ======
 
@@ -9022,6 +9042,145 @@ class CryptoBotApp:
                 return repr(obj)
             except Exception:
                 return "<unprintable>"
+
+    def _save_cfg_to_file(self):
+        try:
+            cfg = self._mb_build_cfg()
+            filepath = filedialog.asksaveasfilename(
+                defaultextension=".json",
+                filetypes=[("JSON fájlok", "*.json"), ("Minden fájl", "*.*")],
+                title="Config mentése"
+            )
+            if not filepath:
+                return
+            ConfigManager.save_config(filepath, cfg)
+            messagebox.showinfo("Siker", f"Config mentve:\n{filepath}")
+        except Exception as e:
+            messagebox.showerror("Hiba", f"Mentés sikertelen: {e}")
+
+    def _load_cfg_from_file(self):
+        try:
+            filepath = filedialog.askopenfilename(
+                filetypes=[("JSON fájlok", "*.json"), ("Minden fájl", "*.*")],
+                title="Config betöltése"
+            )
+            if not filepath:
+                return
+            cfg = ConfigManager.load_config(filepath)
+            self._apply_cfg_to_ui(cfg)
+            messagebox.showinfo("Siker", f"Config betöltve:\n{filepath}")
+        except Exception as e:
+            messagebox.showerror("Hiba", f"Betöltés sikertelen: {e}")
+
+    def _set_widget_val(self, widget, val):
+        """Helper a különböző widget típusok beállításához."""
+        try:
+            if isinstance(widget, (ttk.Entry, ttk.Spinbox)):
+                # Spinbox/Entry esetén delete + insert
+                try:
+                    widget.delete(0, tk.END)
+                    widget.insert(0, str(val))
+                except Exception:
+                    pass
+            elif isinstance(widget, ttk.Combobox):
+                try:
+                    widget.set(str(val))
+                except Exception:
+                    pass
+            elif isinstance(widget, (tk.BooleanVar, tk.StringVar, tk.IntVar, tk.DoubleVar)):
+                try:
+                    widget.set(val)
+                except Exception:
+                    pass
+            else:
+                # Esetleg Checkbutton/Radiobutton variable nélkül?
+                # Általában variable-t használunk, amit a config map-ben adunk meg.
+                pass
+        except Exception:
+            pass
+
+    def _apply_cfg_to_ui(self, cfg: dict):
+        """
+        A cfg dict értékeit visszaírja a GUI widgetekbe / változókba.
+        """
+        # Mapping: config_key -> widget vagy variable
+        # Figyelem: A _mb_build_cfg kulcsait használjuk.
+
+        mapping = {
+            "symbol": self.mb_symbol,
+            "tf": self.mb_tf,
+            "ma_fast": self.mb_ma_fast,
+            "ma_slow": self.mb_ma_slow,
+            "size_pct": self.mb_size_pct,
+            "input_mode": self.mb_input_mode,
+            "mode": self.mb_mode,
+            "leverage": self.mb_leverage,
+            "tp_pct": self.mb_tp_pct,
+            "sl_pct": self.mb_sl_pct,
+            "trail_pct": self.mb_trail_pct,
+            "cooldown_s": self.mb_cooldown_s,
+            "dry": self.mb_dry,
+            "budget_ui": self.mb_budget,
+
+            "use_rsi": self.mb_use_rsi,
+            "rsi_len": self.mb_rsi_len,
+            "rsi_bmin": self.mb_rsi_buy_min,
+            "rsi_bmax": self.mb_rsi_buy_max,
+            "rsi_smin": self.mb_rsi_sell_min,
+            "rsi_smax": self.mb_rsi_sell_max,
+
+            "use_adx": getattr(self, "mb_use_adx", None),
+            "adx_len": getattr(self, "mb_adx_len", None),
+            "adx_min": getattr(self, "mb_adx_min", None),
+
+            "use_htf": self.mb_use_htf,
+            "htf_tf": self.mb_htf_tf,
+
+            "use_atr": self.mb_use_atr,
+            "atr_n": self.mb_atr_n,
+            "atr_mul_sl": self.mb_atr_mul_sl,
+            "atr_mul_tp1": self.mb_atr_mul_tp1,
+            "atr_mul_tp2": self.mb_atr_mul_tp2,
+            "atr_mul_tr": self.mb_atr_mul_trail,
+
+            "use_fixed": self.mb_use_fixed,
+
+            "use_brk": self.mb_use_brk,
+            "brk_n": self.mb_brk_n,
+            "brk_buf": self.mb_brk_buf,
+            "brk_with_trend": self.mb_brk_with_trend,
+
+            "use_live": self.mb_use_live,
+            "live_shock_pct": self.mb_live_shock_pct,
+            "live_shock_atr": self.mb_live_shock_atr,
+            "drift_max_pct": self.mb_drift_max_pct,
+
+            "use_zscore": self.mb_use_zscore,
+            "z_len": self.mb_z_len,
+            "z_points": self.mb_z_points,
+
+            "max_open": self.mb_max_open,
+            "pause_new": self.mb_pause_new,
+
+            "auto_borrow": self.mb_autob,
+            "invert_ema": getattr(self, "mb_invert_ema", None),
+            "ema_hyst_pct": getattr(self, "mb_ema_hyst_pct", None),
+        }
+
+        for key, val in cfg.items():
+            target = mapping.get(key)
+            if target is not None:
+                self._set_widget_val(target, val)
+
+        # Trigger UI updates (pl. enable/disable logika)
+        self._mb_toggle_fixed_widgets()
+        self._mb_toggle_atr_widgets()
+        self._mb_toggle_brk_widgets()
+        self._mb_toggle_live_widgets()
+        self._mb_toggle_rsi_widgets()
+        self._mb_toggle_adx_widgets()
+        self._mb_toggle_htf_widgets()
+        self._mb_toggle_zscore_widgets()
 
     def _mb_build_cfg(self) -> dict:
         """Margin bot beállítások snapshot – CSAK fő szálból hívd (pl. mb_start-ban)."""
