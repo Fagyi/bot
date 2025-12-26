@@ -9282,6 +9282,7 @@ class CryptoBotApp:
             "auto_borrow": self.mb_autob,
             "invert_ema": getattr(self, "mb_invert_ema", None),
             "ema_hyst_pct": getattr(self, "mb_ema_hyst_pct", None),
+            "dup_tol_pct": getattr(self, "mb_dup_tol_pct_var", None),
         }
 
         for key, val in cfg.items():
@@ -9380,6 +9381,9 @@ class CryptoBotApp:
 
             # EMA hysteresis %
             "ema_hyst_pct": self._mb_get_float('mb_ema_hyst_pct', 1.0),
+
+            # Duplicate / Nearby tolerance %
+            "dup_tol_pct": self._mb_get_float('mb_dup_tol_pct_var', 0.5),
         }
 
         # Ütközés-kezelés: ATR vs FIX egyszer eldöntve
