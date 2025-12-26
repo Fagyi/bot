@@ -8011,13 +8011,8 @@ class CryptoBotApp:
 
                         # --- DUPLIKÁLT ÁRSZINT SZŰRŐ (UI-ból állítható tolerancia %) ---
                         if self._is_pos_num(last_px_rt) and last_px_rt > 0:
-                            # Tolerancia olvasása a shadow változóból (thread-safe)
-                            try:
-                                tol_pct_val = float(getattr(self, "_mb_dup_tol_pct", 0.5))
-                            except Exception:
-                                tol_pct_val = 0.5
-
-                            tol_pct_val = max(0.0, tol_pct_val)  # ne legyen negatív
+                            # Tolerancia olvasása a SNAPSHOT config-ból
+                            tol_pct_val = max(0.0, float(ns.dup_tol_pct))
 
                             found, existing_entry, diff_pct = _has_nearby_pos(
                                 combined_sig,
@@ -9948,8 +9943,8 @@ class CryptoBotApp:
             text="Dupla / túl közeli azonos irányú nyitások tiltó zóna (%):"
         ).grid(row=2, column=0, sticky="w", pady=(12, 0))
 
-        # ÚJ változó: ezt fogja a worker olvasni
-        self.mb_dup_tol_pct_var = tk.DoubleVar(value=0.5)  # alap: 0.1%
+        # ÚJ változó: ezt fogja a worker olvasni (snapshoton keresztül)
+        self.mb_dup_tol_pct_var = tk.DoubleVar(value=0.5)  # alap: 0.5%
         tol_spin = ttk.Spinbox(
             right_box,
             from_=0.0,
@@ -9960,18 +9955,6 @@ class CryptoBotApp:
             format="%.2f"
         )
         tol_spin.grid(row=2, column=1, sticky="w", padx=4, pady=(12, 0))
-
-        # Shadow érték a workernek
-        self._mb_dup_tol_pct = float(self.mb_dup_tol_pct_var.get())
-
-        def _on_dup_tol_changed(*args):
-            try:
-                self._mb_dup_tol_pct = max(0.0, float(self.mb_dup_tol_pct_var.get()))
-            except Exception:
-                # fallback: ha valamiért rossz az érték, legyen 0.5%
-                self._mb_dup_tol_pct = 0.5
-
-        self.mb_dup_tol_pct_var.trace_add("write", _on_dup_tol_changed)
 
     def _apply_global_font(self):
         """A base_font-ot ráteszi minden fontos ttk widget stílusra.
