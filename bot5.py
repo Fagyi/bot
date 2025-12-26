@@ -1656,7 +1656,22 @@ class CryptoBotApp:
         ttk.Checkbutton(top, text="Publikus mód (nincs API)", variable=self.public_mode).pack(side=tk.RIGHT)
         self.status_lbl = ttk.Label(top, text="Státusz: Leállítva"); self.status_lbl.pack(side=tk.LEFT, padx=10)
 
-        params = ttk.Labelframe(self.tab_dash, text="Paraméterek", padding=10); params.pack(fill=tk.X, padx=10)
+        # PanedWindow a fő területeknek (bal: Settings+Log, jobb: Chart)
+        self.dash_paned = ttk.PanedWindow(self.tab_dash, orient=tk.HORIZONTAL)
+        self.dash_paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Bal oldal
+        left_panel = ttk.Frame(self.dash_paned)
+        self.dash_paned.add(left_panel, weight=1)
+
+        # Jobb oldal
+        right_panel = ttk.Frame(self.dash_paned)
+        self.dash_paned.add(right_panel, weight=3)
+
+        # Paraméterek (a bal panelbe)
+        params = ttk.Labelframe(left_panel, text="Paraméterek", padding=10)
+        params.pack(fill=tk.X, padx=0, pady=(0, 10))
+
         ttk.Label(params, text="Pár:").grid(row=0, column=0, sticky='w')
         self.e_symbol = ttk.Combobox(params, values=self.symbols, width=18, state='readonly')
         self.e_symbol.set(DEFAULT_SYMBOL); self.e_symbol.grid(row=0, column=1, padx=6)
@@ -1669,13 +1684,14 @@ class CryptoBotApp:
         self.e_long  = ttk.Entry(params, width=8); self.e_long.insert(0, str(LONG_MA)); self.e_long.grid(row=1, column=3)
         ttk.Button(params, text="Frissítés most", command=self.tick_once).grid(row=0, column=4, padx=8)
 
-        # Log
-        lf_log = ttk.Labelframe(self.tab_dash, text="Log", padding=10); lf_log.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10,10))
+        # Log (a bal panelbe, kitöltve a maradék helyet)
+        lf_log = ttk.Labelframe(left_panel, text="Log", padding=10)
+        lf_log.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
         self.log_area = scrolledtext.ScrolledText(lf_log, wrap=tk.WORD, height=10); self.log_area.pack(fill=tk.BOTH, expand=True)
 
-        # Chart
-        lf_ch = ttk.Labelframe(self.tab_dash, text="Diagram (Close + MA)", padding=10)
-        lf_ch.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0,10))
+        # Chart (a jobb panelbe)
+        lf_ch = ttk.Labelframe(right_panel, text="Diagram (Close + MA)", padding=10)
+        lf_ch.pack(fill=tk.BOTH, expand=True, padx=(10, 0), pady=0)
         self.fig = Figure(figsize=(8,3), dpi=100); self.ax = self.fig.add_subplot(111)
         self.canvas = FigureCanvasTkAgg(self.fig, master=lf_ch); self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
