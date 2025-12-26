@@ -5504,8 +5504,57 @@ class CryptoBotApp:
 
     # --- Thread-safe logoló segéd ---
     def _safe_log(self, text: str):
+        # 1. Előkészítés: időbélyeg és formázás
         try:
-            self.root.after(0, lambda: (self.mb_log.insert(tk.END, text), self.mb_log.see(tk.END)))
+            now = datetime.datetime.now()
+            ts_str = now.strftime("%Y-%m-%d %H:%M:%S")
+            # Levágjuk a felesleges whitespace-t a végéről (pl. \n), hogy egységes legyen
+            clean_text = text.rstrip()
+            if not clean_text:
+                return  # Üres sort ne naplózzunk
+
+            # Formázott sor: [Dátum Idő] Üzenet
+            log_entry = f"[{ts_str}] {clean_text}"
+        except Exception:
+            # Ha bármi hiba van a string formázással, fallback az eredetire
+            log_entry = text.rstrip()
+            now = datetime.datetime.now()
+
+        # 2. Fájlba írás (azonnal, append módban)
+        try:
+            # Fájlnév: margin_bot_YYYY-MM-DD.log
+            filename = f"margin_bot_{now.strftime('%Y-%m-%d')}.log"
+            with open(filename, "a", encoding="utf-8") as f:
+                f.write(log_entry + "\n")
+        except Exception as e:
+            print(f"Log file error: {e}")
+
+        # 3. GUI frissítés (főszálon) + 500 soros limit
+        try:
+            def _gui_update():
+                try:
+                    # Beszúrás a végére (+ sortörés, mert a log_entry-ben nincs)
+                    self.mb_log.insert(tk.END, log_entry + "\n")
+
+                    # Limit ellenőrzése és törlés
+                    # 'end-1c' indexe pl. '501.0' -> 501 sor
+                    line_count_str = self.mb_log.index('end-1c').split('.')[0]
+                    lines = int(line_count_str)
+
+                    limit = 500
+                    if lines > limit:
+                        # Töröljük a legrégebbi sorokat
+                        # lines - limit = hány sort kell törölni
+                        # pl. 502 sor van, limit 500 -> 2 sort kell törölni.
+                        # delete '1.0' től '3.0' -ig törli az 1. és 2. sort.
+                        diff = lines - limit
+                        self.mb_log.delete('1.0', f'{diff + 1}.0')
+
+                    self.mb_log.see(tk.END)
+                except Exception:
+                    pass
+
+            self.root.after(0, _gui_update)
         except Exception:
             pass
 
