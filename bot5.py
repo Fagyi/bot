@@ -7082,6 +7082,7 @@ class CryptoBotApp:
                 auto_borrow=bool(cfg.get("auto_borrow", False)),
                 invert_ema=bool(cfg.get("invert_ema", False)),
                 ema_hyst_pct=float(cfg.get("ema_hyst_pct", 1.0)),
+                dup_tol_pct=float(cfg.get("dup_tol_pct", 0.5)),
             )
 
             # FIXED vs ATR ütközés feloldása
