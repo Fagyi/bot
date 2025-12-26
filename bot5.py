@@ -13,7 +13,7 @@ A program betölti a .env és/vagy key.env fájlokat is a script mappájából (
 """
 from __future__ import annotations
 
-import os, sys, time, json, uuid, hmac, base64, hashlib, threading
+import os, sys, time, json, uuid, hmac, base64, hashlib, threading, math
 from typing import List, Optional, Literal, Any, Dict, Tuple
 from urllib.parse import urlencode
 import time as _time
@@ -8137,7 +8137,16 @@ class CryptoBotApp:
 
                                 # 4) lépésre kerekítés után még egyszer korrigáljuk a nominal/commit-et, hogy a padlózás után is konzisztens legyen minden
                                 open_size = self._mb_floor_to_step_dec(open_size, lot_step)
-                                nominal_q = float(open_size) * float(px_for_mgmt)
+
+                                # JAVÍTÁS: BUY esetén felfelé kerekítjük a funds-ot (quote_step),
+                                # hogy a sanitizerben a padlózás után se essen be a minBase/size alá.
+                                if combined_sig == 'buy' and quote_step > 0:
+                                    raw_nom = float(open_size) * float(px_for_mgmt)
+                                    qs = float(quote_step)
+                                    nominal_q = math.ceil(raw_nom / qs) * qs
+                                else:
+                                    nominal_q = float(open_size) * float(px_for_mgmt)
+
                                 commit_usdt = float(nominal_q) / float(lev_eff)
                             except Exception:
                                 # hiba esetén inkább ne dobjon el mindent, marad az eredeti számítás
