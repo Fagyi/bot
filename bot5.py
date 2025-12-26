@@ -5420,7 +5420,7 @@ class CryptoBotApp:
                         "size": f"{safe_amt:.8f}",
                     }
                     if scope == "isolated":
-                        body["isolated"] = True
+                        body["isIsolated"] = True
                         body["symbol"] = sym
 
                     try:
