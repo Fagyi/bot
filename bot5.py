@@ -7446,10 +7446,17 @@ class CryptoBotApp:
                         if now_ts >= (prev_ts + tf_sec):
                             need_refresh = True
 
-                    if need_refresh or not hasattr(self, "_mb_last_df"):
+                    # OHLCV beszerzési limit számítása
+                    need_n = max(200, adx_len * 4, z_len * 3 + z_points, slw * 3)
+
+                    # Van-e újrahasznosítható DF?
+                    current_df = getattr(self, "_mb_last_df", None)
+                    current_df_key = getattr(self, "_mb_last_df_key", None)
+                    can_reuse_df = (current_df is not None) and (current_df_key == key)
+
+                    if need_refresh or not can_reuse_df:
                         # OHLCV beszerzés WS-ből, vagy fallback REST-ből
                         try:
-                            need_n = max(200, adx_len * 4, z_len * 3 + z_points, slw * 3)
                             ohlcv = self._mb_get_ohlcv(symbol, tf, limit=need_n)
                         except Exception:
                             with self._ex_lock:
@@ -7460,7 +7467,28 @@ class CryptoBotApp:
                             time.sleep(2)
                             continue
 
-                        df = pd.DataFrame(ohlcv, columns=['ts','o','h','l','c','v'])
+                        if can_reuse_df:
+                            # --- OPTIMALIZÁCIÓ: pd.concat ---
+                            # Csak az új gyertyákat vesszük hozzá
+                            last_known_ts = float(current_df['ts'].iloc[-1])
+                            new_candles = [row for row in ohlcv if row[0] > last_known_ts]
+
+                            if new_candles:
+                                df_new = pd.DataFrame(new_candles, columns=['ts','o','h','l','c','v'])
+                                df = pd.concat([current_df, df_new], ignore_index=True)
+                                # Trimelés
+                                limit_keep = max(500, need_n)
+                                if len(df) > limit_keep:
+                                    df = df.iloc[-limit_keep:].copy()
+                            else:
+                                df = current_df.copy()
+                        else:
+                            # Első kör / szimbólum váltás: teljes DF építés
+                            df = pd.DataFrame(ohlcv, columns=['ts','o','h','l','c','v'])
+
+                        # Kulcs mentése a következő körhöz
+                        self._mb_last_df_key = key
+
                         last_ts_ms = int(df['ts'].iloc[-1])
                         last_ts_s  = int(last_ts_ms // 1000)
                         self._mb_last_bar_ts[key] = last_ts_s
