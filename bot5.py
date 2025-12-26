@@ -4198,7 +4198,7 @@ class CryptoBotApp:
                 ])
         threading.Thread(target=worker, daemon=True).start()
 
-    def _do_isolated_transfer(self, direction: str):
+    def _do_isolated_transfer(self, direction: str, spot_account: str = "TRADE"):
         if self.public_mode.get():
             messagebox.showwarning("Privát mód szükséges", "Kapcsold ki a publikus módot és állítsd be az API kulcsokat.")
             return
@@ -4212,7 +4212,7 @@ class CryptoBotApp:
         def worker():
             try:
                 with self._ex_lock:
-                    resp = self.exchange.transfer_isolated_margin(sym, ccy, amt, direction)  # ← EZT hívjuk
+                    resp = self.exchange.transfer_isolated_margin(sym, ccy, amt, direction, spot_account=spot_account)
                 self.root.after(0, lambda: [
                     self.funds_log.insert(tk.END, f"✅ Isolated transfer {direction} {amt} {ccy}  ({sym})\n"),
                     self.funds_log.see(tk.END)
