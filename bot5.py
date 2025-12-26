@@ -4556,6 +4556,12 @@ class CryptoBotApp:
         self.mb_live_shock_atr.delete(0, tk.END)
         self.mb_live_shock_atr.insert(0, "1.20")
         self.mb_live_shock_atr.pack(side=tk.LEFT)
+
+        ttk.Label(live_row1, text="  Max Drift %:").pack(side=tk.LEFT, padx=(10, 2))
+        self.mb_drift_max_pct = ttk.Spinbox(live_row1, from_=0.0, to=5.0, increment=0.05, width=6)
+        self.mb_drift_max_pct.delete(0, tk.END)
+        self.mb_drift_max_pct.insert(0, "0.0")
+        self.mb_drift_max_pct.pack(side=tk.LEFT)
         r_adv += 1
 
         # Breakout (kitörés)
