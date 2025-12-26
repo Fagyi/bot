@@ -4416,6 +4416,23 @@ class CryptoBotApp:
         self.mb_avail_lbl.pack(side=tk.LEFT)
         r += 1
 
+        # Dupla / túl közeli azonos irányú nyitások tiltó zóna
+        ttk.Label(basic, text="Dupla / túl közeli azonos irányú nyitások tiltó zóna (%):").grid(row=r, column=0, sticky="w", pady=(6, 0))
+        if not hasattr(self, 'mb_dup_tol_pct_var'):
+            self.mb_dup_tol_pct_var = tk.DoubleVar(value=0.5)
+
+        tol_spin = ttk.Spinbox(
+            basic,
+            from_=0.0,
+            to=5.0,
+            increment=0.05,
+            width=6,
+            textvariable=self.mb_dup_tol_pct_var,
+            format="%.2f"
+        )
+        tol_spin.grid(row=r, column=1, sticky="w", pady=(6, 0))
+        r += 1
+
         # checkboxok
         ch = ttk.Frame(basic)
         ch.grid(row=r, column=0, columnspan=2, sticky="w", pady=(8, 0))
@@ -7082,6 +7099,7 @@ class CryptoBotApp:
                 auto_borrow=bool(cfg.get("auto_borrow", False)),
                 invert_ema=bool(cfg.get("invert_ema", False)),
                 ema_hyst_pct=float(cfg.get("ema_hyst_pct", 1.0)),
+                dup_tol_pct=float(cfg.get("dup_tol_pct", 0.5)),
             )
 
             # FIXED vs ATR ütközés feloldása
@@ -8010,13 +8028,8 @@ class CryptoBotApp:
 
                         # --- DUPLIKÁLT ÁRSZINT SZŰRŐ (UI-ból állítható tolerancia %) ---
                         if self._is_pos_num(last_px_rt) and last_px_rt > 0:
-                            # Tolerancia olvasása a shadow változóból (thread-safe)
-                            try:
-                                tol_pct_val = float(getattr(self, "_mb_dup_tol_pct", 0.5))
-                            except Exception:
-                                tol_pct_val = 0.5
-
-                            tol_pct_val = max(0.0, tol_pct_val)  # ne legyen negatív
+                            # Tolerancia olvasása a SNAPSHOT config-ból
+                            tol_pct_val = max(0.0, float(ns.dup_tol_pct))
 
                             found, existing_entry, diff_pct = _has_nearby_pos(
                                 combined_sig,
@@ -9282,6 +9295,7 @@ class CryptoBotApp:
             "auto_borrow": self.mb_autob,
             "invert_ema": getattr(self, "mb_invert_ema", None),
             "ema_hyst_pct": getattr(self, "mb_ema_hyst_pct", None),
+            "dup_tol_pct": getattr(self, "mb_dup_tol_pct_var", None),
         }
 
         for key, val in cfg.items():
@@ -9380,6 +9394,9 @@ class CryptoBotApp:
 
             # EMA hysteresis %
             "ema_hyst_pct": self._mb_get_float('mb_ema_hyst_pct', 1.0),
+
+            # Duplicate / Nearby tolerance %
+            "dup_tol_pct": self._mb_get_float('mb_dup_tol_pct_var', 0.5),
         }
 
         # Ütközés-kezelés: ATR vs FIX egyszer eldöntve
@@ -9936,37 +9953,6 @@ class CryptoBotApp:
         # Változás figyelése (főszálon fut!)
         self.log_verbose_var.trace_add("write", _on_log_verbose_changed)
         self.log_delay_var.trace_add("write", _on_log_delay_changed)
-
-        # --- MarginBot: duplikált / túl közeli nyitások tiltó zóna (%) ---
-        ttk.Label(
-            right_box,
-            text="Dupla / túl közeli azonos irányú nyitások tiltó zóna (%):"
-        ).grid(row=2, column=0, sticky="w", pady=(12, 0))
-
-        # ÚJ változó: ezt fogja a worker olvasni
-        self.mb_dup_tol_pct_var = tk.DoubleVar(value=0.5)  # alap: 0.1%
-        tol_spin = ttk.Spinbox(
-            right_box,
-            from_=0.0,
-            to=5.0,
-            increment=0.05,
-            width=6,
-            textvariable=self.mb_dup_tol_pct_var,
-            format="%.2f"
-        )
-        tol_spin.grid(row=2, column=1, sticky="w", padx=4, pady=(12, 0))
-
-        # Shadow érték a workernek
-        self._mb_dup_tol_pct = float(self.mb_dup_tol_pct_var.get())
-
-        def _on_dup_tol_changed(*args):
-            try:
-                self._mb_dup_tol_pct = max(0.0, float(self.mb_dup_tol_pct_var.get()))
-            except Exception:
-                # fallback: ha valamiért rossz az érték, legyen 0.5%
-                self._mb_dup_tol_pct = 0.5
-
-        self.mb_dup_tol_pct_var.trace_add("write", _on_dup_tol_changed)
 
     def _apply_global_font(self):
         """A base_font-ot ráteszi minden fontos ttk widget stílusra.

@@ -46,5 +46,6 @@
   "pause_new": false,
   "auto_borrow": true,
   "invert_ema": false,
-  "ema_hyst_pct": 0.0
+  "ema_hyst_pct": 0.0,
+  "dup_tol_pct": 0.5
 }
