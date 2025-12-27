@@ -7708,9 +7708,11 @@ class CryptoBotApp:
                                 sig = 'hold'
 
                     brk_sig, hh, ll, up_lvl, dn_lvl = ("hold", float("nan"), float("nan"), float("nan"), float("nan"))
+                    brk_sig_raw = "hold"
                     if use_brk:
                         # breakout-hoz érdemes a realtime high/low-t használni
                         brk_sig, hh, ll, up_lvl, dn_lvl = self._mb_breakout_signal(df_rt, brk_n, brk_buf)
+                        brk_sig_raw = brk_sig
                         if brk_with_trend and use_htf:
                             if (brk_sig == 'buy' and trend_htf < 0) or (brk_sig == 'sell' and trend_htf > 0):
                                 brk_sig = 'hold'
@@ -7934,21 +7936,31 @@ class CryptoBotApp:
                         cd_left=cd_left,
                     )
 
-                    # HOLD okok formázása: "hold_reasons=... › hold"
+                    # HOLD okok formázása: "hold_reasons=... | buy › hold"
                     # Csak akkor írjuk ki a hold okokat, ha a végső jel 'hold', de volt alapjel
                     final_suffix = ""
+
+                    # Determine true raw signal for logging (ignoring all filters)
+                    true_raw_signal = "hold"
+                    if use_brk and brk_sig_raw in ("buy", "sell"):
+                        true_raw_signal = brk_sig_raw
+                    elif sig_raw in ("buy", "sell"):
+                        true_raw_signal = sig_raw
 
                     if combined_sig in (None, "", "hold"):
                         reasons_str = ""
                         if reasons:
                             reasons_str = "hold_reasons=" + ", ".join(reasons)
 
-                        # Ha van hold indok, akkor fűzzük hozzá a nyilat
+                        # Ha van hold indok, akkor fűzzük hozzá
                         if reasons_str:
-                             final_suffix = f" | {reasons_str}  › hold"
-                        elif combined_sig == "hold":
-                             # Ha nincs konkrét indok (pl. alapból sem volt jel), csak simán hold vagy üres
-                             final_suffix = " › hold"
+                            final_suffix = f" | {reasons_str}"
+
+                        # Ha van eredeti szignál, ami hold-ra változott, azt is jelezzük
+                        if true_raw_signal in ("buy", "sell"):
+                            final_suffix += f" | {true_raw_signal} › hold"
+                        else:
+                            final_suffix += " › hold"
                     else:
                         # Ha van jel (buy/sell)
                         final_suffix = f"  › {combined_sig}"
