@@ -1983,14 +1983,6 @@ class CryptoBotApp:
         # --- Margin Bot (auto) ---
         self._build_margin_bot_tab()
 
-        # --- K-Line WS indítása már init-ben (alapértelmezett symbol + TF-ek) ---
-        try:
-            default_sym = normalize_symbol(DEFAULT_SYMBOL)
-            self._ensure_ticker_ws(default_sym)
-        except Exception as e:
-            # ha bármi gebasz van, ne dőljön el a GUI
-            print("Ticker WS init hiba az __init__-ben:", e)
-
         # --- Beállítások fül (font) ---
         self._build_settings_tab()
 
@@ -2008,6 +2000,14 @@ class CryptoBotApp:
                 self._safe_log("ℹ️ Auto-loaded config.json\n")
         except Exception as e:
             self._safe_log(f"⚠️ Auto-load error: {e}\n")
+
+        # --- K-Line WS indítása már init-ben (alapértelmezett symbol + TF-ek) ---
+        try:
+            default_sym = normalize_symbol(DEFAULT_SYMBOL)
+            self._ensure_ticker_ws(default_sym)
+        except Exception as e:
+            # ha bármi gebasz van, ne dőljön el a GUI
+            print("Ticker WS init hiba az __init__-ben:", e)
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
