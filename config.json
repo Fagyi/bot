@@ -47,5 +47,6 @@
   "auto_borrow": true,
   "invert_ema": false,
   "ema_hyst_pct": 0.0,
-  "dup_tol_pct": 0.5
+  "dup_tol_pct": 0.5,
+  "strategy": "EMA"
 }
