@@ -7708,9 +7708,11 @@ class CryptoBotApp:
                                 sig = 'hold'
 
                     brk_sig, hh, ll, up_lvl, dn_lvl = ("hold", float("nan"), float("nan"), float("nan"), float("nan"))
+                    brk_sig_raw = "hold"
                     if use_brk:
                         # breakout-hoz érdemes a realtime high/low-t használni
                         brk_sig, hh, ll, up_lvl, dn_lvl = self._mb_breakout_signal(df_rt, brk_n, brk_buf)
+                        brk_sig_raw = brk_sig
                         if brk_with_trend and use_htf:
                             if (brk_sig == 'buy' and trend_htf < 0) or (brk_sig == 'sell' and trend_htf > 0):
                                 brk_sig = 'hold'
@@ -7934,21 +7936,31 @@ class CryptoBotApp:
                         cd_left=cd_left,
                     )
 
-                    # HOLD okok formázása: "hold_reasons=... › hold"
+                    # HOLD okok formázása: "hold_reasons=... | buy › hold"
                     # Csak akkor írjuk ki a hold okokat, ha a végső jel 'hold', de volt alapjel
                     final_suffix = ""
+
+                    # Determine true raw signal for logging (ignoring all filters)
+                    true_raw_signal = "hold"
+                    if use_brk and brk_sig_raw in ("buy", "sell"):
+                        true_raw_signal = brk_sig_raw
+                    elif sig_raw in ("buy", "sell"):
+                        true_raw_signal = sig_raw
 
                     if combined_sig in (None, "", "hold"):
                         reasons_str = ""
                         if reasons:
                             reasons_str = "hold_reasons=" + ", ".join(reasons)
 
-                        # Ha van hold indok, akkor fűzzük hozzá a nyilat
+                        # Ha van hold indok, akkor fűzzük hozzá
                         if reasons_str:
-                             final_suffix = f" | {reasons_str}  › hold"
-                        elif combined_sig == "hold":
-                             # Ha nincs konkrét indok (pl. alapból sem volt jel), csak simán hold vagy üres
-                             final_suffix = " › hold"
+                            final_suffix = f" | {reasons_str}"
+
+                        # Ha van eredeti szignál, ami hold-ra változott, azt is jelezzük
+                        if true_raw_signal in ("buy", "sell"):
+                            final_suffix += f" | {true_raw_signal} › hold"
+                        else:
+                            final_suffix += " › hold"
                     else:
                         # Ha van jel (buy/sell)
                         final_suffix = f"  › {combined_sig}"
@@ -8026,38 +8038,45 @@ class CryptoBotApp:
                             time.sleep(1)
                             continue
 
-                        # --- DUPLIKÁLT ÁRSZINT SZŰRŐ (UI-ból állítható tolerancia %) ---
+                        # --- DUPLIKÁLT ÁRSZINT SZŰRŐ (Optimalizált) ---
                         if self._is_pos_num(last_px_rt) and last_px_rt > 0:
                             # Tolerancia olvasása a SNAPSHOT config-ból
                             tol_pct_val = max(0.0, float(ns.dup_tol_pct))
 
-                            found, existing_entry, diff_pct = _has_nearby_pos(
-                                combined_sig,
-                                last_px_rt,
-                                tol_pct=tol_pct_val,
-                                symbol_filter=symbol,
-                            )
-                            if found:
-                                # --- SPAM CSÖKKENTÉS ---
-                                # Csak akkor logolunk, ha:
-                                # 1. A részletes logolás (verbose) BE van kapcsolva
-                                # 2. ÉS eltelt legalább 30 másodperc az utolsó ilyen üzenet óta
+                            # OPTIMALIZÁCIÓ: Ha 0 a tolerancia, ne is keressen feleslegesen
+                            found = False
+                            existing_entry = 0.0
+                            diff_pct = 0.0
 
+                            if tol_pct_val > 0:
+                                found, existing_entry, diff_pct = _has_nearby_pos(
+                                    combined_sig,
+                                    last_px_rt,
+                                    tol_pct=tol_pct_val,
+                                    symbol_filter=symbol,
+                                )
+
+                            if found:
+                                # --- SPAM CSÖKKENTÉS (Szimbólumonként külön!). Csak akkor logolunk, ha verbose aktív és letelt az idő
                                 now_ts_skip = int(time.time())
-                                last_skip_ts = getattr(self, "_mb_last_skip_log_ts", 0)
+
+                                # Inicializáljuk a dict-et, ha még nincs (hogy páronként tudjuk követni)
+                                if not hasattr(self, "_mb_last_skip_log_map"):
+                                    self._mb_last_skip_log_map = {}
+
+                                # Kulcs: symbol + irány (pl. "SOL-USDT_LONG")
+                                log_key = f"{symbol}_{combined_sig}"
+                                last_skip_ts = self._mb_last_skip_log_map.get(log_key, 0)
 
                                 # Itt állíthatod a ritkítást (most 30 másodperc)
                                 if verbose_on and (now_ts_skip - last_skip_ts > 30):
                                     self._safe_log(
-                                        f"⏭ {combined_sig.upper()} jel átugorva: már van nyitott "
-                                        f"{combined_sig.upper()} pozíció hasonló áron "
-                                        f"(entry={existing_entry:.6f}, now={last_px_rt:.6f}, "
-                                        f"diff={diff_pct:.3f}%, tol={tol_pct_val:.3f}%). (Ritkítva 30s)\n"
+                                        f"⏭ {combined_sig.upper()} jel átugorva ({symbol}): már van pozíció "
+                                        f"hasonló áron (entry={existing_entry:.5f}, now={last_px_rt:.5f}, "
+                                        f"diff={diff_pct:.2f}%, tol={tol_pct_val:.2f}%). [30s]"
                                     )
-                                    self._mb_last_skip_log_ts = now_ts_skip
-
-                                opened = False
-                                time.sleep(1)
+                                    # Frissítjük az időbélyeget ehhez a kulcshoz
+                                    self._mb_last_skip_log_map[log_key] = now_ts_skip
                                 continue
 
                         # friss ticker: WS az első, REST csak ha nincs használható WS ár  ### WS-OPEN
@@ -9235,7 +9254,7 @@ class CryptoBotApp:
         """
         # Mapping: config_key -> widget vagy variable
         # Figyelem: A _mb_build_cfg kulcsait használjuk.
-        
+
         mapping = {
             "symbol": self.mb_symbol,
             "tf": self.mb_tf,
@@ -9291,7 +9310,7 @@ class CryptoBotApp:
 
             "max_open": self.mb_max_open,
             "pause_new": self.mb_pause_new,
-            
+
             "auto_borrow": self.mb_autob,
             "invert_ema": getattr(self, "mb_invert_ema", None),
             "ema_hyst_pct": getattr(self, "mb_ema_hyst_pct", None),
