@@ -4341,6 +4341,17 @@ class CryptoBotApp:
         self.root.after(50, self._mb_refresh_available)
         r += 1
 
+        # --- Strategy Selector ---
+        ttk.Label(basic, text="Stratégia").grid(row=r, column=0, sticky="w", pady=(4, 0))
+        self.mb_strategy = tk.StringVar(value="EMA")
+        self.mb_strategy_cb = ttk.Combobox(
+            basic, textvariable=self.mb_strategy, state="readonly", width=10,
+            values=["EMA", "Z-Score"]
+        )
+        self.mb_strategy_cb.grid(row=r, column=1, sticky="w", pady=(4, 0))
+        self.mb_strategy_cb.bind("<<ComboboxSelected>>", self._mb_on_strategy_change)
+        r += 1
+
         # EMA (rövid/hosszú)
         ttk.Label(basic, text="EMA (rövid / hosszú)").grid(row=r, column=0, sticky="w", pady=(2, 0))
         ema_row = ttk.Frame(basic)
@@ -4475,19 +4486,12 @@ class CryptoBotApp:
 
         # ====== HALADÓ BEÁLLÍTÁSOK (adv): Z-score -> Cooldown ======
 
-        z_box = ttk.Labelframe(adv, text="Z-score filter / konfluencia", padding=6)
+        z_box = ttk.Labelframe(adv, text="Z-score beállítások", padding=6)
         z_box.grid(row=r_adv, column=0, columnspan=2, sticky="we", pady=(8, 0))
 
-        z_row1 = ttk.Frame(z_box)
-        z_row1.pack(anchor="w")
-
+        # (Korábbi checkbox eltávolítva - a Stratégia választó vezérli)
+        # Dummy variable, hogy a config ne haljon el, ha még hivatkozik rá valahol
         self.mb_use_zscore = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            z_row1,
-            text="Z-score filter használata",
-            variable=self.mb_use_zscore,
-            command=self._mb_toggle_zscore_widgets,
-        ).pack(side=tk.LEFT)
 
         z_row2 = ttk.Frame(z_box)
         z_row2.pack(anchor="w", pady=(4, 0))
@@ -7100,6 +7104,7 @@ class CryptoBotApp:
                 invert_ema=bool(cfg.get("invert_ema", False)),
                 ema_hyst_pct=float(cfg.get("ema_hyst_pct", 1.0)),
                 dup_tol_pct=float(cfg.get("dup_tol_pct", 0.5)),
+                strategy=str(cfg.get("strategy", "EMA")),
             )
 
             # FIXED vs ATR ütközés feloldása
@@ -7770,39 +7775,90 @@ class CryptoBotApp:
                     except Exception:
                         pass
 
-                    # --- Eredeti kombó jel (EMA+RSI+HTF+BRK+shock) ---
-                    # FONTOS: ezt még a filterek (Z-score/ADX) ELŐTT eltesszük logoláshoz
-                    combined_sig_base = brk_sig if brk_sig in ("buy", "sell") else sig
+                    # --- STRATÉGIA VÁLASZTÁS ÉS ALAPJEL KÉPZÉS ---
+
+                    # 1. Z-Score számítása (mindig fusson, ha kell statisztikához, vagy ha ő a stratégia)
+                    # (De optimalizálhatnánk: ha nem ő a stratégia, és nem is kell loghoz, akkor minek?)
+                    # A log_line függvény viszont kéri a z_dir-t, szóval számoljuk ki.
+                    z_dir = "hold"
+                    z_quad = None
+                    try:
+                        z_sig, z_quad = self._compute_zscore_signal(
+                            symbol,
+                            tf,
+                            length=z_len,
+                            data_points=z_points,
+                            df=df_ind,
+                        )
+                    except Exception:
+                        z_sig, z_quad = 0, None
+
+                    if z_sig == 1:
+                        z_dir = "buy"
+                    elif z_sig == -1:
+                        z_dir = "sell"
+                    else:
+                        z_dir = "hold"
+
+                    # 2. Stratégia alapú elágazás
+                    # Alapjel (filterek előtt)
+
+                    strategy_mode = getattr(cfg_ns, "strategy", "EMA")
+
+                    if strategy_mode == "Z-Score":
+                        # Z-Score a vezérlő jel
+                        combined_sig_base = z_dir
+                        # Megjegyzés: Az EMA/Breakout/HTF alapú jelek (sig, brk_sig) itt ignorálva vannak,
+                        # DE a filterek (RSI, ADX, stb) lejjebb alkalmazódnak majd erre a jelre is.
+                    else:
+                        # EMA (Alapértelmezett)
+                        # Itt a korábbi logika: Breakout felülírja az EMA-t, ha aktív
+                        combined_sig_base = brk_sig if brk_sig in ("buy", "sell") else sig
+
                     combined_sig = combined_sig_base
                     combined_sig_raw = combined_sig_base  # tényleg a filterek előtti alapjel
 
-                    # --- Z-score filter (opcionális) ---
-                    z_dir = "hold"
-                    z_quad = None
-                    if use_zscore:
-                        try:
-                            z_sig, z_quad = self._compute_zscore_signal(
-                                symbol,
-                                tf,
-                                length=z_len,
-                                data_points=z_points,
-                                df=df_ind,
-                            )
-                        except Exception:
-                            z_sig, z_quad = 0, None
+                    # --- Közös Filterek (RSI, ADX) ---
+                    # Fontos: A user kérése szerint ezek a filterek minden stratégiára vonatkoznak.
+                    # Az EMA-hoz kötött specifikus szűrők (pl. HTF trend, RSI ema-hoz kötött logikája)
+                    # már beépültek a 'sig' változóba feljebb.
+                    # Ha Z-Score a stratégia, akkor a 'combined_sig' most a 'z_dir'.
 
-                        if z_sig == 1:
-                            z_dir = "buy"
-                        elif z_sig == -1:
-                            z_dir = "sell"
-                        else:
-                            z_dir = "hold"
+                    # Ha Z-Score a stratégia, akkor is alkalmazzuk rá a közös filtereket (RSI, ADX, stb)
+                    # ha azok be vannak kapcsolva.
 
-                        # Ha van jel (buy/sell), de a Z-score nem támogatja, vagy ellentétes,
-                        # akkor végül HOLD lesz → tiszta "filter" szerep
-                        if combined_sig in ("buy", "sell"):
-                            if z_dir == "hold" or z_dir != combined_sig:
-                                combined_sig = "hold"
+                    # Megjegyzés: A fenti kódban az RSI szűrés már megtörtént a 'sig' változóba
+                    # (EMA jelre). Ha Z-Score van, azt újra kell szűrni?
+                    # A kérés: "igen, legyenek alkalmazhatóak más stratégiákra is."
+
+                    if strategy_mode == "Z-Score":
+                        # Z-Score esetén manuálisan kell alkalmazni azokat a szűrőket,
+                        # amik az EMA ágban (sig) automatikusan megtörténtek.
+
+                        # 1. HTF Filter Z-Score-ra
+                        if use_htf:
+                            if (combined_sig == 'buy' and trend_htf < 0) or (combined_sig == 'sell' and trend_htf > 0):
+                                combined_sig = 'hold'
+
+                        # 2. RSI Filter Z-Score-ra
+                        if use_rsi and rsi_val is not None:
+                            if combined_sig == 'buy':
+                                if not (rsi_bmin <= rsi_val <= rsi_bmax):
+                                    combined_sig = 'hold'
+                            elif combined_sig == 'sell':
+                                if not (rsi_smin <= rsi_val <= rsi_smax):
+                                    combined_sig = 'hold'
+
+                        # 3. Live Breakout / Shock logika Z-Score-ra
+                        if use_live or use_brk:
+                            # Ha a brk_sig aktív (nem hold) -> ez tartalmazza a Breakout és a Live Shock jelzéseit is.
+                            # Feltételezzük, hogy a user a "Live Shock"-ot és a "Breakout"-ot is konfluenciának szánja
+                            # vagy azonnali belépőnek. Mivel a Z-Score önmagában is belépő, a Breakout/Shock
+                            # itt "második véleményként" vagy "vészhelyzeti jelként" működhet.
+                            # A legegyszerűbb, ha a Breakout/Shock jel FELÜLÍRJA a Z-Score jelet,
+                            # ha az 'buy' vagy 'sell'.
+                            if brk_sig in ("buy", "sell"):
+                                combined_sig = brk_sig
 
                     # ADX (mindig számoljuk, hogy logban és döntésben is stabil legyen)
                     adx_val = None
@@ -8560,26 +8616,33 @@ class CryptoBotApp:
             self._mb_toggling = False
 
     def _mb_toggle_zscore_widgets(self, *_):
-        """Z-score UI elemek ki-/bekapcsolása a checkbox alapján."""
-        import tkinter as tk
+        # A régi metódus, amit a checkbox hívott.
+        # Most már a _mb_on_strategy_change végzi a munkát.
+        self._mb_on_strategy_change()
 
+    def _mb_on_strategy_change(self, *_):
+        """Stratégia váltásakor letiltjuk/engedélyezzük a releváns widgeteket."""
         try:
-            on = bool(self.mb_use_zscore.get())
+            strat = self.mb_strategy.get()
         except Exception:
-            on = False
+            strat = "EMA"
 
-        state = "normal" if on else "disabled"
+        is_ema = (strat == "EMA")
+        is_zscore = (strat == "Z-Score")
 
-        # csak a két spinboxot kapcsoljuk, ahogy kérted
-        for name in ("mb_z_len", "mb_z_points"):
-            w = getattr(self, name, None)
-            if w is None:
-                continue
-            try:
-                w.configure(state=state)
-            except tk.TclError:
-                # ha valamiért nem támogatja a state-et, ne dobjunk hibát
-                pass
+        # 1) EMA widgetek
+        ema_state = "normal" if is_ema else "disabled"
+        for w in (getattr(self, "mb_ma_fast", None), getattr(self, "mb_ma_slow", None)):
+            if w:
+                try: w.configure(state=ema_state)
+                except Exception: pass
+
+        # 2) Z-Score widgetek
+        z_state = "normal" if is_zscore else "disabled"
+        for w in (getattr(self, "mb_z_len", None), getattr(self, "mb_z_points", None)):
+            if w:
+                try: w.configure(state=z_state)
+                except Exception: pass
 
     # ============ NEW: Leállításkori / ad-hoc összegzés ============
     def _mb_summary(self):
@@ -9315,6 +9378,7 @@ class CryptoBotApp:
             "invert_ema": getattr(self, "mb_invert_ema", None),
             "ema_hyst_pct": getattr(self, "mb_ema_hyst_pct", None),
             "dup_tol_pct": getattr(self, "mb_dup_tol_pct_var", None),
+            "strategy": getattr(self, "mb_strategy", None),
         }
 
         for key, val in cfg.items():
@@ -9331,6 +9395,7 @@ class CryptoBotApp:
         self._mb_toggle_adx_widgets()
         self._mb_toggle_htf_widgets()
         self._mb_toggle_zscore_widgets()
+        self._mb_on_strategy_change()
 
     def _mb_build_cfg(self) -> dict:
         """Margin bot beállítások snapshot – CSAK fő szálból hívd (pl. mb_start-ban)."""
@@ -9416,6 +9481,9 @@ class CryptoBotApp:
 
             # Duplicate / Nearby tolerance %
             "dup_tol_pct": self._mb_get_float('mb_dup_tol_pct_var', 0.5),
+
+            # Strategy
+            "strategy": self._mb_get_str('mb_strategy', 'EMA'),
         }
 
         # Ütközés-kezelés: ATR vs FIX egyszer eldöntve
