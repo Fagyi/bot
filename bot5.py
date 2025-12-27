@@ -7266,7 +7266,8 @@ class CryptoBotApp:
                 pos.update({'tp_pct': tpct, 'sl_pct': spct, 'trail_pct': trpct, 'mgmt': 'fixed'})
             with self._mb_lock:
                 _pos_list(side).append(pos)
-                self._pool_used_quote += float(commit_usdt) + float(fee_reserved)
+                # Javítás: Decimal + float hiba elkerülése
+                self._pool_used_quote += Decimal(str(float(commit_usdt))) + Decimal(str(float(fee_reserved)))
                 # --- Mentés adatbázisba ---
                 try:
                     self.db.add_position(pos)
@@ -7317,8 +7318,9 @@ class CryptoBotApp:
             fee_release = fee_res_before * rel_ratio
 
             with self._mb_lock:
-                self._sim_pnl_usdt += pnl
-                self._pool_balance_quote += pnl
+                # Javítás: Decimal + float hiba elkerülése
+                self._sim_pnl_usdt += Decimal(str(pnl))
+                self._pool_balance_quote += Decimal(str(pnl))
 
                 pos.update({
                     'size': sz - close_sz,
