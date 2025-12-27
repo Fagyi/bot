@@ -8097,7 +8097,7 @@ class CryptoBotApp:
                         # --- DUPLIKÁLT ÁRSZINT SZŰRŐ (Optimalizált) ---
                         if self._is_pos_num(last_px_rt) and last_px_rt > 0:
                             # Tolerancia olvasása a SNAPSHOT config-ból
-                            tol_pct_val = max(0.0, float(ns.dup_tol_pct))
+                            tol_pct_val = max(0.0, float(cfg_ns.dup_tol_pct))
 
                             # OPTIMALIZÁCIÓ: Ha 0 a tolerancia, ne is keressen feleslegesen
                             found = False
