@@ -4346,7 +4346,7 @@ class CryptoBotApp:
         self.mb_strategy = tk.StringVar(value="EMA")
         self.mb_strategy_cb = ttk.Combobox(
             basic, textvariable=self.mb_strategy, state="readonly", width=10,
-            values=["EMA", "Z-Score"]
+            values=["EMA", "Z-Score", "Bollinger Squeeze"]
         )
         self.mb_strategy_cb.grid(row=r, column=1, sticky="w", pady=(4, 0))
         self.mb_strategy_cb.bind("<<ComboboxSelected>>", self._mb_on_strategy_change)
@@ -4548,6 +4548,32 @@ class CryptoBotApp:
         z_row3.pack(anchor="w", pady=(4, 0))
         self.mb_z_label = ttk.Label(z_row3, text="Z-score jelzés: n/a")
         self.mb_z_label.pack(side=tk.LEFT)
+        r_adv += 1
+
+        # Bollinger Squeeze beállítások
+        sqz_box = ttk.Labelframe(adv, text="Bollinger Squeeze beállítások", padding=6)
+        sqz_box.grid(row=r_adv, column=0, columnspan=2, sticky="we", pady=(8, 0))
+
+        sqz_row1 = ttk.Frame(sqz_box)
+        sqz_row1.pack(anchor="w")
+
+        ttk.Label(sqz_row1, text="Hossz:").pack(side=tk.LEFT)
+        self.mb_sqz_len = ttk.Spinbox(sqz_row1, from_=5, to=200, width=6)
+        self.mb_sqz_len.delete(0, tk.END)
+        self.mb_sqz_len.insert(0, "20")
+        self.mb_sqz_len.pack(side=tk.LEFT, padx=(2, 8))
+
+        ttk.Label(sqz_row1, text="BB Mult:").pack(side=tk.LEFT)
+        self.mb_sqz_bb_mult = ttk.Spinbox(sqz_row1, from_=0.1, to=5.0, increment=0.1, width=5)
+        self.mb_sqz_bb_mult.delete(0, tk.END)
+        self.mb_sqz_bb_mult.insert(0, "2.0")
+        self.mb_sqz_bb_mult.pack(side=tk.LEFT, padx=(2, 8))
+
+        ttk.Label(sqz_row1, text="KC Mult:").pack(side=tk.LEFT)
+        self.mb_sqz_kc_mult = ttk.Spinbox(sqz_row1, from_=0.1, to=5.0, increment=0.1, width=5)
+        self.mb_sqz_kc_mult.delete(0, tk.END)
+        self.mb_sqz_kc_mult.insert(0, "1.5")
+        self.mb_sqz_kc_mult.pack(side=tk.LEFT, padx=(2, 0))
         r_adv += 1
 
         # Fix SL / TP / Trailing – opcionális (ATR nélkül)
@@ -7480,6 +7506,10 @@ class CryptoBotApp:
                     z_len      = cfg_ns.z_len
                     z_points   = cfg_ns.z_points
 
+                    sqz_len     = cfg_ns.sqz_len
+                    sqz_bb_mult = cfg_ns.sqz_bb_mult
+                    sqz_kc_mult = cfg_ns.sqz_kc_mult
+
                     use_live       = cfg_ns.use_live
                     live_shock_pct = cfg_ns.live_shock_pct
                     live_shock_atr = cfg_ns.live_shock_atr
@@ -7791,8 +7821,6 @@ class CryptoBotApp:
                     # --- STRATÉGIA VÁLASZTÁS ÉS ALAPJEL KÉPZÉS ---
                     
                     # 1. Z-Score számítása (mindig fusson, ha kell statisztikához, vagy ha ő a stratégia)
-                    # (De optimalizálhatnánk: ha nem ő a stratégia, és nem is kell loghoz, akkor minek?)
-                    # A log_line függvény viszont kéri a z_dir-t, szóval számoljuk ki.
                     z_dir = "hold"
                     z_quad = None
                     try:
@@ -7813,16 +7841,27 @@ class CryptoBotApp:
                     else:
                         z_dir = "hold"
 
-                    # 2. Stratégia alapú elágazás
-                    # Alapjel (filterek előtt)
+                    # 2. Bollinger Squeeze számítása (mindig fusson)
+                    sqz_sig = "hold"
+                    is_sqz = False
+                    mom_val = 0.0
+                    try:
+                        sqz_sig, is_sqz, mom_val = self._mb_squeeze_signal(
+                            df_ind, length=sqz_len, bb_mult=sqz_bb_mult, kc_mult=sqz_kc_mult
+                        )
+                    except Exception:
+                        pass
+
+                    # 3. Stratégia alapú elágazás
                     
                     strategy_mode = getattr(cfg_ns, "strategy", "EMA")
                     
                     if strategy_mode == "Z-Score":
                         # Z-Score a vezérlő jel
                         combined_sig_base = z_dir
-                        # Megjegyzés: Az EMA/Breakout/HTF alapú jelek (sig, brk_sig) itt ignorálva vannak,
-                        # DE a filterek (RSI, ADX, stb) lejjebb alkalmazódnak majd erre a jelre is.
+                    elif strategy_mode == "Bollinger Squeeze":
+                        # Squeeze a vezérlő jel
+                        combined_sig_base = sqz_sig
                     else:
                         # EMA (Alapértelmezett)
                         # Itt a korábbi logika: Breakout felülírja az EMA-t, ha aktív
@@ -7832,28 +7871,17 @@ class CryptoBotApp:
                     combined_sig_raw = combined_sig_base  # tényleg a filterek előtti alapjel
 
                     # --- Közös Filterek (RSI, ADX) ---
-                    # Fontos: A user kérése szerint ezek a filterek minden stratégiára vonatkoznak.
-                    # Az EMA-hoz kötött specifikus szűrők (pl. HTF trend, RSI ema-hoz kötött logikája)
-                    # már beépültek a 'sig' változóba feljebb.
-                    # Ha Z-Score a stratégia, akkor a 'combined_sig' most a 'z_dir'.
+                    # Ha Z-Score vagy Squeeze a stratégia, akkor is alkalmazzuk rá a közös filtereket.
                     
-                    # Ha Z-Score a stratégia, akkor is alkalmazzuk rá a közös filtereket (RSI, ADX, stb)
-                    # ha azok be vannak kapcsolva.
-                    
-                    # Megjegyzés: A fenti kódban az RSI szűrés már megtörtént a 'sig' változóba 
-                    # (EMA jelre). Ha Z-Score van, azt újra kell szűrni?
-                    # A kérés: "igen, legyenek alkalmazhatóak más stratégiákra is."
-                    
-                    if strategy_mode == "Z-Score":
-                        # Z-Score esetén manuálisan kell alkalmazni azokat a szűrőket, 
-                        # amik az EMA ágban (sig) automatikusan megtörténtek.
+                    if strategy_mode in ("Z-Score", "Bollinger Squeeze"):
+                        # Manuálisan kell alkalmazni azokat a szűrőket, amik az EMA ágban (sig) automatikusan megtörténtek.
                         
-                        # 1. HTF Filter Z-Score-ra
+                        # 1. HTF Filter
                         if use_htf:
                             if (combined_sig == 'buy' and trend_htf < 0) or (combined_sig == 'sell' and trend_htf > 0):
                                 combined_sig = 'hold'
 
-                        # 2. RSI Filter Z-Score-ra
+                        # 2. RSI Filter
                         if use_rsi and rsi_val is not None:
                             if combined_sig == 'buy':
                                 if not (rsi_bmin <= rsi_val <= rsi_bmax):
@@ -7862,14 +7890,9 @@ class CryptoBotApp:
                                 if not (rsi_smin <= rsi_val <= rsi_smax):
                                     combined_sig = 'hold'
                                     
-                        # 3. Live Breakout / Shock logika Z-Score-ra
+                        # 3. Live Breakout / Shock logika
                         if use_live or use_brk:
-                            # Ha a brk_sig aktív (nem hold) -> ez tartalmazza a Breakout és a Live Shock jelzéseit is.
-                            # Feltételezzük, hogy a user a "Live Shock"-ot és a "Breakout"-ot is konfluenciának szánja
-                            # vagy azonnali belépőnek. Mivel a Z-Score önmagában is belépő, a Breakout/Shock
-                            # itt "második véleményként" vagy "vészhelyzeti jelként" működhet.
-                            # A legegyszerűbb, ha a Breakout/Shock jel FELÜLÍRJA a Z-Score jelet,
-                            # ha az 'buy' vagy 'sell'.
+                            # A Breakout/Shock jel FELÜLÍRJA a stratégiát, ha az 'buy' vagy 'sell'.
                             if brk_sig in ("buy", "sell"):
                                 combined_sig = brk_sig
 
@@ -8642,12 +8665,20 @@ class CryptoBotApp:
 
         is_ema = (strat == "EMA")
         is_zscore = (strat == "Z-Score")
+        is_sqz = (strat == "Bollinger Squeeze")
 
         # 1) EMA widgetek
         ema_state = "normal" if is_ema else "disabled"
         for w in (getattr(self, "mb_ma_fast", None), getattr(self, "mb_ma_slow", None)):
             if w:
                 try: w.configure(state=ema_state)
+                except Exception: pass
+
+        # 2) Squeeze widgetek
+        sqz_state = "normal" if is_sqz else "disabled"
+        for w in (getattr(self, "mb_sqz_len", None), getattr(self, "mb_sqz_bb_mult", None), getattr(self, "mb_sqz_kc_mult", None)):
+            if w:
+                try: w.configure(state=sqz_state)
                 except Exception: pass
 
     # ============ NEW: Leállításkori / ad-hoc összegzés ============
@@ -9094,6 +9125,97 @@ class CryptoBotApp:
         }
         return signal, quadrant_info
 
+    def _mb_linear_regression(self, series, length: int) -> pd.Series:
+        """
+        Mozgó lineáris regresszió végpontjának becslése (gyorsított).
+        Képlet: 3*LWMA - 2*SMA
+        """
+        import numpy as np
+        import pandas as pd
+
+        n = int(length)
+        if len(series) < n:
+            return pd.Series([np.nan] * len(series), index=series.index)
+
+        # LWMA: Linear Weighted Moving Average
+        # Súlyok: 1, 2, ..., n
+        weights = np.arange(1, n + 1)
+        sum_w = np.sum(weights)
+
+        def calc_lwma(x):
+            return np.dot(x, weights) / sum_w
+
+        # Rolling apply LWMA-ra
+        lwma = series.rolling(n).apply(calc_lwma, raw=True)
+        sma = series.rolling(n).mean()
+
+        # LinReg Endpoint becslés
+        return 3 * lwma - 2 * sma
+
+    def _mb_squeeze_signal(self, df, length=20, bb_mult=2.0, kc_mult=1.5):
+        """
+        Bollinger Squeeze + Momentum (LinReg) jelzés.
+        Vissza: (signal_str, squeeze_on_bool, momentum_val)
+        signal_str: 'buy', 'sell', 'hold'
+        """
+        import pandas as pd
+        import numpy as np
+
+        if len(df) < max(length + 5, 20):
+            return "hold", False, 0.0
+
+        src = df['c'].astype(float)
+
+        # 1. Bollinger Bands
+        basis = src.rolling(length).mean()
+        dev = src.rolling(length).std()
+        upper_bb = basis + bb_mult * dev
+        lower_bb = basis - bb_mult * dev
+
+        # 2. Keltner Channel (ATR alapú)
+        # ATR számítása (már van _mb_atr, de az Series-t ad vissza)
+        atr = self._mb_atr(df, n=length)
+        upper_kc = basis + kc_mult * atr
+        lower_kc = basis - kc_mult * atr
+
+        # 3. Squeeze állapot (BB a KC-n belül)
+        # lower_bb > lower_kc ÉS upper_bb < upper_kc
+        sqz_on = (lower_bb > lower_kc) & (upper_bb < upper_kc)
+
+        # 4. Momentum (LinReg)
+        # TTM Squeeze logika: LinReg(Source - Avg, length)
+        # Source = Close
+        # Avg = (Highest + Lowest + SMA)/3  <-- TTM standard
+        # Egyszerűsítve, de közelítve a TTM-hez:
+
+        hi = df['h'].rolling(length).max()
+        lo = df['l'].rolling(length).min()
+        donchian = (hi + lo) / 2
+        avg_tot = (donchian + basis) / 2
+
+        delta = src - avg_tot
+
+        mom = self._mb_linear_regression(delta, length)
+
+        # 5. Signal logika
+        # "Volatilitás Kitörés": Amikor NINCS squeeze, és a Momentum iránya diktál.
+
+        is_sqz = bool(sqz_on.iloc[-1])
+        last_mom = float(mom.iloc[-1])
+
+        sig = "hold"
+
+        # Ha nincs squeeze, akkor a piac tágul -> trendelhet
+        if not is_sqz:
+            if last_mom > 0:
+                sig = "buy"
+            elif last_mom < 0:
+                sig = "sell"
+        else:
+            sig = "hold"
+
+        return sig, is_sqz, last_mom
+
     # ---------- Méret-számítás (budget támogatással) ----------
     def _mb_compute_size(
         self,
@@ -9377,6 +9499,10 @@ class CryptoBotApp:
             "z_len": self.mb_z_len,
             "z_points": self.mb_z_points,
 
+            "sqz_len": getattr(self, "mb_sqz_len", None),
+            "sqz_bb_mult": getattr(self, "mb_sqz_bb_mult", None),
+            "sqz_kc_mult": getattr(self, "mb_sqz_kc_mult", None),
+
             "max_open": self.mb_max_open,
             "pause_new": self.mb_pause_new,
 
@@ -9473,6 +9599,11 @@ class CryptoBotApp:
             "use_zscore": bool(getattr(self, "mb_use_zscore", tk.BooleanVar(value=False)).get()),
             "z_len": self._mb_get_int('mb_z_len', 40),
             "z_points": self._mb_get_int('mb_z_points', 100),
+
+            # Squeeze
+            "sqz_len": self._mb_get_int('mb_sqz_len', 20),
+            "sqz_bb_mult": self._mb_get_float('mb_sqz_bb_mult', 2.0),
+            "sqz_kc_mult": self._mb_get_float('mb_sqz_kc_mult', 1.5),
 
             # Max nyitott, pause new
             "max_open": self._mb_get_int('mb_max_open', 0),
