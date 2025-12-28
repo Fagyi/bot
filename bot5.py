@@ -7966,6 +7966,14 @@ class CryptoBotApp:
                     # HTF blokk (EMA jel HTF miatt lett HOLD)
                     htf_block = (use_htf and sig_raw in ("buy", "sell") and (sig == "hold"))
 
+                    # KORREKCIÓ: Ha Cooldown vagy Drift blokkol, akkor a végső jel legyen 'hold',
+                    # hogy a logban is egyértelmű legyen (és megjelenjen az oka).
+                    if combined_sig in ("buy", "sell"):
+                        if not cd_ok:
+                            combined_sig = "hold"
+                        elif not drift_ok:
+                            combined_sig = "hold"
+
                     # HOLD okok
                     reasons = _build_hold_reasons(
                         ema_up=ema_up,
