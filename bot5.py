@@ -9248,14 +9248,24 @@ class CryptoBotApp:
 
         sig = "hold"
 
-        # Ha nincs squeeze, akkor a piac tágul -> trendelhet
+        # Ha nincs squeeze, akkor a piac tágul -> trendelhet.
+        # JAVÍTÁS: Csak akkor lépünk be, ha az elmúlt X gyertyában VOLT squeeze.
+        # Ez biztosítja, hogy a kitörést (breakout) kapjuk el, ne a trend végét.
+
         if not is_sqz:
-            if last_mom > 0:
-                sig = "buy"
-            elif last_mom < 0:
-                sig = "sell"
-        else:
-            sig = "hold"
+            # Megnézzük az elmúlt 5 gyertyát (kivéve a mostanit): volt-e köztük squeeze?
+            # sqz_on[-1] a mostani (ami False), ezért [-6:-1]
+            was_squeezed_recently = sqz_on.iloc[-6:-1].any()
+
+            if was_squeezed_recently:
+                # Friss kitörés -> irány a momentum alapján
+                if last_mom > 0:
+                    sig = "buy"
+                elif last_mom < 0:
+                    sig = "sell"
+            else:
+                # Már régóta nincs squeeze -> valószínűleg késői belépő lenne -> HOLD
+                pass
 
         return (
             sig,
