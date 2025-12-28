@@ -7919,14 +7919,13 @@ class CryptoBotApp:
                                 combined_sig = brk_sig
 
                     # Z-Score FILTER logika (ha NEM Z-Score a stratégia)
+                    # Szigorú szűrés: csak akkor engedjük, ha Z-Score megerősíti az irányt.
                     zscore_blocked = False
                     if use_zscore and strategy_mode != "Z-Score":
-                        # Ha a jel BUY, de Z-Score SELL -> HOLD
-                        if combined_sig == 'buy' and z_dir == 'sell':
+                        if combined_sig == 'buy' and z_dir != 'buy':
                             combined_sig = 'hold'
                             zscore_blocked = True
-                        # Ha a jel SELL, de Z-Score BUY -> HOLD
-                        elif combined_sig == 'sell' and z_dir == 'buy':
+                        elif combined_sig == 'sell' and z_dir != 'sell':
                             combined_sig = 'hold'
                             zscore_blocked = True
 
