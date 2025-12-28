@@ -6869,47 +6869,50 @@ class CryptoBotApp:
                 return True, None
 
         def _build_hold_reasons(
-            ema_up: bool,
-            ema_dn: bool,
             cd_ok: bool,
             drift_ok: bool,
             drift_over_txt: str | None,
-            rsi_ok_buy: bool,
-            rsi_ok_sell: bool,
-            use_adx: bool,
-            adx_ok: bool,
-            adx_val: float | None,
-            adx_min: float,
-            htf_block: bool,
-            use_zscore: bool,
+            htf_blocked: bool,
+            rsi_blocked: bool,
             zscore_blocked: bool,
+            adx_blocked: bool,
+            ema_up: bool,
+            ema_dn: bool,
             combined_sig_raw: str | None,
-            combined_sig: str | None,
         ) -> list[str]:
             reasons: list[str] = []
 
-            if not (ema_up or ema_dn):
-                reasons.append("no_ema_trend")
+            # 1. Technikai blokkolók
             if not cd_ok:
                 reasons.append("cooldown")
             if drift_over_txt and not drift_ok:
                 reasons.append(drift_over_txt)
-            if ema_up and not rsi_ok_buy:
-                reasons.append("rsi_block_buy")
-            if ema_dn and not rsi_ok_sell:
-                reasons.append("rsi_block_sell")
-            if htf_block:
+
+            # 2. Filter blokkolók (explicit)
+            if htf_blocked:
                 reasons.append("htf_block")
+            if rsi_blocked:
+                # RSI blokk irányfüggő lehet, de egyszerűsítve:
+                if combined_sig_raw == "buy":
+                    reasons.append("rsi_block_buy")
+                elif combined_sig_raw == "sell":
+                    reasons.append("rsi_block_sell")
+                else:
+                    reasons.append("rsi_block")
+
             if zscore_blocked:
                 reasons.append("zscore_block")
-            if use_adx and combined_sig_raw in ("buy", "sell") and combined_sig == "hold" and not adx_ok:
-                try:
-                    if adx_val is None:
-                        reasons.append(f"adx<{float(adx_min):g}")
-                    else:
-                        reasons.append(f"adx={float(adx_val):.1f}<{float(adx_min):g}")
-                except Exception:
-                    reasons.append("adx_block")
+
+            if adx_blocked:
+                reasons.append("adx_block")
+
+            # 3. Egyéb (pl. nincs trend, ha az volt a stratégia alapja)
+            # Ha EMA stratégiát használunk és nincs trend, az is egyfajta "hold reason"
+            # De itt nem tudjuk biztosan, mi a stratégia.
+            # Ha combined_sig_raw is 'hold', akkor lehet, hogy "no_signal" vagy "no_ema_trend".
+            if combined_sig_raw == "hold" and not (ema_up or ema_dn):
+                reasons.append("no_ema_trend")
+
             return reasons
 
         def _build_filters_line(
@@ -7892,44 +7895,8 @@ class CryptoBotApp:
                     combined_sig = combined_sig_base
                     combined_sig_raw = combined_sig_base  # tényleg a filterek előtti alapjel
 
-                    # --- Közös Filterek (RSI, ADX, Z-Score) ---
-                    # Ha Z-Score vagy Squeeze a stratégia, akkor is alkalmazzuk rá a közös filtereket.
-                    
-                    if strategy_mode in ("Z-Score", "Bollinger Squeeze"):
-                        # Manuálisan kell alkalmazni azokat a szűrőket, amik az EMA ágban (sig) automatikusan megtörténtek.
-                        
-                        # 1. HTF Filter
-                        if use_htf:
-                            if (combined_sig == 'buy' and trend_htf < 0) or (combined_sig == 'sell' and trend_htf > 0):
-                                combined_sig = 'hold'
-
-                        # 2. RSI Filter
-                        if use_rsi and rsi_val is not None:
-                            if combined_sig == 'buy':
-                                if not (rsi_bmin <= rsi_val <= rsi_bmax):
-                                    combined_sig = 'hold'
-                            elif combined_sig == 'sell':
-                                if not (rsi_smin <= rsi_val <= rsi_smax):
-                                    combined_sig = 'hold'
-                                    
-                        # 3. Live Breakout / Shock logika
-                        if use_live or use_brk:
-                            # A Breakout/Shock jel FELÜLÍRJA a stratégiát, ha az 'buy' vagy 'sell'.
-                            if brk_sig in ("buy", "sell"):
-                                combined_sig = brk_sig
-
-                    # Z-Score FILTER logika (ha NEM Z-Score a stratégia)
-                    # Szigorú szűrés: csak akkor engedjük, ha Z-Score megerősíti az irányt.
-                    zscore_blocked = False
-                    if use_zscore and strategy_mode != "Z-Score":
-                        if combined_sig == 'buy' and z_dir != 'buy':
-                            combined_sig = 'hold'
-                            zscore_blocked = True
-                        elif combined_sig == 'sell' and z_dir != 'sell':
-                            combined_sig = 'hold'
-                            zscore_blocked = True
-
-                    # ADX (mindig számoljuk, hogy logban és döntésben is stabil legyen)
+                    # --- ADX ---
+                    # Mindig számoljuk, hogy logban és döntésben is stabil legyen
                     adx_val = None
                     adx_ok = True
                     if use_adx:
@@ -7938,35 +7905,66 @@ class CryptoBotApp:
                             adx_ok = (adx_val is not None and float(adx_val) >= float(adx_min))
                         except Exception:
                             adx_val = None
-                            adx_ok = True  # hiba esetén inkább ne blokkoljon
+                            adx_ok = True
 
-                    if use_adx and combined_sig in ("buy", "sell") and (not adx_ok):
-                        combined_sig = "hold"
+                    # --- Közös Filterek (Check against Raw Signal to report all blockers) ---
+                    # Minden filtert a combined_sig_raw (nyers alapjel) ellenőrzünk,
+                    # így akkor is jelezzük a blokkolást, ha egy előző filter már 'hold'-ra tette.
+
+                    htf_blocked = False
+                    rsi_blocked = False
+                    zscore_blocked = False
+                    adx_blocked = False
+
+                    if combined_sig_raw in ("buy", "sell"):
+                        # 1. HTF
+                        if use_htf:
+                            if (combined_sig_raw == 'buy' and trend_htf < 0) or (combined_sig_raw == 'sell' and trend_htf > 0):
+                                htf_blocked = True
+
+                        # 2. RSI
+                        if use_rsi and rsi_val is not None:
+                            if combined_sig_raw == 'buy' and not (rsi_bmin <= rsi_val <= rsi_bmax):
+                                rsi_blocked = True
+                            elif combined_sig_raw == 'sell' and not (rsi_smin <= rsi_val <= rsi_smax):
+                                rsi_blocked = True
+
+                        # 3. Z-Score (Strict Confirmation)
+                        # Csak akkor szűr, ha NEM Z-Score a stratégia
+                        if use_zscore and strategy_mode != "Z-Score":
+                            if combined_sig_raw == 'buy' and z_dir != 'buy':
+                                zscore_blocked = True
+                            elif combined_sig_raw == 'sell' and z_dir != 'sell':
+                                zscore_blocked = True
+
+                        # 4. ADX
+                        if use_adx and not adx_ok:
+                             adx_blocked = True
+
+                    # Apply blocks
+                    if htf_blocked or rsi_blocked or zscore_blocked or adx_blocked:
+                        combined_sig = 'hold'
+
+                    # Breakout Override (Force Signal)
+                    # A Breakout/Shock jel FELÜLÍRJA a stratégiát ÉS a szűrőket is.
+                    if (use_brk or use_live) and brk_sig in ("buy", "sell"):
+                        combined_sig = brk_sig
+                        # Ha breakout felülír, akkor a filterek "nem számítanak" a döntésben,
+                        # de a logban (ha hold lenne) nem relevánsak.
 
                     # --- Cooldown + drift + hold okok + filters sor ---
 
                     # cooldown (cd_left + cd_ok)
                     cd_left, cd_ok = _cooldown_status(self._mb_last_cross_ts, cd_s)
 
-                    # EMA trend
+                    # EMA trend (csak info)
                     ema_up = (ef_l > es_l)
                     ema_dn = (ef_l < es_l)
-
-                    # RSI blokkolás
-                    rsi_ok_buy = True
-                    rsi_ok_sell = True
-                    if use_rsi and rsi_val is not None:
-                        rsi_ok_buy  = (rsi_bmin <= rsi_val <= rsi_bmax)
-                        rsi_ok_sell = (rsi_smin <= rsi_val <= rsi_smax)
 
                     # drift státusz
                     drift_ok, drift_over_txt = _drift_status(drift_pct, drift_max_ui)
 
-                    # HTF blokk (EMA jel HTF miatt lett HOLD)
-                    htf_block = (use_htf and sig_raw in ("buy", "sell") and (sig == "hold"))
-
-                    # KORREKCIÓ: Ha Cooldown vagy Drift blokkol, akkor a végső jel legyen 'hold',
-                    # hogy a logban is egyértelmű legyen (és megjelenjen az oka).
+                    # KORREKCIÓ: Ha Cooldown vagy Drift blokkol, akkor a végső jel legyen 'hold'
                     if combined_sig in ("buy", "sell"):
                         if not cd_ok:
                             combined_sig = "hold"
@@ -7975,22 +7973,16 @@ class CryptoBotApp:
 
                     # HOLD okok
                     reasons = _build_hold_reasons(
-                        ema_up=ema_up,
-                        ema_dn=ema_dn,
                         cd_ok=cd_ok,
                         drift_ok=drift_ok,
                         drift_over_txt=drift_over_txt,
-                        rsi_ok_buy=rsi_ok_buy,
-                        rsi_ok_sell=rsi_ok_sell,
-                        use_adx=use_adx,
-                        adx_ok=adx_ok,
-                        adx_val=adx_val,
-                        adx_min=adx_min,
-                        htf_block=htf_block,
-                        use_zscore=use_zscore,
+                        htf_blocked=htf_blocked,
+                        rsi_blocked=rsi_blocked,
                         zscore_blocked=zscore_blocked,
+                        adx_blocked=adx_blocked,
+                        ema_up=ema_up,
+                        ema_dn=ema_dn,
                         combined_sig_raw=combined_sig_raw,
-                        combined_sig=combined_sig,
                     )
 
                     # filters összefoglaló sor
