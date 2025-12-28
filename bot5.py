@@ -8085,6 +8085,8 @@ class CryptoBotApp:
                     true_raw_signal = "hold"
                     if use_brk and brk_sig_raw in ("buy", "sell"):
                         true_raw_signal = brk_sig_raw
+                    elif combined_sig_raw in ("buy", "sell"):
+                        true_raw_signal = combined_sig_raw
                     elif sig_raw in ("buy", "sell"):
                         true_raw_signal = sig_raw
 
