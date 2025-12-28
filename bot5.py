@@ -6902,7 +6902,7 @@ class CryptoBotApp:
                 reasons.append("htf_block")
             if zscore_blocked:
                 reasons.append("zscore_block")
-            if use_adx and combined_sig_raw in ("buy", "sell") and not adx_ok:
+            if use_adx and combined_sig_raw in ("buy", "sell") and combined_sig == "hold" and not adx_ok:
                 try:
                     if adx_val is None:
                         reasons.append(f"adx<{float(adx_min):g}")
