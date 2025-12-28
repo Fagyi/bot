@@ -8650,13 +8650,6 @@ class CryptoBotApp:
                 try: w.configure(state=ema_state)
                 except Exception: pass
 
-        # 2) Z-Score widgetek
-        z_state = "normal" if is_zscore else "disabled"
-        for w in (getattr(self, "mb_z_len", None), getattr(self, "mb_z_points", None)):
-            if w:
-                try: w.configure(state=z_state)
-                except Exception: pass
-
     # ============ NEW: Leállításkori / ad-hoc összegzés ============
     def _mb_summary(self):
         """Összegző statisztika (SIM trade-ek alapján)."""
