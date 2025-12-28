@@ -6882,6 +6882,7 @@ class CryptoBotApp:
             adx_min: float,
             htf_block: bool,
             use_zscore: bool,
+            zscore_blocked: bool,
             combined_sig_raw: str | None,
             combined_sig: str | None,
         ) -> list[str]:
@@ -6899,7 +6900,7 @@ class CryptoBotApp:
                 reasons.append("rsi_block_sell")
             if htf_block:
                 reasons.append("htf_block")
-            if use_zscore and combined_sig_raw in ("buy", "sell") and combined_sig == "hold":
+            if zscore_blocked:
                 reasons.append("zscore_block")
             if use_adx and combined_sig_raw in ("buy", "sell") and not adx_ok:
                 try:
@@ -6985,17 +6986,21 @@ class CryptoBotApp:
             is_sqz_strat: bool,     # ÚJ: Bollinger Squeeze aktív-e
             sqz_is_on: bool,        # ÚJ: Squeeze állapot (True/False)
             sqz_mom: float,         # ÚJ: Momentum érték
-            use_brk: bool,
-            brk_n: int,
-            hh: float,
-            ll: float,
-            up_lvl: float,
-            dn_lvl: float,
-            drift_pct: float,
-            open_now: int,
-            max_open: int,
-            pool_used: float,
-            pool_balance: float,
+            bb_up: float = 0.0,
+            bb_dn: float = 0.0,
+            kc_up: float = 0.0,
+            kc_dn: float = 0.0,
+            use_brk: bool = False,
+            brk_n: int = 20,
+            hh: float = 0.0,
+            ll: float = 0.0,
+            up_lvl: float = 0.0,
+            dn_lvl: float = 0.0,
+            drift_pct: float = 0.0,
+            open_now: int = 0,
+            max_open: int = 0,
+            pool_used: float = 0.0,
+            pool_balance: float = 0.0,
         ) -> str:
             # Formátum követése: [PÁR TF] Élő ár=... Gyertya ár=...
             parts: list[str] = [
@@ -7026,8 +7031,13 @@ class CryptoBotApp:
 
             # Bollinger Squeeze adatok (csak ha aktív a stratégia)
             if is_sqz_strat:
-                sqz_state = "ON" if sqz_is_on else "OFF"
-                parts.append(f"SQZ={sqz_state} MOM={sqz_mom:.4f}")
+                sqz_state = "SQUEEZED" if sqz_is_on else "RELEASED"
+                sqz_txt = f"SQZ_STATE={sqz_state} MOM={sqz_mom:.4f}"
+                if bb_up > 0:
+                    sqz_txt += f" BB=[{bb_dn:.2f}, {bb_up:.2f}]"
+                if kc_up > 0:
+                    sqz_txt += f" KC=[{kc_dn:.2f}, {kc_up:.2f}]"
+                parts.append(sqz_txt)
 
             # Breakout adatok
             if use_brk and not (math.isnan(hh) or math.isnan(ll)):
@@ -7853,8 +7863,12 @@ class CryptoBotApp:
                     sqz_sig = "hold"
                     is_sqz = False
                     mom_val = 0.0
+                    bb_up = 0.0
+                    bb_dn = 0.0
+                    kc_up = 0.0
+                    kc_dn = 0.0
                     try:
-                        sqz_sig, is_sqz, mom_val = self._mb_squeeze_signal(
+                        sqz_sig, is_sqz, mom_val, bb_up, bb_dn, kc_up, kc_dn = self._mb_squeeze_signal(
                             df_ind, length=sqz_len, bb_mult=sqz_bb_mult, kc_mult=sqz_kc_mult
                         )
                     except Exception:
@@ -7905,13 +7919,16 @@ class CryptoBotApp:
                                 combined_sig = brk_sig
 
                     # Z-Score FILTER logika (ha NEM Z-Score a stratégia)
+                    zscore_blocked = False
                     if use_zscore and strategy_mode != "Z-Score":
                         # Ha a jel BUY, de Z-Score SELL -> HOLD
                         if combined_sig == 'buy' and z_dir == 'sell':
                             combined_sig = 'hold'
+                            zscore_blocked = True
                         # Ha a jel SELL, de Z-Score BUY -> HOLD
                         elif combined_sig == 'sell' and z_dir == 'buy':
                             combined_sig = 'hold'
+                            zscore_blocked = True
 
                     # ADX (mindig számoljuk, hogy logban és döntésben is stabil legyen)
                     adx_val = None
@@ -7964,6 +7981,7 @@ class CryptoBotApp:
                         adx_min=adx_min,
                         htf_block=htf_block,
                         use_zscore=use_zscore,
+                        zscore_blocked=zscore_blocked,
                         combined_sig_raw=combined_sig_raw,
                         combined_sig=combined_sig,
                     )
@@ -8016,6 +8034,10 @@ class CryptoBotApp:
                         is_sqz_strat=(strategy_mode == "Bollinger Squeeze"),
                         sqz_is_on=is_sqz,
                         sqz_mom=mom_val,
+                        bb_up=bb_up,
+                        bb_dn=bb_dn,
+                        kc_up=kc_up,
+                        kc_dn=kc_dn,
                         use_brk=use_brk,
                         brk_n=brk_n,
                         hh=hh,
@@ -9175,14 +9197,14 @@ class CryptoBotApp:
     def _mb_squeeze_signal(self, df, length=20, bb_mult=2.0, kc_mult=1.5):
         """
         Bollinger Squeeze + Momentum (LinReg) jelzés.
-        Vissza: (signal_str, squeeze_on_bool, momentum_val)
+        Vissza: (signal_str, squeeze_on_bool, momentum_val, bb_upper, bb_lower, kc_upper, kc_lower)
         signal_str: 'buy', 'sell', 'hold'
         """
         import pandas as pd
         import numpy as np
 
         if len(df) < max(length + 5, 20):
-            return "hold", False, 0.0
+            return "hold", False, 0.0, 0.0, 0.0, 0.0, 0.0
 
         src = df['c'].astype(float)
 
@@ -9234,7 +9256,15 @@ class CryptoBotApp:
         else:
             sig = "hold"
 
-        return sig, is_sqz, last_mom
+        return (
+            sig,
+            is_sqz,
+            last_mom,
+            float(upper_bb.iloc[-1]),
+            float(lower_bb.iloc[-1]),
+            float(upper_kc.iloc[-1]),
+            float(lower_kc.iloc[-1]),
+        )
 
     # ---------- Méret-számítás (budget támogatással) ----------
     def _mb_compute_size(
