@@ -6982,6 +6982,9 @@ class CryptoBotApp:
             adx_val: float | None,  # ÚJ PARAMÉTER
             use_zscore: bool,       # ÚJ PARAMÉTER
             z_dir: str,             # ÚJ PARAMÉTER (buy/sell/hold szövegesen)
+            is_sqz_strat: bool,     # ÚJ: Bollinger Squeeze aktív-e
+            sqz_is_on: bool,        # ÚJ: Squeeze állapot (True/False)
+            sqz_mom: float,         # ÚJ: Momentum érték
             use_brk: bool,
             brk_n: int,
             hh: float,
@@ -7020,6 +7023,11 @@ class CryptoBotApp:
                 if z_dir == "buy": z_display = "LONG"
                 if z_dir == "sell": z_display = "SHORT"
                 parts.append(f"Z-SCORE={z_display}")
+
+            # Bollinger Squeeze adatok (csak ha aktív a stratégia)
+            if is_sqz_strat:
+                sqz_state = "ON" if sqz_is_on else "OFF"
+                parts.append(f"SQZ={sqz_state} MOM={sqz_mom:.4f}")
 
             # Breakout adatok
             if use_brk and not (math.isnan(hh) or math.isnan(ll)):
@@ -7870,7 +7878,7 @@ class CryptoBotApp:
                     combined_sig = combined_sig_base
                     combined_sig_raw = combined_sig_base  # tényleg a filterek előtti alapjel
 
-                    # --- Közös Filterek (RSI, ADX) ---
+                    # --- Közös Filterek (RSI, ADX, Z-Score) ---
                     # Ha Z-Score vagy Squeeze a stratégia, akkor is alkalmazzuk rá a közös filtereket.
                     
                     if strategy_mode in ("Z-Score", "Bollinger Squeeze"):
@@ -7895,6 +7903,15 @@ class CryptoBotApp:
                             # A Breakout/Shock jel FELÜLÍRJA a stratégiát, ha az 'buy' vagy 'sell'.
                             if brk_sig in ("buy", "sell"):
                                 combined_sig = brk_sig
+
+                    # Z-Score FILTER logika (ha NEM Z-Score a stratégia)
+                    if use_zscore and strategy_mode != "Z-Score":
+                        # Ha a jel BUY, de Z-Score SELL -> HOLD
+                        if combined_sig == 'buy' and z_dir == 'sell':
+                            combined_sig = 'hold'
+                        # Ha a jel SELL, de Z-Score BUY -> HOLD
+                        elif combined_sig == 'sell' and z_dir == 'buy':
+                            combined_sig = 'hold'
 
                     # ADX (mindig számoljuk, hogy logban és döntésben is stabil legyen)
                     adx_val = None
@@ -7996,6 +8013,9 @@ class CryptoBotApp:
                         adx_val=adx_val,          # Átadva
                         use_zscore=use_zscore,    # Átadva
                         z_dir=z_dir,              # Átadva (pl. "buy", "sell", "hold")
+                        is_sqz_strat=(strategy_mode == "Bollinger Squeeze"),
+                        sqz_is_on=is_sqz,
+                        sqz_mom=mom_val,
                         use_brk=use_brk,
                         brk_n=brk_n,
                         hh=hh,
