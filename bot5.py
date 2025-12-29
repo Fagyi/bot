@@ -16,7 +16,6 @@ from __future__ import annotations
 import os, sys, time, json, uuid, hmac, base64, hashlib, threading, math
 from typing import List, Optional, Literal, Any, Dict, Tuple
 from urllib.parse import urlencode
-import time as _time
 import threading
 import datetime
 
@@ -199,7 +198,7 @@ class BotDatabase:
             row = c.fetchone()
             if row:
                 data = json.loads(row[0])
-                data.update({'exit_price': exit_price, 'pnl': pnl, 'close_reason': reason, 'closed_at': _time.time()})
+                data.update({'exit_price': exit_price, 'pnl': pnl, 'close_reason': reason, 'closed_at': time.time()})
                 c.execute('''UPDATE trades
                              SET status='CLOSED', extra_data=?
                              WHERE order_id=?''', (json.dumps(data, ensure_ascii=False, default=str), str(order_id)))
@@ -316,7 +315,6 @@ class KucoinTickerWS:
 
     def _run_loop(self):
         """Reconnect loop – ha a kapcsolat elszáll, újraépítjük."""
-        import time as _t
         while self._running:
             try:
                 url, ping_int, ping_to = self._get_ws_url()
@@ -343,7 +341,7 @@ class KucoinTickerWS:
 
             if self._running:
                 self._log("🔁 WS reconnect 5s múlva…\n")
-                _t.sleep(5.0)
+                time.sleep(5.0)
 
     def _get_ws_url(self):
         """
@@ -729,16 +727,15 @@ class KucoinPrivateOrderWS:
         timeout: összesen ennyit vár (sec)
         poll:   két próbálkozás között ennyit alszik
         """
-        import time as _t
 
         if not order_id:
             return None
         order_id = str(order_id)
 
-        end_ts = _t.time() + max(0.0, timeout)
+        end_ts = time.time() + max(0.0, timeout)
         last_fee = None
 
-        while _t.time() < end_ts:
+        while time.time() < end_ts:
             with self._lock:
                 info = self._order_info.get(order_id)
             if info:
@@ -747,7 +744,7 @@ class KucoinPrivateOrderWS:
                 last_fee = fee
                 if fee > 0:
                     return fee
-            _t.sleep(max(0.0, poll))
+            time.sleep(max(0.0, poll))
 
         return last_fee
 
@@ -767,7 +764,6 @@ class KucoinPrivateOrderWS:
           3) Ha jön adat (filled > 0 vagy fee > 0), azt adjuk vissza.
           4) Ha semmi értelmes adat nem jön, (0,0,0)-t adunk vissza.
         """
-        import time as _t
 
         if not order_id:
             return 0.0, 0.0, 0.0
@@ -775,14 +771,14 @@ class KucoinPrivateOrderWS:
         oid = str(order_id)
 
         # összesen eddig várunk
-        end_ts = _t.time() + max(0.0, float(timeout))
+        end_ts = time.time() + max(0.0, float(timeout))
         poll = max(0.0, float(poll))
 
         last_fb = None
         last_fq = None
         last_fee = None
 
-        while _t.time() < end_ts:
+        while time.time() < end_ts:
             with self._lock:
                 info = self._order_info.get(oid)
 
@@ -801,7 +797,7 @@ class KucoinPrivateOrderWS:
                     return float(fb), float(fq), float(fee)
 
             if poll > 0:
-                _t.sleep(poll)
+                time.sleep(poll)
             else:
                 break  # poll=0 → csak egyszer nézünk rá
 
@@ -818,7 +814,6 @@ class KucoinPrivateOrderWS:
     # --- belső rész: ws loop + üzenet feldolgozás ---
 
     def _run(self):
-        import time as _t
         backoff = 1.0
 
         self._log("🔌 Private order WS worker indul...\n")
@@ -828,7 +823,7 @@ class KucoinPrivateOrderWS:
                 url = self._get_ws_url()
                 if not url:
                     self._log("❌ Private order WS URL nem elérhető (bullet-private). Újrapróbálás...\n")
-                    _t.sleep(backoff)
+                    time.sleep(backoff)
                     backoff = min(backoff * 2.0, 60.0)
                     continue
 
@@ -858,7 +853,7 @@ class KucoinPrivateOrderWS:
                 break
 
             self._log("ℹ️ Private order WS kapcsolat megszakadt, reconnect...\n")
-            _t.sleep(backoff)
+            time.sleep(backoff)
             backoff = min(backoff * 2.0, 60.0)
 
         self._log("🔌 Private order WS worker leállt.\n")
@@ -923,8 +918,7 @@ class KucoinPrivateOrderWS:
             self._log(f"⚠️ Private order WS on_open hiba: {e}\n")
 
     def _on_message(self, ws, message: str):
-        import time as _t
-        self._last_msg_ts = _t.time()
+        self._last_msg_ts = time.time()
 
         try:
             msg = json.loads(message)
@@ -5556,7 +5550,6 @@ class CryptoBotApp:
         - pnl_est: becsült PnL nyitás után (rt ár alapján), ha None, üresen marad
         """
         try:
-            import time
             ts = float(ts or time.time())
             ts_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
             oid = order_id or "-"
@@ -6224,8 +6217,7 @@ class CryptoBotApp:
         # manuális leállítás jelző + futás megállítása
         self._mb_stopping = True
         try:
-            import time as _t
-            _t.sleep(0.1)
+            time.sleep(0.1)
         except Exception:
             pass
         self._mb_running = False
@@ -6435,7 +6427,6 @@ class CryptoBotApp:
                 closed_oid = None
 
             try:
-                import time as _t
                 self._sim_history.append({
                     "partial": False,
                     "symbol": symbol_safe,
@@ -6444,7 +6435,7 @@ class CryptoBotApp:
                     "exit": float(exit_px),
                     "size_closed": float(sz),
                     "pnl": float(pnl),
-                    "ts": _t.time(),
+                    "ts": time.time(),
                     "reason": reason or "",
                 })
             except Exception:
@@ -6499,7 +6490,6 @@ class CryptoBotApp:
         Fee, PnL, history hibák NEM állítják hamisra a visszatérési értéket.
         """
 
-        import time
         from typing import Optional, Literal
 
         sent_ok = False
@@ -6695,7 +6685,7 @@ class CryptoBotApp:
 
     # === MarginBot – fő ciklus, HTF-filter + ATR menedzsment + RSI szűrő ===
     def _mb_worker(self):
-        import time, math, pandas as pd, threading
+        import math, pandas as pd, threading
         from types import SimpleNamespace as NS
 
         # --- egyszeri init-ek (ha még nem léteznek) ---
@@ -7350,7 +7340,6 @@ class CryptoBotApp:
                 )
 
             try:
-                import time as _t
                 with self._mb_lock:
                     self._sim_history.append({
                         "partial": True,
@@ -7360,7 +7349,7 @@ class CryptoBotApp:
                         "exit": float(px),
                         "size_closed": float(close_sz),
                         "pnl": float(pnl),
-                        "ts": _t.time(),
+                        "ts": time.time(),
                     })
             except Exception:
                 pass
@@ -9981,7 +9970,7 @@ class CryptoBotApp:
         KuCoin taker fee lekérdezése (cache-elve ~1 órára). Fallback: 0.001 (0.1%).
         """
         try:
-            now = _time.time()
+            now = time.time()
             cache = getattr(self, "_mb_fee_cache", None)
             if cache and (now - cache.get("ts", 0) < 3600):
                 return float(cache.get("taker", 0.001))
