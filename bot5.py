@@ -4242,7 +4242,7 @@ class CryptoBotApp:
         ttk.Label(basic, text="Stratégia").grid(row=r, column=0, sticky="w", pady=(4, 0))
         self.mb_strategy = tk.StringVar(value="EMA")
         self.mb_strategy_cb = ttk.Combobox(
-            basic, textvariable=self.mb_strategy, state="readonly", width=10,
+            basic, textvariable=self.mb_strategy, state="readonly", width=15,
             values=["EMA", "Z-Score", "Bollinger Squeeze", "Supertrend"]
         )
         self.mb_strategy_cb.grid(row=r, column=1, sticky="w", pady=(4, 0))
