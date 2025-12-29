@@ -4243,7 +4243,7 @@ class CryptoBotApp:
         self.mb_strategy = tk.StringVar(value="EMA")
         self.mb_strategy_cb = ttk.Combobox(
             basic, textvariable=self.mb_strategy, state="readonly", width=10,
-            values=["EMA", "Z-Score", "Bollinger Squeeze"]
+            values=["EMA", "Z-Score", "Bollinger Squeeze", "Supertrend"]
         )
         self.mb_strategy_cb.grid(row=r, column=1, sticky="w", pady=(4, 0))
         self.mb_strategy_cb.bind("<<ComboboxSelected>>", self._mb_on_strategy_change)
@@ -4471,6 +4471,38 @@ class CryptoBotApp:
         self.mb_sqz_kc_mult.delete(0, tk.END)
         self.mb_sqz_kc_mult.insert(0, "1.5")
         self.mb_sqz_kc_mult.pack(side=tk.LEFT, padx=(2, 0))
+        r_adv += 1
+
+        # Supertrend beállítások (Stratégia / Filter)
+        st_box = ttk.Labelframe(adv, text="Supertrend (Stratégia / Filter)", padding=6)
+        st_box.grid(row=r_adv, column=0, columnspan=2, sticky="we", pady=(8, 0))
+
+        st_row1 = ttk.Frame(st_box)
+        st_row1.pack(anchor="w")
+
+        # Checkbox a filterhez
+        self.mb_use_st_filter = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            st_row1,
+            text="Használd Filterként (ha más a stratégia)",
+            variable=self.mb_use_st_filter,
+            command=self._mb_on_strategy_change,
+        ).pack(side=tk.LEFT)
+
+        st_row2 = ttk.Frame(st_box)
+        st_row2.pack(anchor="w", pady=(4, 0))
+
+        ttk.Label(st_row2, text="ATR Hossz:").pack(side=tk.LEFT)
+        self.mb_st_period = ttk.Spinbox(st_row2, from_=1, to=100, width=6)
+        self.mb_st_period.delete(0, tk.END)
+        self.mb_st_period.insert(0, "10")
+        self.mb_st_period.pack(side=tk.LEFT, padx=(2, 8))
+
+        ttk.Label(st_row2, text="Multiplier:").pack(side=tk.LEFT)
+        self.mb_st_mult = ttk.Spinbox(st_row2, from_=0.1, to=10.0, increment=0.1, width=5)
+        self.mb_st_mult.delete(0, tk.END)
+        self.mb_st_mult.insert(0, "3.0")
+        self.mb_st_mult.pack(side=tk.LEFT, padx=(2, 0))
         r_adv += 1
 
         # Fix SL / TP / Trailing – opcionális (ATR nélkül)
@@ -6760,6 +6792,7 @@ class CryptoBotApp:
             rsi_blocked: bool,
             zscore_blocked: bool,
             adx_blocked: bool,
+            st_blocked: bool,
             ema_up: bool,
             ema_dn: bool,
             combined_sig_raw: str | None,
@@ -6790,6 +6823,9 @@ class CryptoBotApp:
             if adx_blocked:
                 reasons.append("adx_block")
 
+            if st_blocked:
+                reasons.append("st_block")
+
             # 3. Egyéb (pl. nincs trend, ha az volt a stratégia alapja)
             # Ha EMA stratégiát használunk és nincs trend, az is egyfajta "hold reason"
             # De itt nem tudjuk biztosan, mi a stratégia.
@@ -6814,6 +6850,8 @@ class CryptoBotApp:
             use_brk: bool,
             use_live: bool,
             use_zscore: bool,
+            use_st_filter: bool,
+            st_trend_dir: int,
             cd_left: int,
         ) -> str:
             parts: list[str] = []
@@ -6846,6 +6884,12 @@ class CryptoBotApp:
             # Z-score filter formázása: csak ON/OFF (érték fent van)
             parts.append(f"z-score={'ON' if use_zscore else 'OFF'}")
 
+            # ST filter
+            st_icon = "⚪"
+            if st_trend_dir == 1: st_icon = "🟢"
+            elif st_trend_dir == -1: st_icon = "🔴"
+            parts.append(f"st_filter={'ON' if use_st_filter else 'OFF'}({st_icon})")
+
             parts.append(f"cd_left={cd_left}s")
 
             # Prefix változott: 'filters:'
@@ -6870,6 +6914,8 @@ class CryptoBotApp:
             adx_val: float | None,  # ÚJ PARAMÉTER
             use_zscore: bool,       # ÚJ PARAMÉTER
             z_dir: str,             # ÚJ PARAMÉTER (buy/sell/hold szövegesen)
+            is_st_strat: bool,      # ÚJ: Supertrend aktív stratégia-e
+            st_trend: int,          # ÚJ: Supertrend irány (+1/-1)
             is_sqz_strat: bool,     # ÚJ: Bollinger Squeeze aktív-e
             sqz_is_on: bool,        # ÚJ: Squeeze állapot (True/False)
             sqz_mom: float,         # ÚJ: Momentum érték
@@ -7420,6 +7466,11 @@ class CryptoBotApp:
                     sqz_bb_mult = cfg_ns.sqz_bb_mult
                     sqz_kc_mult = cfg_ns.sqz_kc_mult
 
+                    # Supertrend
+                    use_st_filter = cfg_ns.use_st_filter
+                    st_period     = cfg_ns.st_period
+                    st_mult       = cfg_ns.st_mult
+
                     use_live       = cfg_ns.use_live
                     live_shock_pct = cfg_ns.live_shock_pct
                     live_shock_atr = cfg_ns.live_shock_atr
@@ -7765,13 +7816,36 @@ class CryptoBotApp:
                     except Exception:
                         pass
 
-                    # 3. Stratégia alapú elágazás
+                    # 3. Supertrend számítása (mindig fusson, kellhet szűrőnek)
+                    st_trend_series = None
+                    st_line_series = None
+                    st_trend = 0
+                    st_sig = "hold"
+                    try:
+                        st_trend_series, st_line_series = self._mb_supertrend(df_ind, period=st_period, multiplier=st_mult)
+                        if st_trend_series is not None and len(st_trend_series) > 1:
+                            st_trend = int(st_trend_series.iloc[-1])
+                            prev_st_trend = int(st_trend_series.iloc[-2])
+
+                            # Signal only on flip
+                            if prev_st_trend == -1 and st_trend == 1:
+                                st_sig = "buy"
+                            elif prev_st_trend == 1 and st_trend == -1:
+                                st_sig = "sell"
+                            else:
+                                st_sig = "hold"
+                    except Exception:
+                        pass
+
+                    # 4. Stratégia alapú elágazás
                     strategy_mode = getattr(cfg_ns, "strategy", "EMA")
                     
                     if strategy_mode == "Z-Score":
                         combined_sig_base = z_dir
                     elif strategy_mode == "Bollinger Squeeze":
                         combined_sig_base = sqz_sig
+                    elif strategy_mode == "Supertrend":
+                        combined_sig_base = st_sig
                     else:
                         # EMA (Alapértelmezett)
                         combined_sig_base = brk_sig if brk_sig in ("buy", "sell") else sig
@@ -7797,6 +7871,7 @@ class CryptoBotApp:
                     rsi_blocked = False
                     zscore_blocked = False
                     adx_blocked = False
+                    st_blocked = False
 
                     # Csak akkor futtatjuk a szűrőket, ha van alapjel (buy/sell)
                     if combined_sig_raw in ("buy", "sell"):
@@ -7825,9 +7900,17 @@ class CryptoBotApp:
                         if use_adx and not adx_ok:
                             adx_blocked = True
 
+                        # 5. Supertrend Filter
+                        # Csak akkor szűr, ha NEM Supertrend a stratégia
+                        if use_st_filter and strategy_mode != "Supertrend":
+                            if combined_sig_raw == "buy" and st_trend == -1: # Trend is Bearish -> Block Buy
+                                st_blocked = True
+                            elif combined_sig_raw == "sell" and st_trend == 1: # Trend is Bullish -> Block Sell
+                                st_blocked = True
+
                     # 2. LÉPÉS: Blokkolók alkalmazása
                     # Ha bármelyik blokkoló aktív, a jel 'hold'-ra vált, DE a változó értéke (True) megmarad a loghoz!
-                    if htf_blocked or rsi_blocked or zscore_blocked or adx_blocked:
+                    if htf_blocked or rsi_blocked or zscore_blocked or adx_blocked or st_blocked:
                         combined_sig = 'hold'
 
                     # Breakout Override (Force Signal)
@@ -7877,6 +7960,9 @@ class CryptoBotApp:
                             # Ha Z-Score a stratégia, és a sávon belül vagyunk
                             reasons.insert(0, "HOLD | waiting_for_zscore")
 
+                        elif strategy_mode == "Supertrend":
+                            reasons.insert(0, "HOLD | waiting_for_st_flip")
+
                         elif strategy_mode == "EMA":
                             # Ha EMA a stratégia, és nincs keresztezés
                             reasons.insert(0, "HOLD | waiting_for_ema_cross")
@@ -7897,6 +7983,8 @@ class CryptoBotApp:
                         use_brk=use_brk,
                         use_live=use_live,
                         use_zscore=use_zscore,
+                        use_st_filter=use_st_filter,
+                        st_trend_dir=st_trend,
                         cd_left=cd_left,
                     )
 
@@ -7926,6 +8014,8 @@ class CryptoBotApp:
                         adx_val=adx_val,
                         use_zscore=use_zscore,
                         z_dir=z_dir,
+                        is_st_strat=(strategy_mode == "Supertrend"),
+                        st_trend=st_trend,
                         is_sqz_strat=(strategy_mode == "Bollinger Squeeze"),
                         sqz_is_on=is_sqz,
                         sqz_mom=mom_val,
@@ -8810,6 +8900,94 @@ class CryptoBotApp:
         rsi = 100 - (100 / (1 + rs))
         return rsi
 
+    def _mb_supertrend(self, df, period=10, multiplier=3.0) -> Tuple[pd.Series, pd.Series]:
+        """
+        Supertrend számítás.
+        Visszaad: (trend_direction, supertrend_line)
+        trend_direction: +1 (Bull/Zöld), -1 (Bear/Piros)
+        """
+        high = df['h'].astype(float)
+        low = df['l'].astype(float)
+        close = df['c'].astype(float)
+
+        atr = self._mb_atr(df, n=period)
+
+        hl2 = (high + low) / 2
+        basic_upper = hl2 + (multiplier * atr)
+        basic_lower = hl2 - (multiplier * atr)
+
+        # Inicializálás
+        final_upper = pd.Series(index=df.index, dtype='float64')
+        final_lower = pd.Series(index=df.index, dtype='float64')
+        trend = pd.Series(index=df.index, dtype='int')
+        supertrend = pd.Series(index=df.index, dtype='float64')
+
+        # Első értékek (naivan)
+        final_upper.iloc[0] = basic_upper.iloc[0]
+        final_lower.iloc[0] = basic_lower.iloc[0]
+        trend.iloc[0] = 1
+        supertrend.iloc[0] = final_lower.iloc[0]
+
+        # Iteratív számítás (sajnos a Supertrend rekurzív természete miatt nehéz vektorizálni teljesen)
+        # De mivel a dataframe mérete a botban limitált (cache), ez nem lesz lassú.
+        n = len(df)
+        bu_vals = basic_upper.values
+        bl_vals = basic_lower.values
+        close_vals = close.values
+
+        fu_vals = np.zeros(n)
+        fl_vals = np.zeros(n)
+        trend_vals = np.zeros(n, dtype=int)
+        st_vals = np.zeros(n)
+
+        # Első elem inicializálás
+        fu_vals[0] = bu_vals[0]
+        fl_vals[0] = bl_vals[0]
+        trend_vals[0] = 1
+        st_vals[0] = fl_vals[0]
+
+        for i in range(1, n):
+            # Final Upper Band
+            if (bu_vals[i] < fu_vals[i-1]) or (close_vals[i-1] > fu_vals[i-1]):
+                fu_vals[i] = bu_vals[i]
+            else:
+                fu_vals[i] = fu_vals[i-1]
+
+            # Final Lower Band
+            if (bl_vals[i] > fl_vals[i-1]) or (close_vals[i-1] < fl_vals[i-1]):
+                fl_vals[i] = bl_vals[i]
+            else:
+                fl_vals[i] = fl_vals[i-1]
+
+            # Trend
+            prev_trend = trend_vals[i-1]
+            curr_close = close_vals[i]
+            curr_fu = fu_vals[i]
+            curr_fl = fl_vals[i]
+
+            if prev_trend == 1: # Bull volt
+                if curr_close < curr_fl:
+                    trend_vals[i] = -1 # Bear lett
+                else:
+                    trend_vals[i] = 1
+            else: # Bear volt
+                if curr_close > curr_fu:
+                    trend_vals[i] = 1 # Bull lett
+                else:
+                    trend_vals[i] = -1
+
+            # Supertrend Line
+            if trend_vals[i] == 1:
+                st_vals[i] = curr_fl
+            else:
+                st_vals[i] = curr_fu
+
+        # Vissza Series-be
+        trend_series = pd.Series(trend_vals, index=df.index)
+        st_series = pd.Series(st_vals, index=df.index)
+
+        return trend_series, st_series
+
     def _mb_adx(self, df, length: int = 14) -> float | None:
         """
         Stabil ADX (Wilder / RMA).
@@ -9606,6 +9784,11 @@ class CryptoBotApp:
             "sqz_len": self._mb_get_int('mb_sqz_len', 20),
             "sqz_bb_mult": self._mb_get_float('mb_sqz_bb_mult', 2.0),
             "sqz_kc_mult": self._mb_get_float('mb_sqz_kc_mult', 1.5),
+
+            # Supertrend
+            "use_st_filter": bool(getattr(self, "mb_use_st_filter", tk.BooleanVar(value=False)).get()),
+            "st_period": self._mb_get_int('mb_st_period', 10),
+            "st_mult": self._mb_get_float('mb_st_mult', 3.0),
 
             # Max nyitott, pause new
             "max_open": self._mb_get_int('mb_max_open', 0),
