@@ -4454,6 +4454,15 @@ class CryptoBotApp:
         sqz_row1 = ttk.Frame(sqz_box)
         sqz_row1.pack(anchor="w")
 
+        # Checkbox a filterhez
+        self.mb_use_sqz_filter = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            sqz_row1,
+            text="Használd Filterként (ha más a stratégia)",
+            variable=self.mb_use_sqz_filter,
+            command=self._mb_on_strategy_change,
+        ).pack(side=tk.LEFT)
+
         ttk.Label(sqz_row1, text="Hossz:").pack(side=tk.LEFT)
         self.mb_sqz_len = ttk.Spinbox(sqz_row1, from_=5, to=200, width=6)
         self.mb_sqz_len.delete(0, tk.END)
@@ -6793,6 +6802,7 @@ class CryptoBotApp:
             zscore_blocked: bool,
             adx_blocked: bool,
             st_blocked: bool,
+            sqz_blocked: bool,
             ema_up: bool,
             ema_dn: bool,
             combined_sig_raw: str | None,
@@ -6826,6 +6836,9 @@ class CryptoBotApp:
             if st_blocked:
                 reasons.append("st_block")
 
+            if sqz_blocked:
+                reasons.append("bollinger_block")
+
             # 3. Egyéb (pl. nincs trend, ha az volt a stratégia alapja)
             # Ha EMA stratégiát használunk és nincs trend, az is egyfajta "hold reason"
             # De itt nem tudjuk biztosan, mi a stratégia.
@@ -6851,6 +6864,7 @@ class CryptoBotApp:
             use_live: bool,
             use_zscore: bool,
             use_st_filter: bool,
+            use_sqz_filter: bool,
             st_trend_dir: int,
             cd_left: int,
         ) -> str:
@@ -6883,6 +6897,9 @@ class CryptoBotApp:
 
             # Z-score filter formázása: csak ON/OFF (érték fent van)
             parts.append(f"z-score={'ON' if use_zscore else 'OFF'}")
+
+            # Bollinger squeeze
+            parts.append(f"Bollinger={'ON' if use_sqz_filter else 'OFF'}")
 
             # ST filter
             st_icon = "⚪"
@@ -7081,6 +7098,7 @@ class CryptoBotApp:
                 st_mult=float(cfg.get("st_mult", 3.0)),
 
                 # Squeeze
+                use_sqz_filter=bool(cfg.get("use_sqz_filter", False)),
                 sqz_len=int(cfg.get("sqz_len", 20)),
                 sqz_bb_mult=float(cfg.get("sqz_bb_mult", 2.0)),
                 sqz_kc_mult=float(cfg.get("sqz_kc_mult", 1.5)),
@@ -7467,6 +7485,8 @@ class CryptoBotApp:
                     z_len      = cfg_ns.z_len
                     z_points   = cfg_ns.z_points
 
+                    # Bollinger
+                    use_sqz_filter = cfg_ns.use_sqz_filter
                     sqz_len     = cfg_ns.sqz_len
                     sqz_bb_mult = cfg_ns.sqz_bb_mult
                     sqz_kc_mult = cfg_ns.sqz_kc_mult
@@ -7877,6 +7897,7 @@ class CryptoBotApp:
                     zscore_blocked = False
                     adx_blocked = False
                     st_blocked = False
+                    sqz_blocked = False
 
                     # Csak akkor futtatjuk a szűrőket, ha van alapjel (buy/sell)
                     if combined_sig_raw in ("buy", "sell"):
@@ -7913,9 +7934,17 @@ class CryptoBotApp:
                             elif combined_sig_raw == "sell" and st_trend == 1: # Trend is Bullish -> Block Sell
                                 st_blocked = True
 
+                        # 5. Bollinger Filter
+                        # Csak akkor szűr, ha NEM Bollinger a stratégia
+                        if use_sqz_filter and strategy_mode != "Bollinger Squeeze":
+                            if combined_sig_raw == "buy" and sqz_sig  != "buy":
+                                sqz_blocked = True
+                            elif combined_sig_raw == "sell" and sqz_sig  != "sell":
+                                sqz_blocked = True
+
                     # 2. LÉPÉS: Blokkolók alkalmazása
                     # Ha bármelyik blokkoló aktív, a jel 'hold'-ra vált, DE a változó értéke (True) megmarad a loghoz!
-                    if htf_blocked or rsi_blocked or zscore_blocked or adx_blocked or st_blocked:
+                    if htf_blocked or rsi_blocked or zscore_blocked or adx_blocked or st_blocked or sqz_blocked:
                         combined_sig = 'hold'
 
                     # Breakout Override (Force Signal)
@@ -7946,6 +7975,7 @@ class CryptoBotApp:
                         rsi_blocked=rsi_blocked,
                         zscore_blocked=zscore_blocked,
                         st_blocked=st_blocked,
+                        sqz_blocked=sqz_blocked,
                         adx_blocked=adx_blocked,
                         ema_up=ema_up,
                         ema_dn=ema_dn,
@@ -7990,6 +8020,7 @@ class CryptoBotApp:
                         use_live=use_live,
                         use_zscore=use_zscore,
                         use_st_filter=use_st_filter,
+                        use_sqz_filter=use_sqz_filter,
                         st_trend_dir=st_trend,
                         cd_left=cd_left,
                     )
@@ -8682,6 +8713,7 @@ class CryptoBotApp:
         is_ema = (strat == "EMA")
         is_zscore = (strat == "Z-Score")
         is_sqz = (strat == "Bollinger Squeeze")
+        is_st = (strat == "Supertrend")
 
         # 1) EMA widgetek
         ema_state = "normal" if is_ema else "disabled"
@@ -9787,6 +9819,7 @@ class CryptoBotApp:
             "z_points": self._mb_get_int('mb_z_points', 100),
 
             # Squeeze
+            "use_sqz_filter": bool(getattr(self, "mb_use_sqz_filter", tk.BooleanVar(value=False)).get()),
             "sqz_len": self._mb_get_int('mb_sqz_len', 20),
             "sqz_bb_mult": self._mb_get_float('mb_sqz_bb_mult', 2.0),
             "sqz_kc_mult": self._mb_get_float('mb_sqz_kc_mult', 1.5),
