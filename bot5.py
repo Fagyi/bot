@@ -6920,7 +6920,7 @@ class CryptoBotApp:
             parts.append(f"live_px={'ON' if use_live else 'OFF'}")
 
             # Z-score filter formázása: csak ON/OFF (érték fent van)
-            parts.append(f"zscore={'ON' if use_zscore else 'OFF'}")
+            parts.append(f"z-score={'ON' if use_zscore else 'OFF'}")
 
             parts.append(f"cd_left={cd_left}s")
 
@@ -6987,15 +6987,15 @@ class CryptoBotApp:
             # Z-score érték (irány) megjelenítése a felső logban
             if use_zscore:
                 # z_dir értéke 'buy', 'sell' vagy 'hold' -> konvertáljuk 'LONG', 'SHORT', 'HOLD'-re vagy angolra
-                z_display = z_dir.upper() if z_dir != "hold" else "HOLD"
-                if z_dir == "buy": z_display = "LONG"
-                if z_dir == "sell": z_display = "SHORT"
-                parts.append(f"Z-SCORE={z_display}")
+                z_display = z_dir.upper() if z_dir != "hold" else "Hold"
+                if z_dir == "buy": z_display = "Buy"
+                if z_dir == "sell": z_display = "Sell"
+                parts.append(f"Z-score={z_display}")
 
             # Bollinger Squeeze adatok (csak ha aktív a stratégia)
             if is_sqz_strat:
-                sqz_state = "SQUEEZED" if sqz_is_on else "RELEASED"
-                sqz_txt = f"SQZ_STATE={sqz_state} MOM={sqz_mom:.4f}"
+                sqz_state = "Squeezed" if sqz_is_on else "Released"
+                sqz_txt = f"SQZ_State={sqz_state} MOM={sqz_mom:.4f}"
                 if bb_up > 0:
                     sqz_txt += f" BB=[{bb_dn:.2f}, {bb_up:.2f}]"
                 if kc_up > 0:
@@ -7925,30 +7925,37 @@ class CryptoBotApp:
                         elif not drift_ok:
                             combined_sig = "hold"
 
-                    # HOLD okok (Itt adjuk át a blokkoló flageket)
+                    # HOLD okok (Filterek és technikai blokkolók)
                     reasons = _build_hold_reasons(
                         cd_ok=cd_ok,
                         drift_ok=drift_ok,
                         drift_over_txt=drift_over_txt,
-                        # --- Új paraméterek átadása ---
                         htf_blocked=htf_blocked,
                         rsi_blocked=rsi_blocked,
                         zscore_blocked=zscore_blocked,
                         adx_blocked=adx_blocked,
-                        # ------------------------------
                         ema_up=ema_up,
                         ema_dn=ema_dn,
                         combined_sig_raw=combined_sig_raw,
                     )
 
-                    # --- KIEGÉSZÍTÉS: Squeeze várakozó ok beszúrása ---
-                    # Ha a Bollinger Squeeze stratégia aktív, és azért vagyunk hold-on, 
-                    # mert épp squeeze van (vagy nincs momentum), azt is jelezzük.
-                    if strategy_mode == "Bollinger Squeeze" and combined_sig_raw == "hold":
-                        if is_sqz:
-                            reasons.insert(0, "squeezed_waiting")
-                        # Opcionális: ha nincs momentum, azt is beírhatod
-                        # elif mom_val == 0: reasons.insert(0, "no_momentum")
+                    # --- KIEGÉSZÍTÉS: Stratégia-specifikus várakozó okok ---
+                    # Ha az alapjel (combined_sig_raw) 'hold', akkor kiírjuk, mire várunk.
+                    if combined_sig_raw == "hold":
+                        if strategy_mode == "Bollinger Squeeze":
+                            if is_sqz:
+                                reasons.insert(0, "HOLD | squeezed_waiting")
+                            else:
+                                # Ha nincs squeeze, de momentum sincs elég
+                                reasons.insert(0, "HOLD | sqz_no_setup") 
+
+                        elif strategy_mode == "Z-Score":
+                            # Ha Z-Score a stratégia, és a sávon belül vagyunk
+                            reasons.insert(0, "HOLD | waiting_for_zscore")
+
+                        elif strategy_mode == "EMA":
+                            # Ha EMA a stratégia, és nincs keresztezés
+                            reasons.insert(0, "HOLD | waiting_for_ema_cross")
 
                     # filters összefoglaló sor
                     filters_line = _build_filters_line(
@@ -7975,7 +7982,7 @@ class CryptoBotApp:
                         pool_used_for_log = float(self._pool_used_quote)
                         pool_bal_for_log  = float(self._pool_balance_quote)
 
-                    # Felső sor hívása az új paraméterekkel
+                    # Felső sor hívása
                     log_line = _log_status_line(
                         symbol=symbol,
                         tf=tf,
@@ -7990,11 +7997,11 @@ class CryptoBotApp:
                         use_rsi=use_rsi,
                         rsi_len=rsi_len,
                         rsi_val=rsi_val,
-                        use_adx=use_adx,          # Átadva
-                        adx_len=adx_len,          # Átadva
-                        adx_val=adx_val,          # Átadva
-                        use_zscore=use_zscore,    # Átadva
-                        z_dir=z_dir,              # Átadva
+                        use_adx=use_adx,
+                        adx_len=adx_len,
+                        adx_val=adx_val,
+                        use_zscore=use_zscore,
+                        z_dir=z_dir,
                         is_sqz_strat=(strategy_mode == "Bollinger Squeeze"),
                         sqz_is_on=is_sqz,
                         sqz_mom=mom_val,
@@ -8016,10 +8023,9 @@ class CryptoBotApp:
                     )
 
                     # --- Végső sor (Suffix) formázása ---
-                    # Cél: "| buy › hold (zscore_block, ...)" formátum
                     final_suffix = ""
 
-                    # Determine true raw signal for logging (ignoring all filters)
+                    # Determine true raw signal for logging
                     true_raw_signal = "hold"
                     if use_brk and brk_sig_raw in ("buy", "sell"):
                         true_raw_signal = brk_sig_raw
@@ -8029,17 +8035,16 @@ class CryptoBotApp:
                         true_raw_signal = sig_raw
 
                     if combined_sig in (None, "", "hold"):
-                        # Okok összefűzése
                         reasons_str = ", ".join(reasons) if reasons else ""
 
                         if true_raw_signal in ("buy", "sell"):
-                            # Volt jel, de blokkoltuk -> Mutassuk az okot zárójelben!
+                            # Volt jel, de blokkoltuk -> (ok)
                             if reasons_str:
                                 final_suffix = f" | {true_raw_signal} › hold ({reasons_str})"
                             else:
                                 final_suffix = f" | {true_raw_signal} › hold"
                         else:
-                            # Sima hold
+                            # Sima hold (várakozás) -> | ok
                             if reasons_str:
                                 final_suffix = f" | {reasons_str}"
                             else:
@@ -8048,7 +8053,7 @@ class CryptoBotApp:
                         # Ha van érvényes jel (buy/sell)
                         final_suffix = f"  › {combined_sig}"
 
-                    full_log_string = f"{log_line}\n{filters_line}\n{final_suffix}\n"
+                    full_log_string = f"{log_line} | {filters_line}\n{final_suffix}\n"
 
                     # ================== STÁTUSZ LOG VEZÉRLÉS ==================
                     # A korábbi logika szerint, csak a 'log_line.rstrip() + ...' helyett a 'full_log_string'-et használjuk
