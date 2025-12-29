@@ -7707,7 +7707,7 @@ class CryptoBotApp:
 
                     rsi_val = None
                     if use_rsi:
-                        rsi_series = self._mb_rsi(df_ind['c'], n=rsi_len)
+                        rsi_series = self._mb_rsi(df_rt['c'], n=rsi_len)
                         rsi_val = float(rsi_series.iloc[-1])
                         if sig == 'buy':
                             if not (rsi_bmin <= rsi_val <= rsi_bmax):
@@ -7789,7 +7789,7 @@ class CryptoBotApp:
                             tf,
                             length=z_len,
                             data_points=z_points,
-                            df=df_ind,
+                            df=df_rt,
                         )
                     except Exception:
                         z_sig, z_quad = 0, None
@@ -7811,7 +7811,7 @@ class CryptoBotApp:
                     kc_dn = 0.0
                     try:
                         sqz_sig, is_sqz, mom_val, bb_up, bb_dn, kc_up, kc_dn = self._mb_squeeze_signal(
-                            df_ind, length=sqz_len, bb_mult=sqz_bb_mult, kc_mult=sqz_kc_mult
+                            df_rt, length=sqz_len, bb_mult=sqz_bb_mult, kc_mult=sqz_kc_mult
                         )
                     except Exception:
                         pass
@@ -7822,7 +7822,7 @@ class CryptoBotApp:
                     st_trend = 0
                     st_sig = "hold"
                     try:
-                        st_trend_series, st_line_series = self._mb_supertrend(df_ind, period=st_period, multiplier=st_mult)
+                        st_trend_series, st_line_series = self._mb_supertrend(df_rt, period=st_period, multiplier=st_mult)
                         if st_trend_series is not None and len(st_trend_series) > 1:
                             st_trend = int(st_trend_series.iloc[-1])
                             prev_st_trend = int(st_trend_series.iloc[-2])
@@ -7858,7 +7858,7 @@ class CryptoBotApp:
                     adx_ok = True
                     if use_adx:
                         try:
-                            adx_val = self._mb_adx(df_ind, length=adx_len)
+                            adx_val = self._mb_adx(df_rt, length=adx_len)
                             adx_ok = (adx_val is not None and float(adx_val) >= float(adx_min))
                         except Exception:
                             adx_val = None
