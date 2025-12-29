@@ -6779,6 +6779,7 @@ class CryptoBotApp:
             adx_blocked: bool,
             st_blocked: bool,
             sqz_blocked: bool,
+            short_disabled_blocked: bool,
             ema_up: bool,
             ema_dn: bool,
             combined_sig_raw: str | None,
@@ -6792,6 +6793,8 @@ class CryptoBotApp:
                 reasons.append(drift_over_txt)
 
             # 2. Filter blokkolók (explicit)
+            if short_disabled_blocked:
+                reasons.append("short_disabled")
             if htf_blocked:
                 reasons.append("htf_block")
             if rsi_blocked:
@@ -7873,9 +7876,17 @@ class CryptoBotApp:
                     adx_blocked = False
                     st_blocked = False
                     sqz_blocked = False
+                    short_disabled_blocked = False
+
+                    # Short engedélyezése opció beolvasása
+                    allow_short = getattr(cfg_ns, "allow_short", True)
 
                     # Csak akkor futtatjuk a szűrőket, ha van alapjel (buy/sell)
                     if combined_sig_raw in ("buy", "sell"):
+
+                        # 0. Allow Short check
+                        if combined_sig_raw == 'sell' and not allow_short:
+                            short_disabled_blocked = True
 
                         # 1. HTF Filter
                         if use_htf:
@@ -7919,7 +7930,7 @@ class CryptoBotApp:
 
                     # 2. LÉPÉS: Blokkolók alkalmazása
                     # Ha bármelyik blokkoló aktív, a jel 'hold'-ra vált, DE a változó értéke (True) megmarad a loghoz!
-                    if htf_blocked or rsi_blocked or zscore_blocked or adx_blocked or st_blocked or sqz_blocked:
+                    if htf_blocked or rsi_blocked or zscore_blocked or adx_blocked or st_blocked or sqz_blocked or short_disabled_blocked:
                         combined_sig = 'hold'
 
                     # Breakout Override (Force Signal)
@@ -7951,6 +7962,7 @@ class CryptoBotApp:
                         zscore_blocked=zscore_blocked,
                         st_blocked=st_blocked,
                         sqz_blocked=sqz_blocked,
+                        short_disabled_blocked=short_disabled_blocked,
                         adx_blocked=adx_blocked,
                         ema_up=ema_up,
                         ema_dn=ema_dn,
@@ -9699,6 +9711,7 @@ class CryptoBotApp:
             "pause_new": self.mb_pause_new,
 
             "auto_borrow": self.mb_autob,
+            "allow_short": self.mb_allow_short,
             "invert_ema": getattr(self, "mb_invert_ema", None),
             "ema_hyst_pct": getattr(self, "mb_ema_hyst_pct", None),
             "dup_tol_pct": getattr(self, "mb_dup_tol_pct_var", None),
@@ -9807,6 +9820,7 @@ class CryptoBotApp:
 
             # Auto-borrow + EMA invert
             "auto_borrow": bool(getattr(self, "mb_autob", tk.BooleanVar(value=False)).get()),
+            "allow_short": bool(getattr(self, "mb_allow_short", tk.BooleanVar(value=True)).get()),
             "invert_ema": bool(getattr(self, "mb_invert_ema", tk.BooleanVar(value=False)).get()),
 
             # EMA hysteresis %
