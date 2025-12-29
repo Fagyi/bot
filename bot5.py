@@ -2900,82 +2900,6 @@ class CryptoBotApp:
     def _mb_get_ohlcv(self, symbol: str, tf: str, limit: int = 200):
         return self._get_ohlcv_cached(symbol, tf, limit=limit)
 
-    # ---- Z-score segédfüggvények ----
-    def _mb_ohlcv_to_df(self, ohlcv, tz_unit: str = "ms"):
-        """OHLCV listából (ts, o, h, l, c, v) pandas DataFrame-et készít."""
-        if not ohlcv:
-            return pd.DataFrame()
-
-        df = pd.DataFrame(ohlcv, columns=["ts", "open", "high", "low", "close", "volume"])
-        # KuCoin ts ms-ben van, ezért unit="ms"
-        df["ts"] = pd.to_datetime(df["ts"], unit=tz_unit, utc=True)
-        df.set_index("ts", inplace=True)
-        df = df.astype(float, errors="ignore")
-        return df
-
-    def _compute_zscore_signal(
-        self,
-        symbol: str,
-        tf: str,
-        length: int = 40,
-        data_points: int = 100,
-        df=None,               # <-- ÚJ, opcionális paraméter
-    ):
-        """Z-score jelzés számítása az aktuális párra/idősíkra.
-
-        Visszatérés:
-            (signal, quadrant_info)
-        """
-        try:
-            # Ha nincs átadott df, akkor marad a régi logika: OHLCV lekérés + konverzió
-            if df is None:
-                try:
-                    ohlcv = self._mb_get_ohlcv(
-                        symbol,
-                        tf,
-                        limit=max(length * 3, data_points + 10),
-                    )
-                except Exception:
-                    ohlcv = []
-
-                df = self._mb_ohlcv_to_df(ohlcv)
-            else:
-                # Worker által átadott df (pl. ts, o, h, l, c, v oszlopokkal)
-                df = df.copy()
-
-                # Ha a worker-féle df 'c', 'o', 'h', 'l', 'v' oszlopokat használ,
-                # konvertáljuk át a zscore-stratégiához elvárt nevekre.
-                if isinstance(df, pd.DataFrame):
-                    cols = df.columns
-
-                    if "close" not in cols and "c" in cols:
-                        df["close"] = df["c"]
-                    if "open" not in cols and "o" in cols:
-                        df["open"] = df["o"]
-                    if "high" not in cols and "h" in cols:
-                        df["high"] = df["h"]
-                    if "low" not in cols and "l" in cols:
-                        df["low"] = df["l"]
-                    if "volume" not in cols and "v" in cols:
-                        df["volume"] = df["v"]
-
-            # Ha valamiért mégis üres / túl rövid
-            if not isinstance(df, pd.DataFrame) or df.empty or len(df) < length + 5:
-                return 0, None
-
-            # Másolunk, hogy az eredetit ne írjuk tele plusz oszlopokkal
-            signal, quadrant_info = self.apply_zscore_strategy(
-                df.copy(),
-                length=length,
-                data_points=data_points,
-                source="close",
-            )
-            return int(signal or 0), quadrant_info
-
-        except Exception:
-            # Ha bármi elhasal, marad a régi, safe default
-            return 0, None
-
     def _mt_start_price_loop(self):
         if self._mt_price_job:
             self.root.after_cancel(self._mt_price_job)
@@ -9013,24 +8937,99 @@ class CryptoBotApp:
         except Exception:
             return 0
 
+    # ---- Z-score függvények ----
+    def _mb_ohlcv_to_df(self, ohlcv, tz_unit: str = "ms"):
+        """OHLCV listából DataFrame készítése (Gyorsított típuskonverzióval)."""
+        if not ohlcv:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(ohlcv, columns=["ts", "open", "high", "low", "close", "volume"])
+        
+        # Időbélyeg konverzió
+        df["ts"] = pd.to_datetime(df["ts"], unit=tz_unit, utc=True)
+        df.set_index("ts", inplace=True)
+        
+        # Csak a numerikus oszlopokat konvertáljuk float-ra (biztonságosabb)
+        numeric_cols = ["open", "high", "low", "close", "volume"]
+        df[numeric_cols] = df[numeric_cols].astype(float)
+        
+        return df
+
+    def _compute_zscore_signal(
+        self,
+        symbol: str,
+        tf: str,
+        length: int = 40,
+        data_points: int = 100,
+        df=None,
+    ):
+        """Z-score wrapper hibakezeléssel és automatikus oszlopnevezéssel."""
+        try:
+            # 1. Adat beszerzés (ha nincs átadva)
+            if df is None:
+                try:
+                    ohlcv = self._mb_get_ohlcv(
+                        symbol,
+                        tf,
+                        limit=max(length * 3, data_points + 50), # Kicsit több puffer
+                    )
+                except Exception:
+                    ohlcv = []
+                df = self._mb_ohlcv_to_df(ohlcv)
+            else:
+                # 2. Ha van adat, másolatot készítünk a biztonság kedvéért
+                df = df.copy()
+
+            # 3. Oszlopnevek egységesítése (Rövid -> Hosszú)
+            # Ez a map-alapú rename tisztább, mint a sok if
+            rename_map = {"c": "close", "o": "open", "h": "high", "l": "low", "v": "volume"}
+            df.rename(columns=rename_map, inplace=True)
+
+            # 4. Validáció
+            if df.empty or len(df) < length + 2:
+                return 0, None
+
+            # 5. Stratégia hívása
+            signal, quadrant_info = self.apply_zscore_strategy(
+                df, # Már másolat, nyugodtan átadhatjuk
+                length=length,
+                data_points=data_points,
+                source="close",
+            )
+            return int(signal or 0), quadrant_info
+
+        except Exception as e:
+            # Opcionális: Logolhatod a hibát, ha debuggolni kell
+            # print(f"Z-Score Error: {e}")
+            return 0, None
+
     def compute_zscore_strategy(
         self,
         df: pd.DataFrame,
         length: int = 40,
         source: str = "close",
     ) -> Tuple[pd.Series, pd.Series]:
-        """Statistical Trend Analysis (Scatterplot) alapú Z-score és Z-change."""
+        """Statistical Trend Analysis alapú Z-score és Z-change."""
+        if df.empty or len(df) < length:
+            return pd.Series(dtype=float), pd.Series(dtype=float)
+
+        # Forrás kiválasztása
         if source == "Returns":
-            src = (df["close"] - df["open"]) / df["close"] * 100.0
+            # Százalékos változás stabilabb lehet
+            src = df["close"].pct_change() * 100.0
         elif source in df.columns:
             src = df[source]
         else:
             src = df["close"]
 
+        # Rolling számítások
         mean = src.rolling(window=length).mean()
-        stdev = src.rolling(window=length).std()
-        z_score = (src - mean) / stdev.replace(0, np.nan)
-
+        std = src.rolling(window=length).std(ddof=0) # ddof=0 a population std-hez, ha kell
+        
+        # 0 szórás kezelése
+        std = std.replace(0, np.nan)
+        
+        z_score = (src - mean) / std
         z_change = z_score.diff()
 
         return z_score, z_change
@@ -9042,73 +9041,80 @@ class CryptoBotApp:
         data_points: int = 100,
         source: str = "close",
     ) -> Tuple[int, Dict[str, Any]]:
-        """Z-score stratégia alkalmazása.
-
-        Visszatérés:
-            signal:  1 = long, -1 = short, 0 = hold
-            quadrant_info: dict a statisztikákkal
-        """
+        
         z_score, z_change = self.compute_zscore_strategy(df, length=length, source=source)
 
-        recent_z = z_score.iloc[-data_points:].tolist()
-        recent_z_change = z_change.iloc[-data_points:].tolist()
+        # Ha nincs elég adat, azonnal térjünk vissza
+        if len(z_score) < data_points:
+            return 0, {"error": "Not enough data"}
 
-        quad1 = quad2 = quad3 = quad4 = 0
+        # --- OPTIMALIZÁCIÓ: Vektorizált számítás ---
+        # Csak az utolsó 'data_points' darab
+        recent_z = z_score.iloc[-data_points:].values
+        recent_z_ch = z_change.iloc[-data_points:].values
+        
+        # NaN szűrés (maszkolással)
+        valid_mask = ~np.isnan(recent_z) & ~np.isnan(recent_z_ch)
+        z_vals = recent_z[valid_mask]
+        ch_vals = recent_z_ch[valid_mask]
 
-        for z, z_ch in zip(recent_z, recent_z_change):
-            if pd.notna(z) and pd.notna(z_ch):
-                if z > 0 and z_ch > 0:
-                    quad1 += 1
-                elif z > 0 and z_ch < 0:
-                    quad2 += 1
-                elif z < 0 and z_ch < 0:
-                    quad3 += 1
-                elif z < 0 and z_ch > 0:
-                    quad4 += 1
+        # Kvadránsok számolása numpy-val (ciklus nélkül!)
+        pos_z = z_vals > 0
+        neg_z = z_vals < 0
+        pos_ch = ch_vals > 0
+        neg_ch = ch_vals < 0
 
-        current_z = z_score.iloc[-1]
-        current_z_change = z_change.iloc[-1]
+        quad1 = np.sum(pos_z & pos_ch) # Z > 0, Ch > 0
+        quad2 = np.sum(pos_z & neg_ch) # Z > 0, Ch < 0
+        quad3 = np.sum(neg_z & neg_ch) # Z < 0, Ch < 0
+        quad4 = np.sum(neg_z & pos_ch) # Z < 0, Ch > 0
 
+        total_points = len(z_vals) # vagy quad1+quad2+quad3+quad4
+
+        # Jelenlegi értékek
+        curr_z = z_score.iloc[-1]
+        curr_ch = z_change.iloc[-1]
+        
         current_quadrant = 0
-        if pd.notna(current_z) and pd.notna(current_z_change):
-            if current_z > 0 and current_z_change > 0:
-                current_quadrant = 1
-            elif current_z > 0 and current_z_change < 0:
-                current_quadrant = 2
-            elif current_z < 0 and current_z_change < 0:
-                current_quadrant = 3
-            elif current_z < 0 and current_z_change > 0:
-                current_quadrant = 4
+        if pd.notna(curr_z) and pd.notna(curr_ch):
+            if curr_z > 0 and curr_ch > 0: current_quadrant = 1
+            elif curr_z > 0 and curr_ch < 0: current_quadrant = 2
+            elif curr_z < 0 and curr_ch < 0: current_quadrant = 3
+            elif curr_z < 0 and curr_ch > 0: current_quadrant = 4
 
-        total_points = quad1 + quad2 + quad3 + quad4
+        # Jelzés logika
         signal = 0
+        threshold = 0.3 * total_points # 30%-os szabály
 
         if total_points > 0:
-            if (
-                (current_quadrant == 4 and quad4 > 0.3 * total_points)
-                or (current_quadrant == 1 and quad1 > 0.3 * total_points)
-            ):
+            # LONG feltételek (Q4 felpattanás VAGY Q1 trend)
+            if (current_quadrant == 4 and quad4 > threshold) or \
+               (current_quadrant == 1 and quad1 > threshold):
                 signal = 1
-            elif (
-                (current_quadrant == 2 and quad2 > 0.3 * total_points)
-                or (current_quadrant == 3 and quad3 > 0.3 * total_points)
-            ):
+            # SHORT feltételek (Q2 forduló VAGY Q3 lejtmenet)
+            elif (current_quadrant == 2 and quad2 > threshold) or \
+                 (current_quadrant == 3 and quad3 > threshold):
                 signal = -1
 
+        # DataFrame frissítése (ha szükséges, bár backtesztnél ez lassíthat)
+        # Ha csak a signal kell, ezt a részt érdemes kikapcsolni élesben
         df["z_score"] = z_score
         df["z_change"] = z_change
         df["zscore_signal"] = signal
 
-        quadrant_info: Dict[str, Any] = {
-            "quad1": quad1,
-            "quad2": quad2,
-            "quad3": quad3,
-            "quad4": quad4,
+        quadrant_info = {
+            "quad1": int(quad1),
+            "quad2": int(quad2),
+            "quad3": int(quad3),
+            "quad4": int(quad4),
             "current_quadrant": current_quadrant,
             "signal": signal,
+            "z_score": curr_z if pd.notna(curr_z) else 0.0
         }
+        
         return signal, quadrant_info
 
+    # ---------- BOLLINGER SQUEEZE ----------
     def _mb_linear_regression(self, series, length: int) -> pd.Series:
         """
         Mozgó lineáris regresszió végpontjának becslése (gyorsított).
