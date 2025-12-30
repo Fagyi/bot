@@ -4429,9 +4429,7 @@ class CryptoBotApp:
 
         ttk.Button(z_row2, text="Z-score teszt", command=_mb_test_zscore).pack(side=tk.LEFT, padx=(10, 0))
 
-        z_row3 = ttk.Frame(z_box)
-        z_row3.pack(anchor="w", pady=(4, 0))
-        self.mb_z_label = ttk.Label(z_row3, text="Z-score jelzés: n/a")
+        self.mb_z_label = ttk.Label(z_row2, text="Z-score jelzés: n/a")
         self.mb_z_label.pack(side=tk.LEFT)
         r_adv += 1
 
@@ -4486,17 +4484,14 @@ class CryptoBotApp:
             command=self._mb_on_strategy_change,
         ).pack(side=tk.LEFT)
 
-        st_row2 = ttk.Frame(st_box)
-        st_row2.pack(anchor="w", pady=(4, 0))
-
-        ttk.Label(st_row2, text="ATR Hossz:").pack(side=tk.LEFT)
-        self.mb_st_period = ttk.Spinbox(st_row2, from_=1, to=100, width=6)
+        ttk.Label(st_row1, text="ATR Hossz:").pack(side=tk.LEFT)
+        self.mb_st_period = ttk.Spinbox(st_row1, from_=1, to=100, width=6)
         self.mb_st_period.delete(0, tk.END)
         self.mb_st_period.insert(0, "10")
         self.mb_st_period.pack(side=tk.LEFT, padx=(2, 8))
 
-        ttk.Label(st_row2, text="Multiplier:").pack(side=tk.LEFT)
-        self.mb_st_mult = ttk.Spinbox(st_row2, from_=0.1, to=10.0, increment=0.1, width=5)
+        ttk.Label(st_row1, text="Multiplier:").pack(side=tk.LEFT)
+        self.mb_st_mult = ttk.Spinbox(st_row1, from_=0.1, to=10.0, increment=0.1, width=5)
         self.mb_st_mult.delete(0, tk.END)
         self.mb_st_mult.insert(0, "3.0")
         self.mb_st_mult.pack(side=tk.LEFT, padx=(2, 0))
@@ -4516,23 +4511,20 @@ class CryptoBotApp:
             command=self._mb_on_fixed_changed,
         ).pack(side=tk.LEFT)
 
-        fixed_row2 = ttk.Frame(fixed_box)
-        fixed_row2.pack(anchor="w", pady=(4, 0))
-
-        ttk.Label(fixed_row2, text="SL %").pack(side=tk.LEFT)
-        self.mb_sl_pct = ttk.Spinbox(fixed_row2, from_=0, to=50, increment=0.1, width=6)
+        ttk.Label(fixed_row1, text="SL %").pack(side=tk.LEFT)
+        self.mb_sl_pct = ttk.Spinbox(fixed_row1, from_=0, to=50, increment=0.1, width=6)
         self.mb_sl_pct.delete(0, tk.END)
         self.mb_sl_pct.insert(0, "5.0")
         self.mb_sl_pct.pack(side=tk.LEFT, padx=(2, 8))
 
-        ttk.Label(fixed_row2, text="TP %").pack(side=tk.LEFT)
-        self.mb_tp_pct = ttk.Spinbox(fixed_row2, from_=0, to=50, increment=0.1, width=6)
+        ttk.Label(fixed_row1, text="TP %").pack(side=tk.LEFT)
+        self.mb_tp_pct = ttk.Spinbox(fixed_row1, from_=0, to=50, increment=0.1, width=6)
         self.mb_tp_pct.delete(0, tk.END)
         self.mb_tp_pct.insert(0, "1.0")
         self.mb_tp_pct.pack(side=tk.LEFT, padx=(2, 8))
 
-        ttk.Label(fixed_row2, text="Trailing %").pack(side=tk.LEFT)
-        self.mb_trail_pct = ttk.Spinbox(fixed_row2, from_=0, to=20, increment=0.1, width=6)
+        ttk.Label(fixed_row1, text="Trailing %").pack(side=tk.LEFT)
+        self.mb_trail_pct = ttk.Spinbox(fixed_row1, from_=0, to=20, increment=0.1, width=6)
         self.mb_trail_pct.delete(0, tk.END)
         self.mb_trail_pct.insert(0, "0")
         self.mb_trail_pct.pack(side=tk.LEFT, padx=(2, 0))
