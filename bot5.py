@@ -8272,12 +8272,11 @@ class CryptoBotApp:
                                 nominal_q = 0.0
 
                             # --- POOL CLAMP: commit/nominal/size ráhúzása a free_pool-ra ---
-                            # Cél: a tényleges felhasználás ne tudjon nagyobb lenni, mint a szabad pool. A sanitizer logikát nem bántjuk: nominal_q / open_size konzisztens marad.
                             try:
                                 lev_eff = max(1, int(lev))
                                 free_pool_eff = max(0.0, float(free_pool))
 
-                                # 1) fee headroom becslés (1 pass), hogy commit+fee se lépje túl a pool-t
+                                # 1) fee headroom becslés
                                 fee_rate = self._mb_get_taker_fee()
                                 fee_est = 0.0
                                 if self._is_pos_num(open_size) and open_size > 0:
@@ -8288,15 +8287,14 @@ class CryptoBotApp:
                                 if self._is_pos_num(commit_usdt) and commit_usdt > max_commit:
                                     commit_usdt = max_commit
 
-                                # 3) ebből újraszámoljuk a nominalt és a size-t (konzisztens input a sanitizernek)
+                                # 3) újraszámolás
                                 nominal_q = float(commit_usdt) * float(lev_eff)
                                 open_size = float(nominal_q) / max(float(px_for_mgmt), 1e-12)
 
-                                # 4) lépésre kerekítés után még egyszer korrigáljuk a nominal/commit-et, hogy a padlózás után is konzisztens legyen minden
+                                # 4) lépésre kerekítés után korrekció
                                 open_size = self._mb_floor_to_step_dec(open_size, lot_step)
 
-                                # JAVÍTÁS: BUY esetén felfelé kerekítjük a funds-ot (quote_step),
-                                # hogy a sanitizerben a padlózás után se essen be a minBase/size alá.
+                                # BUY esetén felfelé kerekítjük a funds-ot (quote_step)
                                 if combined_sig == 'buy' and quote_step > 0:
                                     raw_nom = float(open_size) * float(px_for_mgmt)
                                     qs = float(quote_step)
@@ -8306,9 +8304,8 @@ class CryptoBotApp:
 
                                 commit_usdt = float(nominal_q) / float(lev_eff)
                             except Exception:
-                                # hiba esetén inkább ne dobjon el mindent, marad az eredeti számítás
                                 pass
-                            # open_size már padlózva van a clamp blokkban (ha az lefutott), de ha ott exception volt, itt még biztosan padlózzuk:
+
                             open_size = self._mb_floor_to_step_dec(open_size, lot_step)
 
                             self._safe_log(
@@ -8321,215 +8318,173 @@ class CryptoBotApp:
                             if commit_usdt <= 0 or (combined_sig == 'sell' and open_size <= 0):
                                 self._safe_log("ℹ️ Nulla méret / nincs keret – nincs nyitás.\n")
                             else:
-                                if dry:
-                                    size_to_send = None
-                                    funds_to_send = None
-                                    if combined_sig == 'buy':
-                                        pre_funds_nominal = float(nominal_q)
-                                        _sb, _fq = self._mb_sanitize_order(
-                                            symbol=symbol, side='buy',
-                                            price=px_for_mgmt,
-                                            size_base=None,
-                                            funds_quote=pre_funds_nominal
-                                        )
-                                        funds_to_send = _fq
-                                        if not funds_to_send:
-                                            self._safe_log("ℹ️ SIM BUY eldobva (sanitizer funds/minFunds/quote_step miatt).\n")
-                                        else:
-                                            size_to_send = self._mb_floor_to_step_dec(
-                                                float(funds_to_send) / max(px_for_mgmt, 1e-12), float(lot_step or 0.0)
-                                            )
-                                            if min_base and size_to_send < float(min_base):
-                                                self._safe_log("ℹ️ SIM BUY eldobva (méret < minBase a padlózás után).\n")
-                                                size_to_send = None
-                                    else:
-                                        _sb, _fq = self._mb_sanitize_order(
-                                            symbol=symbol, side='sell',
-                                            price=px_for_mgmt,
-                                            size_base=float(open_size),
-                                            funds_quote=None
-                                        )
-                                        size_to_send = _sb
-                                        if not size_to_send:
-                                            self._safe_log("ℹ️ SIM SELL eldobva (sanitizer size/minBase/lot_step miatt).\n")
+                                # --- EGYSÉGESÍTETT SANITIZER ÉS KÜLDÉS ---
+                                is_buy = (combined_sig == 'buy')
 
-                                    if (combined_sig == 'buy' and funds_to_send) or (combined_sig == 'sell' and size_to_send):
-                                        if combined_sig == 'buy':
-                                            commit_sim = float(funds_to_send) / max(lev, 1)
-                                            sz_sim = float(size_to_send)
-                                        else:
-                                            sz_sim = float(size_to_send)
-                                            commit_sim = (sz_sim * float(px_for_mgmt)) / max(lev, 1)
-
-                                        if use_atr and atr_val is not None:
-                                            atr_pack = (mul_sl, mul_tp1, mul_tp2, mul_tr, atr_val)
-                                            _open_sim(combined_sig, entry_px, sz_sim, commit_sim, atr_pack=atr_pack, symbol_for_pos=symbol)
-                                        elif use_fixed:
-                                            fixed_pack = (tpct, spct, trpct)
-                                            _open_sim(combined_sig, entry_px, sz_sim, commit_sim, fixed_pack=fixed_pack, symbol_for_pos=symbol)
-                                        else:
-                                            _open_sim(combined_sig, entry_px, sz_sim, commit_sim, symbol_for_pos=symbol)
-                                        opened = True
+                                # Paraméterek a sanitizerhez
+                                # BUY: funds_quote kell (nominal_q), size_base = None
+                                # SELL: size_base kell (open_size), funds_quote = None
+                                req_sz = None
+                                req_fu = None
+                                if is_buy:
+                                    req_fu = float(nominal_q)
                                 else:
-                                    try:
-                                        size_to_send = None
-                                        funds_to_send = None
+                                    req_sz = float(open_size)
 
-                                        if combined_sig == 'buy':
-                                            _pre_funds = nominal_q
-                                            _sb, _fq = self._mb_sanitize_order(
-                                                symbol=symbol, side='buy',
-                                                price=px_for_mgmt,
-                                                size_base=None,
-                                                funds_quote=_pre_funds
-                                            )
-                                            size_to_send, funds_to_send = _sb, _fq
-                                        else:
-                                            _pre_size = open_size
-                                            _sb, _fq = self._mb_sanitize_order(
-                                                symbol=symbol, side='sell',
-                                                price=px_for_mgmt,
-                                                size_base=_pre_size,
-                                                funds_quote=None
-                                            )
-                                            size_to_send, funds_to_send = _sb, _fq
+                                sb, fq = self._mb_sanitize_order(
+                                    symbol=symbol, side=combined_sig,
+                                    price=px_for_mgmt,
+                                    size_base=req_sz,
+                                    funds_quote=req_fu
+                                )
+                                size_to_send, funds_to_send = sb, fq
 
-                                        if (combined_sig == 'buy' and not funds_to_send) or (combined_sig == 'sell' and not size_to_send):
-                                            self._safe_log("ℹ️ Sanitizer eldobta a nyitást (min/step) – kihagyva.\n")
-                                            opened = False
-                                            continue
-                                        else:
-                                            _payload_dbg = {
-                                                "mode": mode, "symbol": symbol, "side": combined_sig,
-                                                "size_base": size_to_send, "funds_quote": funds_to_send,
-                                                "leverage": lev, "auto_borrow": auto_borrow,
-                                            }
-                                            self._safe_log(f"🐞 SEND OPEN: {self._mb_pp(_payload_dbg)}\n")
+                                # Sikerült?
+                                valid = (funds_to_send is not None) if is_buy else (size_to_send is not None)
+
+                                if not valid:
+                                    self._safe_log(f"ℹ️ Sanitizer eldobta a {combined_sig} nyitást (min/step miatt).\n")
+                                    opened = False
+                                else:
+                                    # Commit újraszámítás a végleges értékekből (szimulációhoz)
+                                    if is_buy:
+                                        sz_sim = float(size_to_send) # Sanitizer visszaadja a becsült size-t is
+                                        commit_sim = float(funds_to_send) / max(lev, 1)
+                                    else:
+                                        sz_sim = float(size_to_send)
+                                        commit_sim = (sz_sim * float(px_for_mgmt)) / max(lev, 1)
+
+                                    # Csomagok előkészítése
+                                    atr_pack_arg = (mul_sl, mul_tp1, mul_tp2, mul_tr, atr_val) if (use_atr and atr_val) else None
+                                    fixed_pack_arg = (tpct, spct, trpct) if use_fixed else None
+
+                                    if dry:
+                                        _open_sim(
+                                            combined_sig, entry_px, sz_sim, commit_sim,
+                                            atr_pack=atr_pack_arg,
+                                            fixed_pack=fixed_pack_arg,
+                                            symbol_for_pos=symbol
+                                        )
+                                        opened = True
+                                    else:
+                                        # LIVE ORDER
+                                        _payload = {
+                                            "mode": mode, "symbol": symbol, "side": combined_sig,
+                                            "size_base": size_to_send, "funds_quote": funds_to_send,
+                                            "leverage": lev, "auto_borrow": auto_borrow
+                                        }
+                                        self._safe_log(f"🐞 SEND OPEN: {self._mb_pp(_payload)}\n")
+
+                                        try:
                                             with self._ex_lock:
-                                                resp = self.exchange.place_margin_market_order(
-                                                    mode, symbol, combined_sig,
-                                                    size_base=size_to_send,
-                                                    funds_quote=funds_to_send,
-                                                    leverage=lev,
-                                                    auto_borrow=auto_borrow
+                                                resp = self.exchange.place_margin_market_order(**_payload)
+
+                                            self._safe_log(f"🐞 RECV OPEN: {self._mb_pp(resp)}\n")
+
+                                            # Válasz feldolgozása
+                                            code = None; data = None
+                                            if isinstance(resp, dict):
+                                                code = resp.get("code")
+                                                data = resp.get("data") or {}
+                                            elif hasattr(resp, "code"):
+                                                code = getattr(resp, "code", None)
+                                                data = getattr(resp, "data", None)
+
+                                            oid = cid = None
+                                            if isinstance(data, dict):
+                                                oid = data.get("orderId") or data.get("id")
+                                                cid = data.get("clientOid") or data.get("clientOrderId")
+
+                                            if code and str(code) != "200000":
+                                                self._safe_log(f"❌ LIVE order elutasítva (code={code})\n")
+                                                opened = False
+                                            elif not oid and not cid:
+                                                self._safe_log(f"⚠️ LIVE válasz orderId nélkül\n")
+                                                opened = False
+                                            else:
+                                                order_key = oid or cid
+                                                self._safe_log(f"✅ LIVE {combined_sig.upper()} OK | oid={order_key}\n")
+
+                                                # Fill adatok lekérése (Realtime partial fill + fee)
+                                                # Itt a már meglévő market steps-et használhatjuk, ha kiemeltük a ciklus elé
+                                                # Ha nem, akkor itt lekérjük (bár jobb lenne kint)
+                                                try:
+                                                    ls_now, _, _, _, _ = self._mb_get_market_steps(symbol)
+                                                except: ls_now = 0.0
+
+                                                req_sz_f = float(size_to_send) if size_to_send else None
+                                                req_fu_f = float(funds_to_send) if funds_to_send else None
+
+                                                fb, commit_real_ws, fee_open_actual = self._mb_resolve_open_fill(
+                                                    order_id=str(order_key),
+                                                    side=combined_sig,
+                                                    req_price=entry_px,
+                                                    req_size=req_sz_f,
+                                                    req_funds=req_fu_f,
+                                                    lev=lev,
+                                                    lot_step=float(ls_now or 0.0),
                                                 )
 
-                                        self._safe_log(f"🐞 RECV OPEN: {self._mb_pp(resp)}\n")
-                                        code = None
-                                        data = None
-                                        if isinstance(resp, dict):
-                                            code = resp.get("code")
-                                            data = resp.get("data") or {}
-                                        elif hasattr(resp, "code"):
-                                            code = getattr(resp, "code", None)
-                                            data = getattr(resp, "data", None)
-
-                                        oid = cid = None
-                                        if isinstance(data, dict):
-                                            oid = data.get("orderId") or data.get("id") or data.get("orderid")
-                                            cid = data.get("clientOid") or data.get("clientOrderId")
-
-                                        if code and str(code) != "200000":
-                                            self._safe_log(f"❌ LIVE order elutasítva (code={code}) – teljes resp: {repr(resp)}\n")
-                                            opened = False
-                                        elif not oid and not cid:
-                                            self._safe_log(f"⚠️ LIVE válasz orderId nélkül, teljes resp: {repr(resp)}\n")
-                                            opened = False
-                                        else:
-                                            order_key = oid or cid
-                                            self._safe_log(
-                                                f"✅ LIVE {combined_sig.upper()} elküldve | mode={mode} lev={lev} "
-                                                f"| size={size_to_send} funds={funds_to_send} commit={commit_usdt} | orderId={oid} clientOid={cid}\n"
-                                            )
-
-                                            try:
-                                                lot_step_now, _price_step_now, _mb_min_base_now, _mb_min_funds_now, _quote_step_now = self._mb_get_market_steps(symbol)
-                                            except Exception:
-                                                lot_step_now = 0.0
-
-                                            # --- 1) Realtime partial fill + fee (WS + REST) ---
-                                            size_req = float(size_to_send) if size_to_send is not None else None
-                                            funds_req = float(funds_to_send) if funds_to_send is not None else None
-
-                                            fb, commit_real_ws, fee_open_actual = self._mb_resolve_open_fill(
-                                                order_id=str(order_key),
-                                                side=combined_sig,
-                                                req_price=entry_px,
-                                                req_size=size_req,
-                                                req_funds=funds_req,
-                                                lev=lev,
-                                                lot_step=float(lot_step_now or 0.0),
-                                            )
-
-                                            size_now = None
-                                            commit_used = None
-
-                                            if fb > 0.0:
-                                                # WS/REST szerinti tényleges filled méret
-                                                size_now = float(fb)
-                                                commit_used = float(commit_real_ws or 0.0)
-                                            else:
-                                                # --- 2) Fallback: régi becslés a sanitizer output alapján ---
-                                                if funds_to_send is not None:
-                                                    commit_used = float(funds_to_send) / max(lev, 1)
-                                                    size_now = self._sdiv(float(funds_to_send), px_for_mgmt, 0.0)
-                                                    size_now = self._mb_floor_to_step_dec(size_now, float(lot_step_now or 0.0))
+                                                size_now = None; commit_used = None
+                                                if fb > 0.0:
+                                                    size_now = float(fb)
+                                                    commit_used = float(commit_real_ws or 0.0)
                                                 else:
-                                                    size_now = float(size_to_send)
-                                                    commit_used = self._sdiv(size_now * float(px_for_mgmt), lev, 0.0)
+                                                    # Fallback becslés
+                                                    if funds_to_send:
+                                                        commit_used = float(funds_to_send) / max(lev, 1)
+                                                        size_now = self._sdiv(float(funds_to_send), px_for_mgmt, 0.0)
+                                                    else:
+                                                        size_now = float(size_to_send)
+                                                        commit_used = self._sdiv(size_now * float(px_for_mgmt), lev, 0.0)
 
-                                            if commit_used is None or commit_used <= 0:
-                                                # végső fallback: marad az eredeti commit_usdt
-                                                commit_used = float(commit_usdt)
+                                                    # Padlózás
+                                                    size_now = self._mb_floor_to_step_dec(size_now, float(ls_now or 0.0))
 
-                                            # --- Fee becslés / tényleges ---
-                                            _fee_rate = self._mb_get_taker_fee()
-                                            _fee_open_est = self._mb_est_fee_quote(entry_px, size_now, _fee_rate)
+                                                if not commit_used or commit_used <= 0:
+                                                    commit_used = float(commit_usdt)
 
-                                            fee_open_actual = float(fee_open_actual or 0.0)
-                                            _fee_for_pnl = fee_open_actual if fee_open_actual > 0.0 else _fee_open_est
+                                                # Fee és PnL becslés
+                                                _fee_rate = self._mb_get_taker_fee()
+                                                _fee_est = self._mb_est_fee_quote(entry_px, size_now, _fee_rate)
+                                                fee_act = float(fee_open_actual or 0.0)
+                                                _fee_final = fee_act if fee_act > 0 else _fee_est
 
-                                            # --- PnL becslés: egységes árlekérdezés ---
-                                            pnl_est = None
-                                            try:
-                                                # Ár lekérdezése: WS → cache → REST
-                                                rt_now = self.get_best_price(symbol)
+                                                pnl_est = None
+                                                try:
+                                                    rt_now = self.get_best_price(symbol)
+                                                    if self._is_pos_num(rt_now) and rt_now > 0:
+                                                        gross = (rt_now - entry_px) * size_now * (1 if is_buy else -1)
+                                                        pnl_est = gross - float(_fee_final)
+                                                except: pass
 
-                                                if self._is_pos_num(rt_now) and rt_now > 0:
-                                                    gross = (rt_now - entry_px) * size_now * \
-                                                            (1 if combined_sig == 'buy' else -1)
-                                                    pnl_est = gross - float(_fee_for_pnl)
-                                            except Exception:
-                                                pass
+                                                # History
+                                                self._mb_hist_add_open(
+                                                    order_id=str(order_key),
+                                                    side=combined_sig, entry=entry_px,
+                                                    size=size_now, lev=lev, fee=float(_fee_final),
+                                                    pnl_est=pnl_est
+                                                )
 
-                                            # History: fee = tényleges, ha elérhető, különben a becsült
-                                            self._mb_hist_add_open(
-                                                order_id=str(order_key),
-                                                side=combined_sig, entry=entry_px,
-                                                size=size_now,
-                                                lev=lev, fee=float(_fee_for_pnl),
-                                                pnl_est=pnl_est
-                                            )
+                                                # SIM tükrözés
+                                                _open_sim(
+                                                    combined_sig, entry_px, size_now, commit_used,
+                                                    atr_pack=atr_pack_arg,
+                                                    fixed_pack=fixed_pack_arg,
+                                                    fee_open_actual_override=fee_act,
+                                                    fee_reserved_override=_fee_final,
+                                                    oid=str(order_key),
+                                                    symbol_for_pos=symbol
+                                                )
+                                                opened = True
 
-                                            # SIM pool/pozíció: commit_used + fee_open_actual/becslés
-                                            _open_sim(
-                                                combined_sig, entry_px,
-                                                size_now, commit_used,
-                                                atr_pack=(mul_sl, mul_tp1, mul_tp2, mul_tr, atr_val) if (use_atr and atr_val is not None) else None,
-                                                fixed_pack=(tpct, spct, trpct) if use_fixed else None,
-                                                fee_open_actual_override=fee_open_actual if fee_open_actual > 0.0 else 0.0,
-                                                fee_reserved_override=_fee_for_pnl,
-                                                oid=str(order_key),
-                                                symbol_for_pos=symbol,
-                                            )
-                                            opened = True
-
-                                    except Exception as e:
-                                        self._safe_log(f"❌ LIVE order hiba: {e}\n")
+                                        except Exception as e:
+                                            self._safe_log(f"❌ LIVE order hiba: {e}\n")
+                                            opened = False
 
                             if opened:
                                 self._mb_last_cross_ts = now
-                                self._mb_last_signal   = combined_sig
+                                self._mb_last_signal = combined_sig
 
                     # --- TF-hez igazított alvás, websocket-tel gyorsítva ---  ### WS-SLEEP
                     if getattr(self, "_ticker_ws", None) is not None:
