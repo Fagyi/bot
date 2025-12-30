@@ -7403,6 +7403,15 @@ class CryptoBotApp:
                 if last_px >= sl_px: return True
             return False
 
+        # --- OPTIMALIZÁCIÓ: Market steps egyszeri lekérése a ciklus előtt ---
+        try:
+            _pre_cfg = _load_cfg()
+            _init_symbol = _pre_cfg.symbol
+            _ms_init = self._mb_get_market_steps(_init_symbol)
+            lot_step, price_step, min_base, min_funds, quote_step = _ms_init
+        except Exception:
+            lot_step = price_step = min_base = min_funds = quote_step = 0.0
+
         try:
             while self._mb_running:
                 try:
@@ -8224,7 +8233,6 @@ class CryptoBotApp:
 
                         # KERET: teljes szabad pool – a %-ot _mb_compute_size fogja alkalmazni
                         max_quote_for_trade = free_pool
-                        lot_step, price_step, min_base, min_funds, quote_step = self._mb_get_market_steps(symbol)
 
                         if max_quote_for_trade <= 0.0:
                             self._safe_log("ℹ️ Nincs szabad pool a nyitáshoz (keret limit). Kimarad.\n")
