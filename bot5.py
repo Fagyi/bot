@@ -4370,8 +4370,12 @@ class CryptoBotApp:
         ttk.Button(cfg_btns, text="Betöltés (Config)", command=self._load_cfg_from_file).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         # ====== HALADÓ BEÁLLÍTÁSOK (adv): Z-score -> Cooldown ======
-
-        z_box = ttk.Labelframe(adv, text="Z-score beállítások", padding=6)
+        z_title_lbl = ttk.Label(
+            adv, 
+            text="Z-score beállítások", 
+            font=self.bold_font,
+        )
+        z_box = ttk.Labelframe(adv, labelwidget=z_title_lbl, padding=6)
         z_box.grid(row=r_adv, column=0, columnspan=2, sticky="we", pady=(8, 0))
 
         z_row1 = ttk.Frame(z_box)
@@ -4434,7 +4438,12 @@ class CryptoBotApp:
         r_adv += 1
 
         # Bollinger Squeeze beállítások
-        sqz_box = ttk.Labelframe(adv, text="Bollinger Squeeze beállítások", padding=6)
+        sqz_title_lbl = ttk.Label(
+            adv, 
+            text="Bollinger Squeeze beállítások", 
+            font=self.bold_font,
+        )
+        sqz_box = ttk.Labelframe(adv, labelwidget=sqz_title_lbl, padding=6)
         sqz_box.grid(row=r_adv, column=0, columnspan=2, sticky="we", pady=(8, 0))
 
         sqz_row1 = ttk.Frame(sqz_box)
@@ -4469,7 +4478,13 @@ class CryptoBotApp:
         r_adv += 1
 
         # Supertrend beállítások (Stratégia / Filter)
-        st_box = ttk.Labelframe(adv, text="Supertrend (Stratégia / Filter)", padding=6)
+        st_title_lbl = ttk.Label(
+            adv, 
+            text="Supertrend (Stratégia / Filter)", 
+            font=self.bold_font,
+        )
+
+        st_box = ttk.Labelframe(adv, labelwidget=st_title_lbl, padding=6)
         st_box.grid(row=r_adv, column=0, columnspan=2, sticky="we", pady=(8, 0))
 
         st_row1 = ttk.Frame(st_box)
@@ -4498,7 +4513,13 @@ class CryptoBotApp:
         r_adv += 1
 
         # Fix SL / TP / Trailing – opcionális (ATR nélkül)
-        fixed_box = ttk.Labelframe(adv, text="Fix SL / TP / Trailing (ATR nélkül)", padding=6)
+        fixed_title_lbl = ttk.Label(
+            adv, 
+            text="Fix SL / TP / Trailing (ATR nélkül)", 
+            font=self.bold_font,
+        )
+
+        fixed_box = ttk.Labelframe(adv, labelwidget=fixed_title_lbl, padding=6)
         fixed_box.grid(row=r_adv, column=0, columnspan=2, sticky="we", pady=(8, 0))
         fixed_row1 = ttk.Frame(fixed_box)
         fixed_row1.pack(anchor="w")
@@ -4531,7 +4552,13 @@ class CryptoBotApp:
         r_adv += 1
 
         # LIVE kitörés / shock (intra-bar)
-        live_box = ttk.Labelframe(adv, text="LIVE kitörés / shock (intra-bar)", padding=6)
+        live_title_lbl = ttk.Label(
+            adv, 
+            text="LIVE kitörés / shock (intra-bar", 
+            font=self.bold_font,
+        )
+
+        live_box = ttk.Labelframe(adv, labelwidget=live_title_lbl, padding=6)
         live_box.grid(row=r_adv, column=0, columnspan=2, sticky="we", pady=(8, 0))
         live_row1 = ttk.Frame(live_box)
         live_row1.pack(anchor="w")
@@ -4564,7 +4591,13 @@ class CryptoBotApp:
         r_adv += 1
 
         # Breakout (kitörés)
-        brk_box = ttk.Labelframe(adv, text="Breakout (kitörés)", padding=6)
+        brk_title_lbl = ttk.Label(
+            adv, 
+            text="Breakout (kitörés)", 
+            font=self.bold_font,
+        )
+
+        brk_box = ttk.Labelframe(adv, labelwidget=brk_title_lbl, padding=6)
         brk_box.grid(row=r_adv, column=0, columnspan=2, sticky="we", pady=(8, 0))
         brk_row1 = ttk.Frame(brk_box)
         brk_row1.pack(anchor="w")
@@ -4598,7 +4631,13 @@ class CryptoBotApp:
         r_adv += 1
 
         # RSI szűrő
-        rsi_box = ttk.Labelframe(adv, text="RSI szűrő", padding=6)
+        rsi_title_lbl = ttk.Label(
+            adv, 
+            text="RSI szűrő", 
+            font=self.bold_font,
+        )
+
+        rsi_box = ttk.Labelframe(adv, labelwidget=rsi_title_lbl, padding=6)
         rsi_box.grid(row=r_adv, column=0, columnspan=2, sticky="we", pady=(8, 0))
 
         rsi_row1 = ttk.Frame(rsi_box)
@@ -4644,7 +4683,13 @@ class CryptoBotApp:
         r_adv += 1
 
         # ADX trend szűrő
-        adx_box = ttk.Labelframe(adv, text="ADX trend szűrő (oldalazás ellen)", padding=6)
+        adx_title_lbl = ttk.Label(
+            adv, 
+            text="ADX trend szűrő (oldalazás ellen)", 
+            font=self.bold_font,
+        )
+
+        adx_box = ttk.Labelframe(adv, labelwidget=adx_title_lbl, padding=6)
         adx_box.grid(row=r_adv, column=0, columnspan=2, sticky="we", pady=(8, 0))
         adx_row = ttk.Frame(adx_box)
         adx_row.pack(anchor="w")
@@ -4673,7 +4718,12 @@ class CryptoBotApp:
         self._mb_toggle_adx_widgets()
 
         # HTF trend filter
-        htf_box = ttk.Labelframe(adv, text="HTF trend filter (EMA alapú)", padding=6)
+        htf_title_lbl = ttk.Label(
+            adv, 
+            text="HTF trend filter (EMA alapú)", 
+            font=self.bold_font,
+        )
+        htf_box = ttk.Labelframe(adv, labelwidget=htf_title_lbl, padding=6)
         htf_box.grid(row=r_adv, column=0, columnspan=2, sticky="we", pady=(8, 0))
         htf_row = ttk.Frame(htf_box)
         htf_row.pack(anchor="w")
@@ -4698,7 +4748,13 @@ class CryptoBotApp:
         r_adv += 1
 
         # ATR menedzsment
-        atr_box = ttk.Labelframe(adv, text="ATR alapú menedzsment (TP1/TP2 + trailing)", padding=6)
+        atr_title_lbl = ttk.Label(
+            adv, 
+            text="ATR alapú menedzsment (TP1/TP2 + trailing)", 
+            font=self.bold_font,
+        )
+
+        atr_box = ttk.Labelframe(adv, labelwidget=atr_title_lbl, padding=6)
         atr_box.grid(row=r_adv, column=0, columnspan=2, sticky="we", pady=(8, 0))
 
         atr_row1 = ttk.Frame(atr_box)
@@ -4747,7 +4803,7 @@ class CryptoBotApp:
         r_adv += 1
 
         # Cooldown
-        ttk.Label(adv, text="Cooldown (s)").grid(row=r_adv, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(adv, text="Cooldown (s)", font=self.bold_font).grid(row=r_adv, column=0, sticky="w", pady=(8, 0))
         self.mb_cooldown_s = ttk.Spinbox(adv, from_=1, to=600, width=8)
         self.mb_cooldown_s.delete(0, tk.END)
         self.mb_cooldown_s.insert(0, "10")
