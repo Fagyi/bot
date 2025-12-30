@@ -52,6 +52,7 @@
   "max_open": 3,
   "pause_new": false,
   "auto_borrow": true,
+  "allow_short": true,
   "invert_ema": false,
   "ema_hyst_pct": 0.0,
   "dup_tol_pct": 0.5,
