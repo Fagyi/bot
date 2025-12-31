@@ -2042,7 +2042,7 @@ class CryptoBotApp:
         amt_frame.grid_columnconfigure(0, weight=1)  # Entry nyúlik
         amt_frame.grid_columnconfigure(1, weight=0)  # Gomb fix
 
-        self.ent_tr_amt = ttk.Entry(amt_frame, textvariable=self.var_tr_amt)
+        self.ent_tr_amt = ttk.Entry(amt_frame, textvariable=self.var_tr_amt, width=14)
         self.ent_tr_amt.grid(row=0, column=0, sticky="ew", padx=(0, 6))
 
         def _set_max_amount():
@@ -2090,7 +2090,7 @@ class CryptoBotApp:
         self.lbl_tr_pair = ttk.Label(tf, text="Pár")
         self.lbl_tr_pair.grid(row=4, column=0, sticky="w", pady=(0, 8))
 
-        self.cmb_tr_pair = ttk.Combobox(tf, state="readonly",
+        self.cmb_tr_pair = ttk.Combobox(tf, state="readonly", width=14,
                                         values=getattr(self, "symbols", []),
                                         textvariable=self.var_tr_pair)
         self.cmb_tr_pair.grid(row=4, column=1, sticky="ew", pady=(0, 8))
