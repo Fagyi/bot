@@ -1769,74 +1769,8 @@ class CryptoBotApp:
         self.txt_positions = scrolledtext.ScrolledText(spf, wrap=tk.WORD, height=12)
         self.txt_positions.pack(fill=tk.BOTH, expand=True, pady=(6,0))
 
-        # === Funds / Átvezetés ===
-        # Modernizált fül: fentről lefelé: Egyenlegek táblázat, Átvezetési vezérlők, Log
-        self.tab_funds = ttk.Frame(self.nb); self.nb.add(self.tab_funds, text="Funds / Átvezetés")
-
-        # 1. Balances View (Összesített egyenleg táblázat)
-        bf = ttk.Labelframe(self.tab_funds, text="Összesített egyenlegek (Main, Trade, Cross, Isolated)", padding=10)
-        bf.pack(fill=tk.X, padx=10, pady=(10, 5))
-
-        # Oszlopok definíciója: Deviza, Számla típusa, Elérhető, Tartott, **Bevétel(USD)**, Kötelezettség, Összesen, **PNL(USD)**, Pár
-        cols = ("currency", "account_type", "available", "holds", "value_usd", "liability", "total", "pnl", "symbol")
-        self.tbl_funds_bal = ttk.Treeview(bf, columns=cols, show='headings', height=10)
-
-        # Fejlécek és oszlopszélességek beállítása
-        self.tbl_funds_bal.heading("currency",     text="Deviza");    self.tbl_funds_bal.column("currency", width=70, anchor='center')
-        self.tbl_funds_bal.heading("account_type", text="Számla");     self.tbl_funds_bal.column("account_type", width=90, anchor='center')
-        self.tbl_funds_bal.heading("available",    text="Elérhető");    self.tbl_funds_bal.column("available", width=140, anchor='e')
-        self.tbl_funds_bal.heading("holds",        text="Tartott");     self.tbl_funds_bal.column("holds", width=140, anchor='e')
-        self.tbl_funds_bal.heading("value_usd",    text="Bevétel (USD)"); self.tbl_funds_bal.column("value_usd", width=140, anchor='e', stretch=tk.NO) # ÚJ
-        self.tbl_funds_bal.heading("liability",    text="Kötelezettség"); self.tbl_funds_bal.column("liability", width=140, anchor='e')
-        self.tbl_funds_bal.heading("total",        text="Nettó Összesen");    self.tbl_funds_bal.column("total", width=140, anchor='e')
-        self.tbl_funds_bal.heading("pnl",          text="PNL (USD)");       self.tbl_funds_bal.column("pnl", width=100, anchor='e', stretch=tk.NO) # ÚJ
-        self.tbl_funds_bal.heading("symbol",       text="Pár");         self.tbl_funds_bal.column("symbol", width=90, anchor='center')
-        self.tbl_funds_bal.pack(fill=tk.BOTH, expand=False, pady=(0, 5))
-
-        # Frissítő gomb
-        btn_refresh = ttk.Button(bf, text="Összes egyenleg frissítése", command=self.refresh_all_funds_balances)
-        btn_refresh.pack(pady=5)
-
-        # Margin "beragadt" kötelezettségek célzott rendezése
-        btn_repay = ttk.Button(
-            bf,
-            text="Beragadt margin kötelezettségek rendezése",
-            command=self.repay_stuck_margin
-        )
-        btn_repay.pack(pady=(0, 5))
-
-        # 2. Transfers (Átvezetési vezérlők, a régi logika megtartásával)
-        ff = ttk.Labelframe(self.tab_funds, text="Átvezetés", padding=10); ff.pack(fill=tk.X, padx=10, pady=5)
-
-        # Spot Main <-> Trade
-        ttk.Label(ff, text="Spot belső (Main ⇄ Trade)").grid(row=0, column=0, sticky="w")
-        self.f_spot_ccy = ttk.Entry(ff, width=10); self.f_spot_ccy.insert(0, "USDT"); self.f_spot_ccy.grid(row=0, column=1, padx=6)
-        self.f_spot_amt = ttk.Entry(ff, width=10); self.f_spot_amt.insert(0, "10"); self.f_spot_amt.grid(row=0, column=2, padx=6)
-        ttk.Button(ff, text="Main → Trade", command=lambda: self._do_spot_transfer("main","trade")).grid(row=0, column=3, padx=4)
-        ttk.Button(ff, text="Trade → Main", command=lambda: self._do_spot_transfer("trade","main")).grid(row=0, column=4, padx=4)
-
-        # Cross margin
-        ttk.Label(ff, text="Cross ⇄ Spot").grid(row=1, column=0, sticky="w", pady=(8,0))
-        self.f_cross_ccy = ttk.Entry(ff, width=10); self.f_cross_ccy.insert(0, "USDT"); self.f_cross_ccy.grid(row=1, column=1, padx=6, pady=(8,0))
-        self.f_cross_amt = ttk.Entry(ff, width=10); self.f_cross_amt.insert(0, "10"); self.f_cross_amt.grid(row=1, column=2, padx=6, pady=(8,0))
-        ttk.Button(ff, text="Spot → Cross", command=lambda: self._do_cross_transfer("in")).grid(row=1, column=3, padx=4, pady=(8,0))
-        ttk.Button(ff, text="Cross → Spot", command=lambda: self._do_cross_transfer("out")).grid(row=1, column=4, padx=4, pady=(8,0))
-
-        # Isolated margin
-        ttk.Label(ff, text="Isolated ⇄ Spot (pár + deviza)").grid(row=2, column=0, sticky="w", pady=(8,0))
-        self.f_iso_sym = ttk.Combobox(ff, values=self.symbols, width=18, state='readonly'); self.f_iso_sym.set(DEFAULT_SYMBOL)
-        self.f_iso_sym.grid(row=2, column=1, padx=6, pady=(8,0))
-        self.f_iso_ccy = ttk.Entry(ff, width=10); self.f_iso_ccy.insert(0, "USDT"); self.f_iso_ccy.grid(row=2, column=2, padx=6, pady=(8,0))
-        self.f_iso_amt = ttk.Entry(ff, width=10); self.f_iso_amt.insert(0, "10"); self.f_iso_amt.grid(row=2, column=3, padx=6, pady=(8,0))
-        # Isolated Margin Átvezetés gombjai (két 'in' gomb a forrás kiválasztásához)
-        ttk.Button(ff, text="Main → Isolated", command=lambda: self._do_isolated_transfer("in", "MAIN")).grid(row=2, column=4, padx=4, pady=(8,0))
-        ttk.Button(ff, text="Trade → Isolated", command=lambda: self._do_isolated_transfer("in")).grid(row=2, column=5, padx=4, pady=(8,0))
-        # Isolated -> Spot gomb
-        ttk.Button(ff, text="Isolated → Spot", command=lambda: self._do_isolated_transfer("out")).grid(row=2, column=6, padx=4, pady=(8,0))
-
-        # 3. Funds log (Log terület a fül alján)
-        self.funds_log = scrolledtext.ScrolledText(self.tab_funds, wrap=tk.WORD, height=8)
-        self.funds_log.pack(fill=tk.BOTH, expand=True, padx=10, pady=(5,10))
+        # === Funds / Átvezetés (ÚJ LAYOUT) ===
+        self._build_funds_tab()
 
         # === Margin Trade (modern ticket) ===
         self.tab_margin = ttk.Frame(self.nb); self.nb.add(self.tab_margin, text="Margin Trade")
@@ -1982,6 +1916,305 @@ class CryptoBotApp:
             print("Ticker WS init hiba az __init__-ben:", e)
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def _build_funds_tab(self):
+        """Funds tab új layout: Bal oldalon táblázat, Jobb oldalon Transfer Wizard, Alul Log."""
+        self.tab_funds = ttk.Frame(self.nb)
+        self.nb.add(self.tab_funds, text="Funds / Átvezetés")
+
+        # Root grid
+        self.tab_funds.grid_rowconfigure(0, weight=1)   # top (balances + transfer)
+        self.tab_funds.grid_rowconfigure(1, weight=1)   # log
+        self.tab_funds.grid_columnconfigure(0, weight=1)
+
+        top = ttk.Frame(self.tab_funds)
+        top.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 5))
+        top.grid_columnconfigure(0, weight=3)  # balances
+        top.grid_columnconfigure(1, weight=1)  # transfer
+        top.grid_rowconfigure(0, weight=1)
+
+        # -----------------------------
+        # LEFT: Balances (table + actions)
+        # -----------------------------
+        bf = ttk.Labelframe(top, text="Összesített egyenlegek (Main, Trade, Cross, Isolated)", padding=10)
+        bf.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        bf.grid_rowconfigure(1, weight=1)
+        bf.grid_columnconfigure(0, weight=1)
+
+        # Action bar (gombok + last update)
+        bal_actions = ttk.Frame(bf)
+        bal_actions.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        bal_actions.grid_columnconfigure(0, weight=1)
+        bal_actions.grid_columnconfigure(1, weight=0)
+        bal_actions.grid_columnconfigure(2, weight=0)
+        bal_actions.grid_columnconfigure(3, weight=0)
+
+        self.lbl_funds_last_update = ttk.Label(bal_actions, text="Utolsó frissítés: —")
+        self.lbl_funds_last_update.grid(row=0, column=0, sticky="w")
+
+        btn_refresh = ttk.Button(bal_actions, text="Frissítés", command=self.refresh_all_funds_balances)
+        btn_refresh.grid(row=0, column=1, padx=(8, 0))
+
+        btn_repay = ttk.Button(bal_actions, text="Beragadt kötelezettségek rendezése", command=self.repay_stuck_margin)
+        btn_repay.grid(row=0, column=2, padx=(8, 0))
+
+        # Treeview + scrollbar
+        cols = ("currency", "account_type", "available", "holds", "value_usd", "liability", "total", "pnl", "symbol")
+        tbl_wrap = ttk.Frame(bf)
+        tbl_wrap.grid(row=1, column=0, sticky="nsew")
+        tbl_wrap.grid_rowconfigure(0, weight=1)
+        tbl_wrap.grid_columnconfigure(0, weight=1)
+
+        self.tbl_funds_bal = ttk.Treeview(tbl_wrap, columns=cols, show="headings", height=12)
+        vsb = ttk.Scrollbar(tbl_wrap, orient="vertical", command=self.tbl_funds_bal.yview)
+        self.tbl_funds_bal.configure(yscrollcommand=vsb.set)
+
+        self.tbl_funds_bal.heading("currency",     text="Deviza");         self.tbl_funds_bal.column("currency", width=70, anchor="center")
+        self.tbl_funds_bal.heading("account_type", text="Számla");         self.tbl_funds_bal.column("account_type", width=90, anchor="center")
+        self.tbl_funds_bal.heading("available",    text="Elérhető");       self.tbl_funds_bal.column("available", width=140, anchor="e")
+        self.tbl_funds_bal.heading("holds",        text="Tartott");        self.tbl_funds_bal.column("holds", width=140, anchor="e")
+        self.tbl_funds_bal.heading("value_usd",    text="Érték (USD)");    self.tbl_funds_bal.column("value_usd", width=140, anchor="e", stretch=tk.NO)
+        self.tbl_funds_bal.heading("liability",    text="Kötelezettség");  self.tbl_funds_bal.column("liability", width=140, anchor="e")
+        self.tbl_funds_bal.heading("total",        text="Nettó Összesen"); self.tbl_funds_bal.column("total", width=140, anchor="e")
+        self.tbl_funds_bal.heading("pnl",          text="PNL (USD)");      self.tbl_funds_bal.column("pnl", width=110, anchor="e", stretch=tk.NO)
+        self.tbl_funds_bal.heading("symbol",       text="Pár");            self.tbl_funds_bal.column("symbol", width=90, anchor="center")
+
+        self.tbl_funds_bal.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+
+        # -----------------------------
+        # RIGHT: Transfer Wizard
+        # -----------------------------
+        tf = ttk.Labelframe(top, text="Átvezetés (Wizard)", padding=10)
+        tf.grid(row=0, column=1, sticky="nsew")
+        tf.grid_columnconfigure(0, weight=0)
+        tf.grid_columnconfigure(1, weight=1)
+
+        # Wizard vars
+        self.var_tr_from = tk.StringVar(value="Main")
+        self.var_tr_to = tk.StringVar(value="Trade")
+        self.var_tr_ccy = tk.StringVar(value="USDT")
+        self.var_tr_amt = tk.StringVar(value="10")
+        self.var_tr_pair = tk.StringVar(value=DEFAULT_SYMBOL if "DEFAULT_SYMBOL" in globals() else "")
+
+        # Helper: show/hide Pair row if Isolated involved
+        def on_from_to_change(*_):
+            from_acc = (self.var_tr_from.get() or "").strip().lower()
+            to_acc = (self.var_tr_to.get() or "").strip().lower()
+            needs_pair = (from_acc == "isolated") or (to_acc == "isolated")
+
+            if needs_pair:
+                self.lbl_tr_pair.grid()
+                self.cmb_tr_pair.grid()
+            else:
+                self.lbl_tr_pair.grid_remove()
+                self.cmb_tr_pair.grid_remove()
+
+        # Bind changes
+        self.var_tr_from.trace_add("write", on_from_to_change)
+        self.var_tr_to.trace_add("write", on_from_to_change)
+
+        # Row 0: From
+        ttk.Label(tf, text="Honnan").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        self.cmb_tr_from = ttk.Combobox(tf, state="readonly", width=14,
+                                        values=["Main", "Trade", "Cross", "Isolated"],
+                                        textvariable=self.var_tr_from)
+        self.cmb_tr_from.grid(row=0, column=1, sticky="ew", pady=(0, 6))
+
+        # Row 1: To
+        ttk.Label(tf, text="Hová").grid(row=1, column=0, sticky="w", pady=(0, 6))
+        self.cmb_tr_to = ttk.Combobox(tf, state="readonly", width=14,
+                                      values=["Main", "Trade", "Cross", "Isolated"],
+                                      textvariable=self.var_tr_to)
+        self.cmb_tr_to.grid(row=1, column=1, sticky="ew", pady=(0, 6))
+
+        # Row 2: Asset
+        ttk.Label(tf, text="Deviza").grid(row=2, column=0, sticky="w", pady=(0, 6))
+        self.ent_tr_ccy = ttk.Entry(tf, textvariable=self.var_tr_ccy, width=14)
+        self.ent_tr_ccy.grid(row=2, column=1, sticky="ew", pady=(0, 6))
+
+        # Row 3: Amount + Max
+        # Szerkezet: Label balra (col 0), Frame jobbra (col 1), benne Entry + Button
+        ttk.Label(tf, text="Összeg").grid(row=3, column=0, sticky="w", pady=(0, 6))
+
+        amt_frame = ttk.Frame(tf)
+        amt_frame.grid(row=3, column=1, sticky="ew", pady=(0, 6))
+        amt_frame.grid_columnconfigure(0, weight=1)  # Entry nyúlik
+        amt_frame.grid_columnconfigure(1, weight=0)  # Gomb fix
+
+        self.ent_tr_amt = ttk.Entry(amt_frame, textvariable=self.var_tr_amt, width=9)
+        self.ent_tr_amt.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+
+        def _set_max_amount():
+            ccy = (self.var_tr_ccy.get() or "").strip().upper()
+            if not ccy:
+                return
+
+            from_acc = (self.var_tr_from.get() or "").strip().lower()
+            pair = (self.var_tr_pair.get() or "").strip().upper()
+
+            try:
+                cache = getattr(self, "_balance_cache", None) or {}
+                avail = None
+
+                if from_acc in ("main", "trade"):
+                    node = ((cache.get("spot") or {}).get(ccy) or {}).get(from_acc)
+                    if node and isinstance(node, dict):
+                        avail = float(node.get("avail") or 0.0)
+
+                elif from_acc == "cross":
+                    node = (cache.get("cross") or {}).get(ccy)
+                    if node and isinstance(node, dict):
+                        avail = float(node.get("avail") or 0.0)
+
+                elif from_acc == "isolated":
+                    iso = (cache.get("isolated") or {}).get(pair)
+                    if iso and isinstance(iso, dict):
+                        base = iso.get("base") or {}
+                        quote = iso.get("quote") or {}
+                        if (base.get("ccy") or "").upper() == ccy:
+                            avail = float(base.get("avail") or 0.0)
+                        elif (quote.get("ccy") or "").upper() == ccy:
+                            avail = float(quote.get("avail") or 0.0)
+
+                if avail is not None and avail > 0:
+                    # konzervatív: 8 tized, de ne kerekítsen felfelé
+                    self.var_tr_amt.set(f"{avail:.8f}".rstrip("0").rstrip("."))
+            except Exception:
+                return
+
+        ttk.Button(amt_frame, text="Max", command=_set_max_amount).grid(row=0, column=1, sticky="e")
+
+        # Row 4: Pair (only if Isolated involved)
+        # Közvetlenül a tf rácsába, így nem csúszik el a címke
+        self.lbl_tr_pair = ttk.Label(tf, text="Pár")
+        self.lbl_tr_pair.grid(row=4, column=0, sticky="w", pady=(0, 8))
+
+        self.cmb_tr_pair = ttk.Combobox(tf, state="readonly", width=14,
+                                        values=getattr(self, "symbols", []),
+                                        textvariable=self.var_tr_pair)
+        self.cmb_tr_pair.grid(row=4, column=1, sticky="ew", pady=(0, 8))
+
+        # Initial hide/show
+        on_from_to_change()
+
+        # Preview label
+        self.lbl_tr_preview = ttk.Label(tf, text="Transfer: —", wraplength=280, justify="left")
+        self.lbl_tr_preview.grid(row=5, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        def _update_preview(*_):
+            ccy = (self.var_tr_ccy.get() or "").strip().upper()
+            amt = (self.var_tr_amt.get() or "").strip()
+            f = (self.var_tr_from.get() or "").strip()
+            t = (self.var_tr_to.get() or "").strip()
+            pair = (self.var_tr_pair.get() or "").strip().upper()
+            if (f.lower() == "isolated") or (t.lower() == "isolated"):
+                self.lbl_tr_preview.config(text=f"Transfer: {amt} {ccy} | {f} → {t} | {pair}")
+            else:
+                self.lbl_tr_preview.config(text=f"Transfer: {amt} {ccy} | {f} → {t}")
+
+        self.var_tr_from.trace_add("write", _update_preview)
+        self.var_tr_to.trace_add("write", _update_preview)
+        self.var_tr_ccy.trace_add("write", _update_preview)
+        self.var_tr_amt.trace_add("write", _update_preview)
+        self.var_tr_pair.trace_add("write", _update_preview)
+        _update_preview()
+
+        # do_transfer: calls the refactored _do_* functions with explicit args
+        def do_transfer():
+            if self.public_mode.get():
+                messagebox.showwarning("Privát mód szükséges", "Kapcsold ki a publikus módot és állítsd be az API kulcsokat.")
+                return
+
+            from_acc = (self.var_tr_from.get() or "").strip().lower()
+            to_acc = (self.var_tr_to.get() or "").strip().lower()
+            ccy = (self.var_tr_ccy.get() or "").strip().upper()
+
+            try:
+                amt = float(self.var_tr_amt.get())
+                if amt <= 0:
+                    raise ValueError
+            except Exception:
+                messagebox.showerror("Hiba", "Érvénytelen összeg.")
+                return
+
+            if not ccy:
+                messagebox.showerror("Hiba", "Hiányzó deviza (pl. USDT).")
+                return
+
+            needs_pair = (from_acc == "isolated") or (to_acc == "isolated")
+            pair = ""
+            if needs_pair:
+                pair = (self.var_tr_pair.get() or "").strip()
+                if not pair:
+                    messagebox.showerror("Hiba", "Isolated átvezetéshez kötelező a pár kiválasztása.")
+                    return
+
+            # ROUTING:
+            # Main/Trade = spot internal
+            if from_acc in ("main", "trade") and to_acc in ("main", "trade"):
+                self._do_spot_transfer(from_acc, to_acc, ccy=ccy, amt=amt)
+                return
+
+            # Spot <-> Cross routing
+            if (from_acc in ("main", "trade")) and (to_acc == "cross"):
+                # spot -> cross == "in"
+                self._do_cross_transfer("in", ccy=ccy, amt=amt)
+                return
+
+            if (from_acc == "cross") and (to_acc in ("main", "trade")):
+                # cross -> spot == "out"
+                self._do_cross_transfer("out", ccy=ccy, amt=amt)
+                return
+
+            # Spot <-> Isolated routing
+            if (from_acc in ("main", "trade")) and (to_acc == "isolated"):
+                # isolated transfer supports direction "in"
+                # spot_account parameter: allow MAIN if from_acc is main
+                spot_account = "MAIN" if from_acc == "main" else "TRADE"
+                self._do_isolated_transfer("in", spot_account=spot_account, sym=pair, ccy=ccy, amt=amt)
+                return
+
+            if (from_acc == "isolated") and (to_acc in ("main", "trade")):
+                # isolated -> spot
+                self._do_isolated_transfer("out", sym=pair, ccy=ccy, amt=amt)
+                return
+
+            messagebox.showerror("Nem támogatott", f"Ez az átvezetési útvonal nincs kezelve: {from_acc} → {to_acc}")
+
+        # Primary action button
+        btn_do = ttk.Button(tf, text="Átvezetés", command=do_transfer)
+        btn_do.grid(row=6, column=0, columnspan=2, sticky="ew")
+
+        # Presets (fill wizard only)
+        preset_box = ttk.Labelframe(tf, text="Gyors beállítások", padding=8)
+        preset_box.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        preset_box.grid_columnconfigure(0, weight=1)
+        preset_box.grid_columnconfigure(1, weight=1)
+
+        def _preset(f, t, ccy="USDT", amt="10"):
+            self.var_tr_from.set(f)
+            self.var_tr_to.set(t)
+            self.var_tr_ccy.set(ccy)
+            self.var_tr_amt.set(amt)
+
+        ttk.Button(preset_box, text="Main → Trade", command=lambda: _preset("Main", "Trade")).grid(row=0, column=0, sticky="ew", padx=(0, 6), pady=(0, 6))
+        ttk.Button(preset_box, text="Trade → Main", command=lambda: _preset("Trade", "Main")).grid(row=0, column=1, sticky="ew", pady=(0, 6))
+        ttk.Button(preset_box, text="Trade → Cross", command=lambda: _preset("Trade", "Cross")).grid(row=1, column=0, sticky="ew", padx=(0, 6), pady=(0, 6))
+        ttk.Button(preset_box, text="Cross → Trade", command=lambda: _preset("Cross", "Trade")).grid(row=1, column=1, sticky="ew", pady=(0, 6))
+        ttk.Button(preset_box, text="Trade → Isolated", command=lambda: _preset("Trade", "Isolated")).grid(row=2, column=0, sticky="ew", padx=(0, 6))
+        ttk.Button(preset_box, text="Main → Isolated", command=lambda: _preset("Main", "Isolated")).grid(row=2, column=1, sticky="ew")
+
+        # -----------------------------
+        # BOTTOM: Funds log
+        # -----------------------------
+        logf = ttk.Labelframe(self.tab_funds, text="Log", padding=8)
+        logf.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        logf.grid_rowconfigure(0, weight=1)
+        logf.grid_columnconfigure(0, weight=1)
+
+        self.funds_log = scrolledtext.ScrolledText(logf, wrap=tk.WORD, height=8)
+        self.funds_log.grid(row=0, column=0, sticky="nsew")
 
     def _init_styles(self):
         self.style = ttk.Style(self.root)
@@ -2348,11 +2581,20 @@ class CryptoBotApp:
                     for r in records
                 ]
 
+                # ÚJ: timestamp
+                ts_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                def _update_ts():
+                    lbl = getattr(self, "lbl_funds_last_update", None)
+                    if lbl:
+                         lbl.configure(text=f"Utolsó frissítés: {ts_str}")
+
                 self.root.after(
                     0,
                     lambda: (
                         self._update_funds_balance_table(final_rows),
                         self._mb_refresh_available(),
+                        _update_ts()
                     ),
                 )
 
@@ -2408,8 +2650,19 @@ class CryptoBotApp:
         """
         Alkalmazza a self.symbols listát az összes Comboboxra, ami a __init__-ben jött létre.
         """
-        # Hozzáadtuk az mb_symbol-t (Margin Bot)
-        for cb in (self.e_symbol, self.trade_symbol, self.cross_symbol, self.mt_symbol, self.mb_symbol, self.f_iso_sym):
+        # Hozzáadtuk az mb_symbol-t (Margin Bot) és a cmb_tr_pair-t (Transfer Wizard)
+        # f_iso_sym eltávolítva (régi widget)
+        widgets = [
+            getattr(self, "e_symbol", None),
+            getattr(self, "trade_symbol", None),
+            getattr(self, "cross_symbol", None),
+            getattr(self, "mt_symbol", None),
+            getattr(self, "mb_symbol", None),
+            getattr(self, "cmb_tr_pair", None),  # Új wizard widget
+        ]
+        
+        for cb in widgets:
+            if cb is None: continue
             try:
                 cb.configure(values=self.symbols)
                 # ha a jelenlegi érték nem normalizált, próbáljuk megmenteni
@@ -4035,16 +4288,28 @@ class CryptoBotApp:
         threading.Thread(target=worker, daemon=True).start()
 
     # ---- Funds actions ----
-    def _do_spot_transfer(self, from_type: str, to_type: str):
+    def _do_spot_transfer(self, from_type: str, to_type: str, ccy: str = None, amt: float = None):
         if self.public_mode.get():
             messagebox.showwarning("Privát mód szükséges", "Kapcsold ki a publikus módot és állítsd be az API kulcsokat.")
             return
-        ccy = self.f_spot_ccy.get().strip().upper()
+
+        # Fallback régi widgetekre
+        if ccy is None and hasattr(self, 'f_spot_ccy'):
+            ccy = self.f_spot_ccy.get().strip().upper()
+        if amt is None and hasattr(self, 'f_spot_amt'):
+            try:
+                amt = float(self.f_spot_amt.get())
+            except:
+                pass
+
+        if not ccy:
+            messagebox.showerror("Hiba", "Hiányzó deviza."); return
         try:
-            amt = float(self.f_spot_amt.get())
-            if amt <= 0: raise ValueError
+            if amt is None or float(amt) <= 0: raise ValueError
+            amt = float(amt)
         except Exception:
             messagebox.showerror("Hiba", "Érvénytelen összeg."); return
+
         def worker():
             try:
                 with self._ex_lock:
@@ -4057,13 +4322,24 @@ class CryptoBotApp:
                                                 messagebox.showerror("Transfer hiba", str(e))])
         threading.Thread(target=worker, daemon=True).start()
 
-    def _do_cross_transfer(self, direction: str):
+    def _do_cross_transfer(self, direction: str, ccy: str = None, amt: float = None):
         if self.public_mode.get():
             messagebox.showwarning("Privát mód szükséges", "Kapcsold ki a publikus módot és állítsd be az API kulcsokat.")
             return
-        ccy = self.f_cross_ccy.get().strip().upper()
+
+        if ccy is None and hasattr(self, 'f_cross_ccy'):
+            ccy = self.f_cross_ccy.get().strip().upper()
+        if amt is None and hasattr(self, 'f_cross_amt'):
+            try:
+                amt = float(self.f_cross_amt.get())
+            except:
+                pass
+
+        if not ccy:
+            messagebox.showerror("Hiba", "Hiányzó deviza."); return
         try:
-            amt = float(self.f_cross_amt.get()); assert amt > 0
+            if amt is None or float(amt) <= 0: raise ValueError
+            amt = float(amt)
         except Exception:
             messagebox.showerror("Hiba", "Érvénytelen összeg."); return
 
@@ -4083,14 +4359,31 @@ class CryptoBotApp:
                 ])
         threading.Thread(target=worker, daemon=True).start()
 
-    def _do_isolated_transfer(self, direction: str, spot_account: str = "TRADE"):
+    def _do_isolated_transfer(self, direction: str, spot_account: str = "TRADE", sym: str = None, ccy: str = None, amt: float = None):
         if self.public_mode.get():
             messagebox.showwarning("Privát mód szükséges", "Kapcsold ki a publikus módot és állítsd be az API kulcsokat.")
             return
-        sym = normalize_symbol(self.f_iso_sym.get())
-        ccy = self.f_iso_ccy.get().strip().upper()
+
+        if sym is None and hasattr(self, 'f_iso_sym'):
+            sym = normalize_symbol(self.f_iso_sym.get())
+        else:
+            sym = normalize_symbol(sym)
+            
+        if ccy is None and hasattr(self, 'f_iso_ccy'):
+            ccy = self.f_iso_ccy.get().strip().upper()
+        if amt is None and hasattr(self, 'f_iso_amt'):
+            try:
+                amt = float(self.f_iso_amt.get())
+            except:
+                pass
+        
+        if not sym:
+             messagebox.showerror("Hiba", "Hiányzó szimbólum."); return
+        if not ccy:
+             messagebox.showerror("Hiba", "Hiányzó deviza."); return
         try:
-            amt = float(self.f_iso_amt.get()); assert amt > 0
+            if amt is None or float(amt) <= 0: raise ValueError
+            amt = float(amt)
         except Exception:
             messagebox.showerror("Hiba", "Érvénytelen összeg."); return
 
