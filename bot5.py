@@ -2004,9 +2004,11 @@ class CryptoBotApp:
             needs_pair = (from_acc == "isolated") or (to_acc == "isolated")
 
             if needs_pair:
-                self.tr_pair_row.grid()
+                self.lbl_tr_pair.grid()
+                self.cmb_tr_pair.grid()
             else:
-                self.tr_pair_row.grid_remove()
+                self.lbl_tr_pair.grid_remove()
+                self.cmb_tr_pair.grid_remove()
 
         # Bind changes
         self.var_tr_from.trace_add("write", on_from_to_change)
@@ -2032,13 +2034,16 @@ class CryptoBotApp:
         self.ent_tr_ccy.grid(row=2, column=1, sticky="ew", pady=(0, 6))
 
         # Row 3: Amount + Max
-        amt_row = ttk.Frame(tf)
-        amt_row.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 6))
-        amt_row.grid_columnconfigure(1, weight=1)
-        ttk.Label(amt_row, text="Összeg").grid(row=0, column=0, sticky="w")
+        # Szerkezet: Label balra (col 0), Frame jobbra (col 1), benne Entry + Button
+        ttk.Label(tf, text="Összeg").grid(row=3, column=0, sticky="w", pady=(0, 6))
 
-        self.ent_tr_amt = ttk.Entry(amt_row, textvariable=self.var_tr_amt, width=14)
-        self.ent_tr_amt.grid(row=0, column=1, sticky="ew", padx=(8, 8))
+        amt_frame = ttk.Frame(tf)
+        amt_frame.grid(row=3, column=1, sticky="ew", pady=(0, 6))
+        amt_frame.grid_columnconfigure(0, weight=1)  # Entry nyúlik
+        amt_frame.grid_columnconfigure(1, weight=0)  # Gomb fix
+
+        self.ent_tr_amt = ttk.Entry(amt_frame, textvariable=self.var_tr_amt)
+        self.ent_tr_amt.grid(row=0, column=0, sticky="ew", padx=(0, 6))
 
         def _set_max_amount():
             ccy = (self.var_tr_ccy.get() or "").strip().upper()
@@ -2078,18 +2083,17 @@ class CryptoBotApp:
             except Exception:
                 return
 
-        ttk.Button(amt_row, text="Max", command=_set_max_amount).grid(row=0, column=2, sticky="e")
+        ttk.Button(amt_frame, text="Max", command=_set_max_amount).grid(row=0, column=1, sticky="e")
 
         # Row 4: Pair (only if Isolated involved)
-        self.tr_pair_row = ttk.Frame(tf)
-        self.tr_pair_row.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, 8))
-        self.tr_pair_row.grid_columnconfigure(1, weight=1)
+        # Közvetlenül a tf rácsába, így nem csúszik el a címke
+        self.lbl_tr_pair = ttk.Label(tf, text="Pár")
+        self.lbl_tr_pair.grid(row=4, column=0, sticky="w", pady=(0, 8))
 
-        ttk.Label(self.tr_pair_row, text="Pár").grid(row=0, column=0, sticky="w")
-        self.cmb_tr_pair = ttk.Combobox(self.tr_pair_row, state="readonly",
+        self.cmb_tr_pair = ttk.Combobox(tf, state="readonly",
                                         values=getattr(self, "symbols", []),
                                         textvariable=self.var_tr_pair)
-        self.cmb_tr_pair.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        self.cmb_tr_pair.grid(row=4, column=1, sticky="ew", pady=(0, 8))
 
         # Initial hide/show
         on_from_to_change()
