@@ -2090,7 +2090,7 @@ class CryptoBotApp:
         self.lbl_tr_pair = ttk.Label(tf, text="Pár")
         self.lbl_tr_pair.grid(row=4, column=0, sticky="w", pady=(0, 8))
 
-        self.cmb_tr_pair = ttk.Combobox(tf, state="readonly", width=14,
+        self.cmb_tr_pair = ttk.Combobox(tf, state="readonly", width=10,
                                         values=getattr(self, "symbols", []),
                                         textvariable=self.var_tr_pair)
         self.cmb_tr_pair.grid(row=4, column=1, sticky="ew", pady=(0, 8))
