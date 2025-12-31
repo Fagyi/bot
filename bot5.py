@@ -5242,8 +5242,28 @@ class CryptoBotApp:
             fa     = int(self.mb_ma_fast.get())
             slw    = int(self.mb_ma_slow.get())
 
+            # Bollinger
+            try:
+                sqz_len = int(getattr(self, "mb_sqz_len", tk.IntVar(value=20)).get())
+                bb_mult = float(getattr(self, "mb_sqz_bb_mult", tk.DoubleVar(value=2.0)).get())
+            except Exception:
+                sqz_len, bb_mult = 20, 2.0
+
+            # Supertrend
+            try:
+                st_per = int(getattr(self, "mb_st_period", tk.IntVar(value=10)).get())
+                st_mul = float(getattr(self, "mb_st_mult", tk.DoubleVar(value=3.0)).get())
+            except Exception:
+                st_per, st_mul = 10, 3.0
+
+            # ADX
+            try:
+                adx_len = int(getattr(self, "mb_adx_len", tk.IntVar(value=14)).get())
+            except Exception:
+                adx_len = 14
+
             # --- OHLCV lekérés paraméterei ---
-            limit = max(lookback, slw + 5)
+            limit = max(lookback, slw + 5, sqz_len + 5, st_per + 5, adx_len * 2)
 
             # --- WORKER: csak adatlekérés, MEHET háttérszálba ---
             def worker():
@@ -5290,6 +5310,52 @@ class CryptoBotApp:
                     # --- EMA-k ---
                     ema_f = close_for_ema.ewm(span=fa, adjust=False).mean()
                     ema_s = close_for_ema.ewm(span=slw, adjust=False).mean()
+
+                    # --- Bollinger Bands ---
+                    bb_up_s, bb_dn_s = None, None
+                    try:
+                        basis = close_for_ema.rolling(sqz_len).mean()
+                        dev = close_for_ema.rolling(sqz_len).std()
+                        bb_up_s = basis + bb_mult * dev
+                        bb_dn_s = basis - bb_mult * dev
+                    except Exception:
+                        pass
+
+                    # --- Supertrend ---
+                    st_line_s = None
+                    try:
+                        # Supertrend helper returns (trend_series, line_series)
+                        _, st_line_s = self._mb_supertrend(df, period=st_per, multiplier=st_mul)
+                    except Exception:
+                        pass
+
+                    # --- ADX (teljes Series számítás) ---
+                    # Inline logika az _mb_adx mintájára, de visszatér a Series-szel
+                    adx_series = None
+                    try:
+                        high_s = df['h'].astype(float)
+                        low_s  = df['l'].astype(float)
+                        close_s= df['c'].astype(float)
+
+                        up = high_s.diff()
+                        down = -low_s.diff()
+                        plus_dm = up.where((up > down) & (up > 0), 0.0)
+                        minus_dm = down.where((down > up) & (down > 0), 0.0)
+
+                        tr1 = (high_s - low_s).abs()
+                        tr2 = (high_s - close_s.shift(1)).abs()
+                        tr3 = (low_s  - close_s.shift(1)).abs()
+                        tr  = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+                        atr_s = self._rma(tr, adx_len)
+                        pdi_s = 100 * (self._rma(plus_dm, adx_len) / atr_s)
+                        mdi_s = 100 * (self._rma(minus_dm, adx_len) / atr_s)
+                        dx_s  = 100 * (pdi_s - mdi_s).abs() / (pdi_s + mdi_s)
+                        adx_s = self._rma(dx_s, adx_len)
+
+                        adx_series = pd.Series(adx_s.values, index=df.index)
+                    except Exception:
+                        pass
 
                     # --- RSI (bot-féle, stabil eleje + vége) ---
                     try:
@@ -5345,33 +5411,65 @@ class CryptoBotApp:
                     # --- Rajzolás (MINDEN Tk / mpl CSAK ITT, FŐSZÁLON!) ---
                     self.mb_ax.clear()
 
-                    (line_close,) = self.mb_ax.plot(df["dt"], close_for_ema, label="Close")
-                    (line_ema_f,) = self.mb_ax.plot(df["dt"], ema_f, label=f"EMA({fa})")
-                    (line_ema_s,) = self.mb_ax.plot(df["dt"], ema_s, label=f"EMA({slw})")
+                    # Árfolyam + EMA
+                    (line_close,) = self.mb_ax.plot(df["dt"], close_for_ema, label="Close", linewidth=1.0)
+                    (line_ema_f,) = self.mb_ax.plot(df["dt"], ema_f, label=f"EMA({fa})", linewidth=1.0)
+                    (line_ema_s,) = self.mb_ax.plot(df["dt"], ema_s, label=f"EMA({slw})", linewidth=1.0)
 
+                    # Bollinger Bands
+                    line_bb = None
+                    if bb_up_s is not None and bb_dn_s is not None:
+                        # Csak a széleket rajzoljuk vékony szaggatottal
+                        l_bb_u, = self.mb_ax.plot(df["dt"], bb_up_s, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
+                        self.mb_ax.plot(df["dt"], bb_dn_s, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
+                        # Opcionális kitöltés (ha nem túl zavaró)
+                        # self.mb_ax.fill_between(df["dt"], bb_up_s, bb_dn_s, color="gray", alpha=0.05)
+                        line_bb = l_bb_u
+                        line_bb.set_label(f"BB({sqz_len},{bb_mult})")
+
+                    # Supertrend
+                    line_st = None
+                    if st_line_s is not None:
+                        # Egyszerű magenta vonal a Supertrendnek
+                        (line_st,) = self.mb_ax.plot(df["dt"], st_line_s, color="magenta", linewidth=1.2, label=f"ST({st_per},{st_mul})")
+
+                    # RSI + ADX tengely
                     if getattr(self, "mb_rsi_ax", None) is None:
                         self.mb_rsi_ax = self.mb_ax.twinx()
                     else:
                         self.mb_rsi_ax.clear()
 
+                    line_rsi = None
+                    line_adx = None
+
+                    # RSI Rajz
                     if rsi_plot is not None:
-                        (line_rsi,) = self.mb_rsi_ax.plot(df["dt"], rsi_plot, alpha=0.3, label="RSI")
-                        self.mb_rsi_ax.set_ylim(0, 100)
-                        self.mb_rsi_ax.axhline(30, linestyle="--", alpha=0.2)
-                        self.mb_rsi_ax.axhline(70, linestyle="--", alpha=0.2)
-                        self.mb_rsi_ax.set_yticks([])
-                    else:
-                        line_rsi = None
+                        (line_rsi,) = self.mb_rsi_ax.plot(df["dt"], rsi_plot, color="tab:blue", alpha=0.4, linewidth=1.2, label="RSI")
+
+                    # ADX Rajz (ugyanarra a 0-100 tengelyre)
+                    if adx_series is not None:
+                        (line_adx,) = self.mb_rsi_ax.plot(df["dt"], adx_series, color="orange", alpha=0.6, linewidth=1.2, label=f"ADX({adx_len})")
+
+                    # RSI/ADX skála beállítások
+                    self.mb_rsi_ax.set_ylim(0, 100)
+                    self.mb_rsi_ax.axhline(30, linestyle=":", color="tab:blue", alpha=0.3)
+                    self.mb_rsi_ax.axhline(70, linestyle=":", color="tab:blue", alpha=0.3)
+                    self.mb_rsi_ax.axhline(25, linestyle="-", color="orange", alpha=0.3, linewidth=0.8) # ADX szint
+                    self.mb_rsi_ax.set_yticks([]) # Nem kell skála felirat, hogy ne zavarjon
 
                     self.mb_ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
                     self.mb_ax.set_title(symbol + " • " + tf)
                     self.mb_ax.grid(True, alpha=0.25)
 
+                    # Legend összeállítása
                     handles = [line_close, line_ema_f, line_ema_s]
-                    if line_rsi is not None:
-                        handles.append(line_rsi)
+                    if line_bb: handles.append(line_bb)
+                    if line_st: handles.append(line_st)
+                    if line_rsi: handles.append(line_rsi)
+                    if line_adx: handles.append(line_adx)
+
                     labels = [h.get_label() for h in handles]
-                    self.mb_ax.legend(handles, labels, loc="lower left", fontsize="small")
+                    self.mb_ax.legend(handles, labels, loc="lower left", fontsize="x-small")
 
                     self.mb_canvas.draw_idle()
 
