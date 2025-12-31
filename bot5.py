@@ -1011,11 +1011,14 @@ class KucoinSDKWrapper:
         self._http.headers.update({"User-Agent": "kucoin-bot/1.2"})
         self._timeout = (4, 8)
 
-        # Keys
-        self._api_key = os.getenv('KUCOIN_KEY', '')
-        self._api_secret = os.getenv('KUCOIN_SECRET', '')
-        self._api_passphrase = os.getenv('KUCOIN_PASSPHRASE', '')
-        self._api_key_version = os.getenv('KUCOIN_KEY_VERSION', '2')
+        # Keys (automatikus tisztítás a whitespace-ektől)
+        self._api_key = (os.getenv('KUCOIN_KEY') or '').strip()
+        self._api_secret = (os.getenv('KUCOIN_SECRET') or '').strip()
+        self._api_passphrase = (os.getenv('KUCOIN_PASSPHRASE') or '').strip()
+        self._api_key_version = (os.getenv('KUCOIN_KEY_VERSION') or '2').strip()
+
+        if not self.public_mode:
+            self._check_server_time()
 
         # SDK objects (optional)
         self._client = None
@@ -1063,6 +1066,24 @@ class KucoinSDKWrapper:
         # Price cache
         self._price_cache = {}
         self._price_ttl = 3.0
+
+    def _check_server_time(self):
+        """
+        Ellenőrzi a rendszeridő és a KuCoin szerveridő közötti eltérést.
+        Ha nagy az eltérés (>2s), figyelmeztetést logol.
+        """
+        try:
+            r = self._http.get("https://api.kucoin.com/api/v1/timestamp", timeout=5)
+            # 200 OK esetén is lehet hibaüzenet, de public endpointnál ritka
+            if r.status_code == 200:
+                data = r.json().get('data', 0)
+                server_ts_ms = int(data)
+                local_ts_ms = int(time.time() * 1000)
+                diff = abs(server_ts_ms - local_ts_ms)
+                if diff > 2000:
+                    self._log(f"⚠️ IDŐSZINKRON HIBA: A rendszeróra {diff} ms-t tér el a KuCoin szervertől! Ez 400-as hibákat okozhat.")
+        except Exception as e:
+            self._log(f"⚠️ Időszinkron ellenőrzés sikertelen: {e}")
 
     # --- DECIMAL HELPEREK KUCOIN AMOUNT/PRICE FORMÁZÁSHOZ ---
     def _dec_floor(self, x, step: Decimal | None = None) -> Decimal:
@@ -1168,22 +1189,33 @@ class KucoinSDKWrapper:
     def _rest_get(self, path: str, params: Optional[dict] = None):
         base = "https://api.kucoin.com"
         params = params or {}
-        # public vs signed auto
-        is_public_market = path.startswith("/api/v1/market/")
-        if is_public_market:
-            r = self._http.get(base + path, params=params, timeout=self._timeout)
+
+        try:
+            # public vs signed auto
+            is_public_market = path.startswith("/api/v1/market/")
+            if is_public_market:
+                r = self._http.get(base + path, params=params, timeout=self._timeout)
+            elif path.startswith("/api/"):
+                self._ensure_keys()
+                q = urlencode(params)
+                headers = self._rest_sign_headers("GET", path, q, "")
+                r = self._http.get(base + path, params=params, headers=headers, timeout=self._timeout)
+            else:
+                r = self._http.get(base + path, params=params, timeout=self._timeout)
+
             r.raise_for_status()
             return r.json()
-        if path.startswith("/api/"):
-            self._ensure_keys()
-            q = urlencode(params)
-            headers = self._rest_sign_headers("GET", path, q, "")
-            r = self._http.get(base + path, params=params, headers=headers, timeout=self._timeout)
-            r.raise_for_status()
-            return r.json()
-        r = self._http.get(base + path, params=params, timeout=self._timeout)
-        r.raise_for_status()
-        return r.json()
+        except requests.RequestException as e:
+            # Részletes hibaüzenet (body) kinyerése
+            err_msg = str(e)
+            if e.response is not None:
+                try:
+                    err_text = e.response.text
+                    err_msg += f" | Server Response: {err_text}"
+                except Exception:
+                    pass
+            # Újradobjuk a bővített üzenettel
+            raise RuntimeError(err_msg) from e
 
     def _rest_post(self, path: str, body: dict) -> dict:
         """
@@ -1200,10 +1232,21 @@ class KucoinSDKWrapper:
         # A meglévő aláíró logikát hívjuk, body-val
         headers = self._rest_sign_headers("POST", path, "", payload_json)
 
-        # Az osztály meglévő session-jét használjuk
-        r = self._http.post(url, data=payload_json, headers=headers, timeout=self._timeout)
-        r.raise_for_status()
-        return r.json() if r.text else {}
+        try:
+            # Az osztály meglévő session-jét használjuk
+            r = self._http.post(url, data=payload_json, headers=headers, timeout=self._timeout)
+            r.raise_for_status()
+            return r.json() if r.text else {}
+        except requests.RequestException as e:
+            # Részletes hibaüzenet (body) kinyerése
+            err_msg = str(e)
+            if e.response is not None:
+                try:
+                    err_text = e.response.text
+                    err_msg += f" | Server Response: {err_text}"
+                except Exception:
+                    pass
+            raise RuntimeError(err_msg) from e
 
     def universal_transfer(self,
                            currency: str,
