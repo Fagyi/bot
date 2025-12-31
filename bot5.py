@@ -1427,9 +1427,12 @@ class KucoinSDKWrapper:
         return out
 
     # ----- Margin accountok -----
-    def fetch_isolated_accounts(self) -> Any:
+    def fetch_isolated_accounts(self, symbol: Optional[str] = None) -> Any:
         if self.public_mode: raise RuntimeError("Privát mód szükséges (isolated).")
-        return self._rest_get("/api/v3/isolated/accounts")
+        params = {}
+        if symbol:
+            params["symbol"] = normalize_symbol(symbol)
+        return self._rest_get("/api/v3/isolated/accounts", params=params)
 
     def fetch_cross_accounts(self) -> Any:
         if self.public_mode: raise RuntimeError("Privát mód szükséges (cross).")
@@ -5206,7 +5209,8 @@ class CryptoBotApp:
 
                 if mode == "isolated":
                     with self._ex_lock:
-                        resp = self.exchange.fetch_isolated_accounts()
+                        # Célzott lekérés a 'sym' paraméterrel
+                        resp = self.exchange.fetch_isolated_accounts(symbol=sym)
                         idata = resp.get("data", {}) if isinstance(resp, dict) else getattr(resp, "data", {}) or {}
                         assets = idata.get("assets", []) or []
 
