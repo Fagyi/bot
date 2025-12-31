@@ -2358,12 +2358,12 @@ class CryptoBotApp:
 
             except RuntimeError as e:
                 self.root.after(
-                    0, lambda: messagebox.showwarning("Privát hívás hiba", str(e))
+                    0, lambda e=e: messagebox.showwarning("Privát hívás hiba", str(e))
                 )
             except Exception as e:
                 self.root.after(
                     0,
-                    lambda: messagebox.showerror(
+                    lambda e=e: messagebox.showerror(
                         "Hiba", f"Hiba az egyenlegek frissítésekor: {e}"
                     ),
                 )
@@ -3089,7 +3089,7 @@ class CryptoBotApp:
             self.root.after(0, update_ui)
 
         except Exception as e:
-            self.root.after(0, lambda: [
+            self.root.after(0, lambda e=e: [
                 messagebox.showerror("Hiba", f"Nem sikerült az adatok lekérdezése: {e}"),
                 self.root.config(cursor="")
             ])
@@ -3335,7 +3335,7 @@ class CryptoBotApp:
                 self.root.after(0, ok_ui)
 
             except Exception as e:
-                self.root.after(0, lambda: [
+                self.root.after(0, lambda e=e: [
                     self.margin_log.insert(tk.END, f"❌ Margin order hiba: {e}\n"),
                     self.margin_log.see(tk.END),
                     messagebox.showerror("Margin order hiba", str(e))
@@ -5520,7 +5520,7 @@ class CryptoBotApp:
                 self.root.after(0, self.refresh_all_funds_balances)
 
             except Exception as e:
-                self.root.after(0, lambda: messagebox.showerror("Repay hiba", str(e)))
+                self.root.after(0, lambda e=e: messagebox.showerror("Repay hiba", str(e)))
 
         threading.Thread(target=worker, daemon=True).start()
 
