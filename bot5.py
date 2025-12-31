@@ -6156,85 +6156,95 @@ class CryptoBotApp:
             if hasattr(self, "_mb_last_rt_px"):
                 self._mb_last_rt_px = {}
 
-            # 2. ÚJ RÉSZ: Pozíciók betöltése DB-ből
+            # 2. ÚJ RÉSZ: Pozíciók betöltése DB-ből (CSAK ÉLES MÓDBAN!)
             used_capital = 0.0
+
+            # Ellenőrizzük a Dry Run állapotát a GUI változóból (biztonságos getterrel is lehetne, de mb_dry tk.BooleanVar)
             try:
-                open_trades = self.db.get_open_positions()
-                restored_count = 0
+                is_dry = bool(self.mb_dry.get())
+            except Exception:
+                is_dry = True
 
-                # A betöltés előtt olvassuk ki a jelenlegi párt a GUI-ból
-                current_symbol_norm = normalize_symbol(self.mb_symbol.get())
+            if not is_dry:
+                try:
+                    open_trades = self.db.get_open_positions()
+                    restored_count = 0
 
-                for pos in open_trades:
-                    # BIZTONSÁGI SZŰRÉS: csak az aktuális párral egyezőeket vesszük fel
-                    db_symbol = normalize_symbol(pos.get('symbol', ''))
+                    # A betöltés előtt olvassuk ki a jelenlegi párt a GUI-ból
+                    current_symbol_norm = normalize_symbol(self.mb_symbol.get())
 
-                    if db_symbol != current_symbol_norm:
+                    for pos in open_trades:
+                        # BIZTONSÁGI SZŰRÉS: csak az aktuális párral egyezőeket vesszük fel
+                        db_symbol = normalize_symbol(pos.get('symbol', ''))
+
+                        if db_symbol != current_symbol_norm:
+                            self._safe_log(
+                                f"⚠️ Eltérő pár a DB-ben ({db_symbol}) vs GUI ({current_symbol_norm}) - pozíció kihagyva.\n"
+                            )
+                            continue
+
+                        side = pos.get('side')
+                        if side == 'buy':
+                            self._sim_pos_long.append(pos)
+                        elif side == 'sell':
+                            self._sim_pos_short.append(pos)
+
+                        # Pool számítás korrekció
+                        commit = float(pos.get('commit_usdt', 0.0))
+                        fee_res = float(pos.get('fee_reserved', 0.0))
+                        used_capital += (commit + fee_res)
+                        restored_count += 1
+
+                        # --- GUI History frissítése a visszaállított pozíciókkal ---
+                        try:
+                            # 1) Leverage becslés (ha nincs tárolva)
+                            p_size   = float(pos.get('size', 0.0))
+                            p_entry  = float(pos.get('entry', 0.0))
+                            p_commit = float(pos.get('commit_usdt', 0.0))
+
+                            p_lev = 1.0
+                            if p_commit > 0:
+                                # lev = notional / margin
+                                p_lev = (p_size * p_entry) / p_commit
+
+                            # Kerekítés egészre, ha közel van (pl. 9.99 -> 10)
+                            if abs(p_lev - round(p_lev)) < 0.1:
+                                p_lev = float(round(p_lev))
+
+                            # 2) Fee meghatározása (actual > est > reserved)
+                            p_fee = float(pos.get('fee_open_actual', 0.0))
+                            if p_fee <= 0:
+                                p_fee = float(pos.get('fee_open_est', 0.0))
+                            if p_fee <= 0:
+                                p_fee = float(pos.get('fee_reserved', 0.0))
+
+                            # 3) Hozzáadás a history-hoz (PnL még üres/becsült)
+                            # A ts lehet float vagy string, kezeljük rugalmasan
+                            p_ts = pos.get('ts')
+
+                            self._mb_hist_add_open(
+                                order_id=pos.get('oid'),
+                                side=side,
+                                entry=p_entry,
+                                size=p_size,
+                                lev=p_lev,
+                                fee=p_fee,
+                                ts=p_ts,
+                                pnl_est=None # Majd a következő árfrissítésnél kiszámolja
+                            )
+                        except Exception as e:
+                            self._safe_log(f"⚠️ History GUI restore hiba ({pos.get('oid')}): {e}\n")
+
+                    if restored_count:
                         self._safe_log(
-                            f"⚠️ Eltérő pár a DB-ben ({db_symbol}) vs GUI ({current_symbol_norm}) - pozíció kihagyva.\n"
+                            f"♻️ DB-ből visszaállítva: {restored_count} nyitott pozíció ({current_symbol_norm}).\n"
                         )
-                        continue
 
-                    side = pos.get('side')
-                    if side == 'buy':
-                        self._sim_pos_long.append(pos)
-                    elif side == 'sell':
-                        self._sim_pos_short.append(pos)
-
-                    # Pool számítás korrekció
-                    commit = float(pos.get('commit_usdt', 0.0))
-                    fee_res = float(pos.get('fee_reserved', 0.0))
-                    used_capital += (commit + fee_res)
-                    restored_count += 1
-
-                    # --- GUI History frissítése a visszaállított pozíciókkal ---
-                    try:
-                        # 1) Leverage becslés (ha nincs tárolva)
-                        p_size   = float(pos.get('size', 0.0))
-                        p_entry  = float(pos.get('entry', 0.0))
-                        p_commit = float(pos.get('commit_usdt', 0.0))
-
-                        p_lev = 1.0
-                        if p_commit > 0:
-                            # lev = notional / margin
-                            p_lev = (p_size * p_entry) / p_commit
-
-                        # Kerekítés egészre, ha közel van (pl. 9.99 -> 10)
-                        if abs(p_lev - round(p_lev)) < 0.1:
-                            p_lev = float(round(p_lev))
-
-                        # 2) Fee meghatározása (actual > est > reserved)
-                        p_fee = float(pos.get('fee_open_actual', 0.0))
-                        if p_fee <= 0:
-                            p_fee = float(pos.get('fee_open_est', 0.0))
-                        if p_fee <= 0:
-                            p_fee = float(pos.get('fee_reserved', 0.0))
-
-                        # 3) Hozzáadás a history-hoz (PnL még üres/becsült)
-                        # A ts lehet float vagy string, kezeljük rugalmasan
-                        p_ts = pos.get('ts')
-
-                        self._mb_hist_add_open(
-                            order_id=pos.get('oid'),
-                            side=side,
-                            entry=p_entry,
-                            size=p_size,
-                            lev=p_lev,
-                            fee=p_fee,
-                            ts=p_ts,
-                            pnl_est=None # Majd a következő árfrissítésnél kiszámolja
-                        )
-                    except Exception as e:
-                        self._safe_log(f"⚠️ History GUI restore hiba ({pos.get('oid')}): {e}\n")
-
-                if restored_count:
-                    self._safe_log(
-                        f"♻️ DB-ből visszaállítva: {restored_count} nyitott pozíció ({current_symbol_norm}).\n"
-                    )
-
-            except Exception as e:
-                self._safe_log(f"❌ Hiba a DB betöltésekor: {e}\n")
-                used_capital = 0.0  # Fallback
+                except Exception as e:
+                    self._safe_log(f"❌ Hiba a DB betöltésekor: {e}\n")
+                    used_capital = 0.0  # Fallback
+            else:
+                self._safe_log("ℹ️ Dry Run mód aktív – DB visszaállítás átugorva.\n")
 
             # belső állapotok, ha hiányoznának
             if not hasattr(self, "_sim_pnl_usdt"):
