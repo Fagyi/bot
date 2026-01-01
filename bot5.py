@@ -10353,7 +10353,11 @@ class CryptoBotApp:
             if not is_mb_running:
                 return True
 
+            lng = 0
+            sht = 0
             open_positions_exist = False
+
+            # Lock biztonságos kezelése
             lock = getattr(self, "_mb_lock", None)
             if lock:
                 with lock:
@@ -10362,24 +10366,42 @@ class CryptoBotApp:
                     if lng + sht > 0:
                         open_positions_exist = True
 
+            # Debug log a nyomkövetéshez
+            if open_positions_exist:
+                self._safe_log(f"❓ Stop intent check: fut={is_mb_running}, open={lng+sht} (L={lng}, S={sht}). Dialog indítása...\n")
+
             if not open_positions_exist:
                 return True
 
             # Kérdés a felhasználóhoz
+            # action_label formázása manuálisan, capitalize nélkül a biztonság kedvéért
+            lbl_cap = action_label[0].upper() + action_label[1:] if action_label else ""
+
             ans = messagebox.askyesnocancel(
                 title="Megerősítés",
-                message=f"A Margin Bot fut és vannak nyitott pozíciók.\n\n"
+                message=f"A Margin Bot fut és vannak nyitott pozíciók ({lng+sht} db).\n\n"
                         f"IGEN: Pozíciók zárása és {action_label}\n"
-                        f"NEM: {action_label.capitalize()} pozíciók zárása nélkül (nyitva maradnak!)\n"
-                        f"MÉGSE: Vissza"
+                        f"NEM: {lbl_cap} pozíciók zárása nélkül (nyitva maradnak!)\n"
+                        f"MÉGSE: Vissza",
+                parent=self.root
             )
+
+            self._safe_log(f"❓ User válasz: {ans}\n")
 
             if ans is None: return None
             return bool(ans) # True/False
 
         except Exception as e:
-            self._safe_log(f"⚠️ Hiba stop/exit ellenőrzéskor: {e}\n")
-            return True
+            err_msg = f"⚠️ Hiba stop/exit ellenőrzéskor: {e}"
+            self._safe_log(f"{err_msg}\n")
+            print(err_msg) # Console-ra is
+            # Hiba esetén inkább NE zárjunk automatikusan, hogy elkerüljük a véletlen zárást
+            # De megpróbálhatunk egy error dialogot dobni
+            try:
+                messagebox.showerror("Hiba", f"Nem sikerült megjeleníteni a megerősítő ablakot:\n{e}\nA folyamat megszakadt.", parent=self.root)
+            except:
+                pass
+            return None # Megszakítjuk a folyamatot (Cancel) a biztonság kedvéért
 
     def _on_mb_stop_btn_click(self):
         """A 'Stop bot' gomb eseménykezelője."""
