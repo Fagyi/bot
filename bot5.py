@@ -3723,12 +3723,20 @@ class CryptoBotApp:
                         ohlcv = self._mb_get_ohlcv(p_symbol, p_tf, limit=200)
                     except Exception as _e:
                         ohlcv = []
-                        self.log(f"❌ tick_once OHLCV hiba: {_e}\n")
+                        # Itt csak logolunk, a következő if not ohlcv kezeli a kilépést
+                        try:
+                            self.log(f"❌ tick_once OHLCV hiba: {_e}\n")
+                        except Exception:
+                            pass
 
                     if not ohlcv:
                         def _no_data():
-                            self.log("⚠ Nincs adat a szervertől.\n")
-                            self._tick_busy = False
+                            try:
+                                self.log("⚠ Nincs adat a szervertől.\n")
+                            except Exception:
+                                pass
+                            finally:
+                                self._tick_busy = False
                         self.root.after(0, _no_data)
                         return
 
@@ -3752,6 +3760,11 @@ class CryptoBotApp:
                             f"short={last['short']:.6f}, long={last['long']:.6f}\n"
                         )
                         self.draw_chart(df, p_symbol, p_tf)
+                    except Exception as e:
+                        try:
+                            self.log(f"❌ UI update hiba: {e}\n")
+                        except Exception:
+                            pass
                     finally:
                         self._tick_busy = False
 
@@ -3759,15 +3772,27 @@ class CryptoBotApp:
 
             except Exception as e:
                 def _err():
-                    self.log(f"❌ tick_once hiba: {e}\n")
-                    self._tick_busy = False
+                    try:
+                        self.log(f"❌ tick_once hiba: {e}\n")
+                    except Exception:
+                        pass
+                    finally:
+                        self._tick_busy = False
                 self.root.after(0, _err)
 
-        threading.Thread(
-            target=_work,
-            args=(symbol, tf, short, long),
-            daemon=True
-        ).start()
+        try:
+            threading.Thread(
+                target=_work,
+                args=(symbol, tf, short, long),
+                daemon=True
+            ).start()
+        except Exception as e:
+            try:
+                self.log(f"❌ Szál indítási hiba: {e}\n")
+            except Exception:
+                pass
+            finally:
+                self._tick_busy = False
 
     # ---- diagram ----
     def draw_chart(self, df: pd.DataFrame, symbol: str, tf: str):
