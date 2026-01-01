@@ -6702,7 +6702,7 @@ class CryptoBotApp:
         self._mb_thread = threading.Thread(target=_loop, daemon=True)
         self._mb_thread.start()
 
-    def mb_stop(self):
+    def mb_stop(self, close_positions: bool = True):
         """Margin bot leállítása + biztonságos pozíciózárás (SIM/LIVE – egységesen, központi close használatával)."""
         if not getattr(self, "_mb_running", False):
             self._safe_log("ℹ️ A bot nem fut.\n")
@@ -6718,97 +6718,101 @@ class CryptoBotApp:
 
         self._safe_log("⏹️ Bot leállítása folyamatban...\n")
 
+        if not close_positions:
+            self._safe_log("ℹ️ Pozíciók NYITVA maradnak (felhasználói kérésre).\n")
+
         try:
             sym   = normalize_symbol(self._mb_get_str("mb_symbol", self._mb_get_str("mt_symbol", DEFAULT_SYMBOL)))
             dry   = self._mb_get_bool("mb_dry", True)
             lev   = self._mb_get_int("mb_leverage", 10)
             mode  = self._mb_get_str("mb_mode", "isolated")
 
-            # Utolsó ismert élő ár – egységes helperrel: WS → cache → REST
-            last_px = None
-            try:
-                rt = float(self.get_best_price(sym))
-                if self._is_pos_num(rt) and rt > 0:
-                    last_px = rt
-            except Exception:
+            if close_positions:
+                # Utolsó ismert élő ár – egységes helperrel: WS → cache → REST
                 last_px = None
+                try:
+                    rt = float(self.get_best_price(sym))
+                    if self._is_pos_num(rt) and rt > 0:
+                        last_px = rt
+                except Exception:
+                    last_px = None
 
-            if last_px is None or last_px <= 0:
-                self._safe_log("⚠️ Ár lekérés nem sikerült, fallback az entry/peak alapján.\n")
+                if last_px is None or last_px <= 0:
+                    self._safe_log("⚠️ Ár lekérés nem sikerült, fallback az entry/peak alapján.\n")
 
-            # Mindkét oldal zárása egységesen, SNAPSHOT segítségével (race condition elkerülése)
-            for side in ("buy", "sell"):
-                # snapshot a SIM pozíciókról lock alatt
-                with self._mb_lock:
-                    if side == "buy":
-                        snapshot = list(self._sim_pos_long)
-                    else:
-                        snapshot = list(self._sim_pos_short)
-
-                for pos in snapshot:
-                    try:
-                        # ár fallback: last_px -> peak -> entry
-                        px = float(
-                            last_px
-                            if last_px is not None and last_px > 0
-                            else pos.get("peak", pos.get("entry", 0.0))
-                        )
-
-                        close_side = "sell" if side == "buy" else "buy"
-                        self._safe_log(
-                            f"🔻 Pozíció zárása ({close_side.upper()}) @ {px:.6f} | dry={dry}\n"
-                        )
-
-                        if dry:
-                            # SIM: központi záró helperrel (history/pool/fee konzisztensek),
-                            # pos_obj alapján keresi meg az aktuális indexet, így nem zavarja a GUI-s törlés
-                            try:
-                                self._close_sim_by_index(
-                                    side=side,
-                                    idx=-1,
-                                    exit_px=px,
-                                    reason="mb_stop",
-                                    pos_obj=pos,
-                                )
-                            except Exception as e:
-                                self._safe_log(f"⚠️ SIM stop zárás hiba: {e}\n")
-                            continue
-
-                        # LIVE eset – KIZÁRÓLAG a központi _live_close_pos hívódik
-                        ok = False
-                        try:
-                            ok = self._live_close_pos(
-                                side=side,
-                                pos=pos,
-                                close_px=px,
-                                symbol=sym,
-                                mode=mode,
-                                lev=lev,
-                                is_sl_tp=False,
-                                is_manual=True,
-                            )
-                        except Exception as e:
-                            self._safe_log(f"❌ LIVE zárási hiba (stop): {e}\n")
-                            ok = False
-
-                        if ok:
-                            # csak sikeres LIVE zárás után tükörzárunk a SIM-ben
-                            try:
-                                self._close_sim_by_index(
-                                    side=side,
-                                    idx=-1,
-                                    exit_px=px,
-                                    reason="mb_stop",
-                                    pos_obj=pos,
-                                )
-                            except Exception as e:
-                                self._safe_log(f"⚠️ SIM tükrözés hiba (stop): {e}\n")
+                # Mindkét oldal zárása egységesen, SNAPSHOT segítségével (race condition elkerülése)
+                for side in ("buy", "sell"):
+                    # snapshot a SIM pozíciókról lock alatt
+                    with self._mb_lock:
+                        if side == "buy":
+                            snapshot = list(self._sim_pos_long)
                         else:
-                            self._safe_log("❗ LIVE zárás sikertelen – a pozíció nyitva marad.\n")
+                            snapshot = list(self._sim_pos_short)
 
-                    except Exception as e:
-                        self._safe_log(f"❌ Stop loop hiba (side={side}): {e}\n")
-                        continue
+                    for pos in snapshot:
+                        try:
+                            # ár fallback: last_px -> peak -> entry
+                            px = float(
+                                last_px
+                                if last_px is not None and last_px > 0
+                                else pos.get("peak", pos.get("entry", 0.0))
+                            )
+
+                            close_side = "sell" if side == "buy" else "buy"
+                            self._safe_log(
+                                f"🔻 Pozíció zárása ({close_side.upper()}) @ {px:.6f} | dry={dry}\n"
+                            )
+
+                            if dry:
+                                # SIM: központi záró helperrel (history/pool/fee konzisztensek),
+                                # pos_obj alapján keresi meg az aktuális indexet, így nem zavarja a GUI-s törlés
+                                try:
+                                    self._close_sim_by_index(
+                                        side=side,
+                                        idx=-1,
+                                        exit_px=px,
+                                        reason="mb_stop",
+                                        pos_obj=pos,
+                                    )
+                                except Exception as e:
+                                    self._safe_log(f"⚠️ SIM stop zárás hiba: {e}\n")
+                                continue
+
+                            # LIVE eset – KIZÁRÓLAG a központi _live_close_pos hívódik
+                            ok = False
+                            try:
+                                ok = self._live_close_pos(
+                                    side=side,
+                                    pos=pos,
+                                    close_px=px,
+                                    symbol=sym,
+                                    mode=mode,
+                                    lev=lev,
+                                    is_sl_tp=False,
+                                    is_manual=True,
+                                )
+                            except Exception as e:
+                                self._safe_log(f"❌ LIVE zárási hiba (stop): {e}\n")
+                                ok = False
+
+                            if ok:
+                                # csak sikeres LIVE zárás után tükörzárunk a SIM-ben
+                                try:
+                                    self._close_sim_by_index(
+                                        side=side,
+                                        idx=-1,
+                                        exit_px=px,
+                                        reason="mb_stop",
+                                        pos_obj=pos,
+                                    )
+                                except Exception as e:
+                                    self._safe_log(f"⚠️ SIM tükrözés hiba (stop): {e}\n")
+                            else:
+                                self._safe_log("❗ LIVE zárás sikertelen – a pozíció nyitva marad.\n")
+
+                        except Exception as e:
+                            self._safe_log(f"❌ Stop loop hiba (side={side}): {e}\n")
+                            continue
 
             # összegzés (egyszer)
             try:
@@ -10339,12 +10343,53 @@ class CryptoBotApp:
     def on_close(self):
         """
         Piros X-re:
-          1) mindkét bot + WS kulturált leállítása,
-          2) futó frissítések megvárása nem-blokkoló módon,
+          1) Kérdezés, ha van nyitott pozi.
+          2) mindkét bot + WS kulturált leállítása,
           3) végül ablak bezárása.
         """
         if getattr(self, "_closing", False):
             return
+
+        # 0. Lépés: Van-e futó Margin Bot és nyitott pozíció?
+        close_mb_positions = True
+        try:
+            is_mb_running = getattr(self, "_mb_running", False)
+            open_positions_exist = False
+
+            # Lock alatt megnézzük a snapshotokat
+            if is_mb_running:
+                lock = getattr(self, "_mb_lock", None)
+                if lock:
+                    with lock:
+                        lng = len(getattr(self, "_sim_pos_long", []) or [])
+                        sht = len(getattr(self, "_sim_pos_short", []) or [])
+                        if lng + sht > 0:
+                            open_positions_exist = True
+
+            if is_mb_running and open_positions_exist:
+                # Kérdés a felhasználóhoz
+                ans = messagebox.askyesnocancel(
+                    title="Bezárás megerősítése",
+                    message="A Margin Bot fut és vannak nyitott pozíciók.\n\n"
+                            "IGEN: Pozíciók zárása és kilépés\n"
+                            "NEM: Kilépés pozíciók zárása nélkül (nyitva maradnak!)\n"
+                            "MÉGSE: Vissza a programhoz"
+                )
+
+                if ans is None:
+                    # Cancel -> visszatérés
+                    return
+                elif ans is True:
+                    # Yes -> zárjuk őket
+                    close_mb_positions = True
+                else:
+                    # No -> nem zárjuk őket
+                    close_mb_positions = False
+
+        except Exception as e:
+            self._safe_log(f"⚠️ Hiba on_close ellenőrzéskor: {e}\n")
+
+        # Ha idáig eljutottunk, akkor kilépünk
         self._closing = True
         try:
             self._safe_log("🧹 Bezárás kérése – botok leállítása…\n")
@@ -10362,7 +10407,7 @@ class CryptoBotApp:
         try:
             # Margin bot leállítása
             if getattr(self, "_mb_running", False):
-                self.mb_stop()
+                self.mb_stop(close_positions=close_mb_positions)
         except Exception as e:
             try: self._safe_log(f"⚠️ mb_stop hiba: {e}\n")
             except Exception: pass
