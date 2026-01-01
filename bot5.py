@@ -8862,7 +8862,11 @@ class CryptoBotApp:
                                 else:
                                     # Commit újraszámítás a végleges értékekből (szimulációhoz)
                                     if is_buy:
-                                        sz_sim = float(size_to_send) # Sanitizer visszaadja a becsült size-t is
+                                        # Ha funds alapú a buy (market), a size_to_send None lehet
+                                        if size_to_send is not None:
+                                            sz_sim = float(size_to_send)
+                                        else:
+                                            sz_sim = float(funds_to_send) / max(float(px_for_mgmt), 1e-12)
                                         commit_sim = float(funds_to_send) / max(lev, 1)
                                     else:
                                         sz_sim = float(size_to_send)
