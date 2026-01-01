@@ -3684,6 +3684,10 @@ class CryptoBotApp:
         self._tick_busy = True
         self.log("🔄 Frissítés indul…\n")
 
+        # Közös tisztító függvény UI szálon
+        def _finish_tick():
+            self._tick_busy = False
+
         try:
             symbol = normalize_symbol(self.e_symbol.get())
             tf     = self.cb_tf.get().strip()
@@ -3691,7 +3695,7 @@ class CryptoBotApp:
             long   = int(self.e_long.get())
         except Exception as e:
             self.log(f"⚠ Paraméter hiba: {e}\n")
-            self._tick_busy = False
+            _finish_tick()
             return
 
         def _work(p_symbol, p_tf, p_short, p_long):
@@ -3725,18 +3729,15 @@ class CryptoBotApp:
                         ohlcv = []
                         # Itt csak logolunk, a következő if not ohlcv kezeli a kilépést
                         try:
-                            self.log(f"❌ tick_once OHLCV hiba: {_e}\n")
+                            # Log callback
+                            self.root.after(0, lambda: self.log(f"❌ tick_once OHLCV hiba: {_e}\n"))
                         except Exception:
                             pass
 
                     if not ohlcv:
+                        # Log callback
                         def _no_data():
-                            try:
-                                self.log("⚠ Nincs adat a szervertől.\n")
-                            except Exception:
-                                pass
-                            finally:
-                                self._tick_busy = False
+                            self.log("⚠ Nincs adat a szervertől.\n")
                         self.root.after(0, _no_data)
                         return
 
@@ -3765,20 +3766,21 @@ class CryptoBotApp:
                             self.log(f"❌ UI update hiba: {e}\n")
                         except Exception:
                             pass
-                    finally:
-                        self._tick_busy = False
 
                 self.root.after(0, _update_ui)
 
             except Exception as e:
-                def _err():
-                    try:
-                        self.log(f"❌ tick_once hiba: {e}\n")
-                    except Exception:
-                        pass
-                    finally:
-                        self._tick_busy = False
-                self.root.after(0, _err)
+                # Log callback
+                self.root.after(0, lambda: self.log(f"❌ tick_once hiba: {e}\n"))
+
+            finally:
+                # MINDEN esetben meghívjuk a finish-t a main threaden,
+                # az after() FIFO sorrendje miatt ez az UI update után fut le.
+                try:
+                    self.root.after(0, _finish_tick)
+                except Exception:
+                    # Ha már nincs root (bezárás), akkor mindegy
+                    pass
 
         try:
             threading.Thread(
@@ -3791,8 +3793,7 @@ class CryptoBotApp:
                 self.log(f"❌ Szál indítási hiba: {e}\n")
             except Exception:
                 pass
-            finally:
-                self._tick_busy = False
+            _finish_tick()
 
     # ---- diagram ----
     def draw_chart(self, df: pd.DataFrame, symbol: str, tf: str):
