@@ -8221,20 +8221,11 @@ class CryptoBotApp:
                         )
 
                     sig = sig_raw
-                    if use_htf:
-                        if (sig_raw == 'buy' and trend_htf < 0) or (sig_raw == 'sell' and trend_htf > 0):
-                            sig = 'hold'
 
                     rsi_val = None
                     if use_rsi:
                         rsi_series = self._mb_rsi(df_rt['c'], n=rsi_len)
                         rsi_val = float(rsi_series.iloc[-1])
-                        if sig == 'buy':
-                            if not (rsi_bmin <= rsi_val <= rsi_bmax):
-                                sig = 'hold'
-                        elif sig == 'sell':
-                            if not (rsi_smin <= rsi_val <= rsi_smax):
-                                sig = 'hold'
 
                     brk_sig, hh, ll, up_lvl, dn_lvl = ("hold", float("nan"), float("nan"), float("nan"), float("nan"))
                     brk_sig_raw = "hold"
