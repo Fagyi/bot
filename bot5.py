@@ -37,6 +37,7 @@ import ttkbootstrap as tb
 
 # Matplotlib
 import matplotlib
+import matplotlib.pyplot as plt
 matplotlib.use('TkAgg')
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -5107,21 +5108,26 @@ class CryptoBotApp:
         right = ttk.Frame(root)
         right.grid(row=0, column=1, sticky="nsew", padx=(6, 10), pady=10)
         right.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(0, weight=3)  # notebook (history+log)
-        right.grid_rowconfigure(1, weight=2)  # chart
+        right.grid_rowconfigure(0, weight=1)  # A PanedWindow töltse ki az egészet
 
-        # --- Fülrendszer: History + Bot napló ---
-        right_nb = ttk.Notebook(right)
-        right_nb.grid(row=0, column=0, sticky="nsew")
+        # --- Állítható elválasztó (PanedWindow) ---
+        # Ez teszi lehetővé, hogy húzogasd a határt a lista és a chart között
+        self.right_pane = ttk.PanedWindow(right, orient=tk.VERTICAL)
+        self.right_pane.grid(row=0, column=0, sticky="nsew")
 
-        # 1) Trade History (LIVE) fül
+        # 1. Felső rész: Fülrendszer (History + Bot napló)
+        # Nem grid-eljük a 'right'-ba, hanem hozzáadjuk a pane-hez!
+        right_nb = ttk.Notebook(self.right_pane)
+        self.right_pane.add(right_nb, weight=1)  # weight=1: kisebb alapméret
+
+        # --- 1) Trade History (LIVE) fül ---
         tab_hist = ttk.Frame(right_nb)
         right_nb.add(tab_hist, text="Trade History (LIVE)")
         tab_hist.grid_columnconfigure(0, weight=1)
         tab_hist.grid_rowconfigure(0, weight=1)
 
         cols = ("timestamp", "side", "entry", "exit", "size", "lev", "fee", "pnl", "orderId")
-        self._mb_hist_tv = ttk.Treeview(tab_hist, columns=cols, show="headings", height=10)
+        self._mb_hist_tv = ttk.Treeview(tab_hist, columns=cols, show="headings", height=8) # Kisebb alap height, mert a pane nyújtja
         for c, w, text in (
             ("timestamp", 160, "Időbélyeg"),
             ("side", 70, "Irány"),
@@ -5146,7 +5152,7 @@ class CryptoBotApp:
         self._mb_hist_rows_by_oid = {}
         self._mb_hist_tv.bind("<Button-3>", self._mb_hist_on_rclick)
 
-        # PnL-alapú sor-színezés (idempotens)
+        # PnL-alapú sor-színezés
         try:
             self._mb_hist_tv.tag_configure("win", background="#d9ffdb")
             self._mb_hist_tv.tag_configure("loss", background="#ffd9d9")
@@ -5155,18 +5161,22 @@ class CryptoBotApp:
         except Exception:
             pass
 
-        # 2) Bot napló fül
+        # --- 2) Bot napló fül ---
         tab_log = ttk.Frame(right_nb)
         right_nb.add(tab_log, text="Bot napló")
         tab_log.grid_columnconfigure(0, weight=1)
         tab_log.grid_rowconfigure(0, weight=1)
-        self.mb_log = scrolledtext.ScrolledText(tab_log, wrap=tk.WORD)
+        self.mb_log = scrolledtext.ScrolledText(tab_log, wrap=tk.WORD, height=8)
         self.mb_log.grid(row=0, column=0, sticky="nsew")
 
-        # --- Mini-diagram az aktuális párról (Dashboardhoz hasonló) ---
-        ch_box = ttk.Labelframe(right, text="Diagram (aktuális pár)", padding=6)
-        ch_box.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
-        self.mb_fig = Figure(figsize=(6, 2.4), dpi=100)
+        # 2. Alsó rész: Mini-diagram
+        # Labelframe létrehozása, de nem grid-eljük, hanem add() a pane-hez
+        ch_box = ttk.Labelframe(self.right_pane, text="Diagram (aktuális pár)", padding=6)
+        
+        # Itt állítjuk be, hogy az alsó rész (chart) dominánsabb legyen (weight=3 vagy 4)
+        self.right_pane.add(ch_box, weight=4) 
+
+        self.mb_fig = Figure(figsize=(6, 4), dpi=100) # Nagyobb figsize, hogy kitöltse a teret
         self.mb_ax = self.mb_fig.add_subplot(111)
         self.mb_canvas = FigureCanvasTkAgg(self.mb_fig, master=ch_box)
         self.mb_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
@@ -5182,7 +5192,7 @@ class CryptoBotApp:
         self._mb_last_bar_ts = {}  # {(symbol, tf): ts}
         self._mb_lock = threading.Lock()
 
-        # Szimulációs állapotok (ha még nem lettek máshol definiálva)
+        # Szimulációs állapotok
         if not hasattr(self, "_sim_pnl_usdt"):
             self._sim_pnl_usdt = Decimal("0")
         if not hasattr(self, "_sim_history"):
@@ -5191,7 +5201,7 @@ class CryptoBotApp:
         # kezdő tőkeáttét plafon
         self._mb_sync_lev_cap()
 
-        # SL/TP/Trail init – a kezdeti állapotnak megfelelően
+        # SL/TP/Trail init
         self._mb_toggle_fixed_widgets()
         self._mb_toggle_atr_widgets()
         self._mb_toggle_brk_widgets()
@@ -5206,7 +5216,7 @@ class CryptoBotApp:
         # 1 másodperc múlva indul a periódikus frissítés
         self.root.after(1000, self._mb_chart_timer)
 
-        # A szimbólumok betöltését is kicsit késleltetjük (pl. 500ms)
+        # A szimbólumok betöltését is kicsit késleltetjük
         self.root.after(500, lambda: threading.Thread(target=self._load_symbols_async, daemon=True).start())
 
         # ha TF vagy pár változik, frissítsünk
@@ -5238,11 +5248,11 @@ class CryptoBotApp:
         try:
             # Paraméterek kiolvasása (GUI-ból – EZ FŐSZÁLON FUT)
             symbol = normalize_symbol(self.mb_symbol.get())
-            tf     = self.mb_tf.get()
-            fa     = int(self.mb_ma_fast.get())
-            slw    = int(self.mb_ma_slow.get())
+            tf      = self.mb_tf.get()
+            fa      = int(self.mb_ma_fast.get())
+            slw     = int(self.mb_ma_slow.get())
 
-            # Bollinger
+            # Bollinger (és Z-Score-hoz kellő adatok)
             try:
                 sqz_len = int(getattr(self, "mb_sqz_len", tk.IntVar(value=20)).get())
                 bb_mult = float(getattr(self, "mb_sqz_bb_mult", tk.DoubleVar(value=2.0)).get())
@@ -5311,26 +5321,34 @@ class CryptoBotApp:
                     ema_f = close_for_ema.ewm(span=fa, adjust=False).mean()
                     ema_s = close_for_ema.ewm(span=slw, adjust=False).mean()
 
-                    # --- Bollinger Bands ---
+                    # --- Bollinger Bands ÉS Z-Score ---
                     bb_up_s, bb_dn_s = None, None
+                    z_score_s = None
                     try:
+                        # Z-Score logika: (Close - Mean) / StdDev
+                        # Ez gyakorlatilag ugyanaz, mint a Bollinger alapja
                         basis = close_for_ema.rolling(sqz_len).mean()
                         dev = close_for_ema.rolling(sqz_len).std()
+                        
                         bb_up_s = basis + bb_mult * dev
                         bb_dn_s = basis - bb_mult * dev
+                        
+                        # Z-Score számítása
+                        # Ha a dev 0 (pl. nincs mozgás), kezeljük a hibát
+                        z_score_s = (close_for_ema - basis) / dev
+                        z_score_s = z_score_s.fillna(0) # Vagy hagyjuk NaN-nak az elején
+                        
                     except Exception:
                         pass
 
                     # --- Supertrend ---
                     st_line_s = None
                     try:
-                        # Supertrend helper returns (trend_series, line_series)
                         _, st_line_s = self._mb_supertrend(df, period=st_per, multiplier=st_mul)
                     except Exception:
                         pass
 
-                    # --- ADX (teljes Series számítás) ---
-                    # Inline logika az _mb_adx mintájára, de visszatér a Series-szel
+                    # --- ADX ---
                     adx_series = None
                     try:
                         high_s = df['h'].astype(float)
@@ -5357,144 +5375,113 @@ class CryptoBotApp:
                     except Exception:
                         pass
 
-                    # --- RSI (bot-féle, stabil eleje + vége) ---
+                    # --- RSI ---
                     try:
                         rsi_len = int(self._mb_cfg.get("rsi_len", 14)
                                       if hasattr(self, "_mb_cfg") else 14)
                     except Exception:
                         rsi_len = 14
 
-                    rsi_raw = None
                     rsi_plot = None
                     try:
                         if len(close_for_rsi) >= rsi_len:
                             rsi_raw = self._mb_rsi(close_for_rsi, n=rsi_len)
                             rsi_raw = pd.Series(rsi_raw.values, index=df.index)
-
                             rsi_plot = rsi_raw.copy()
-
-                            # --- ELEJE: dinamikus, de konzervatív warmup ---
-                            stable_window = 5          # ennyi egymás utáni "normális" RSI kell
-                            min_warmup     = rsi_len   # legalább ennyi bar legyen elrejtve
-
-                            warmup_n = len(rsi_raw)    # default: ha semmi nem ok, akkor semmit nem rajzolunk
-
-                            if len(rsi_raw) >= rsi_len:
-                                mask_ok = (~np.isnan(rsi_raw)) & (rsi_raw > 5.0) & (rsi_raw < 95.0)
-
-                                found_idx = None
-                                # keresünk egy olyan indexet, ahonnan indulva van stable_window db egymásutáni "ok" RSI
-                                for i in range(0, len(rsi_raw) - stable_window + 1):
-                                    if mask_ok.iloc[i:i+stable_window].all():
-                                        found_idx = i
-                                        break
-
-                                if found_idx is not None:
-                                    warmup_n = max(min_warmup, found_idx + 1)
-                                else:
-                                    warmup_n = min(rsi_len * 2, len(rsi_raw))
-
-                            warmup_n = min(warmup_n, len(rsi_raw))
+                            
+                            # Warmup logika (hagyjuk meg az eredetit, mert jól működik)
+                            warmup_n = rsi_len
+                            mask_ok = (~np.isnan(rsi_raw)) & (rsi_raw > 0)
+                            # Egyszerűsítve: az első 'rsi_len' db legyen NaN
                             rsi_plot.iloc[:warmup_n] = np.nan
-
-                            # --- VÉGE: ha akarod, visszarakhatod az aktuális gyertyára a NaN-t ---
-                            # rsi_plot.iloc[-1] = np.nan
-
                             rsi_plot = rsi_plot.clip(0.0, 100.0)
-                        else:
-                            rsi_raw = None
-                            rsi_plot = None
                     except Exception:
-                        rsi_raw = None
                         rsi_plot = None
 
-                    # --- Rajzolás (MINDEN Tk / mpl CSAK ITT, FŐSZÁLON!) ---
-                    self.mb_ax.clear()
-
-                    # Árfolyam + EMA
-                    (line_close,) = self.mb_ax.plot(df["dt"], close_for_ema, label="Close", linewidth=1.0)
-                    (line_ema_f,) = self.mb_ax.plot(df["dt"], ema_f, label=f"EMA({fa})", linewidth=1.0)
-                    (line_ema_s,) = self.mb_ax.plot(df["dt"], ema_s, label=f"EMA({slw})", linewidth=1.0)
-
-                    # Bollinger Bands
-                    line_bb = None
-                    if bb_up_s is not None and bb_dn_s is not None:
-                        # Csak a széleket rajzoljuk vékony szaggatottal
-                        l_bb_u, = self.mb_ax.plot(df["dt"], bb_up_s, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
-                        self.mb_ax.plot(df["dt"], bb_dn_s, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
-                        # Opcionális kitöltés (ha nem túl zavaró)
-                        # self.mb_ax.fill_between(df["dt"], bb_up_s, bb_dn_s, color="gray", alpha=0.05)
-                        line_bb = l_bb_u
-                        line_bb.set_label(f"BB({sqz_len},{bb_mult})")
-
-                    # Supertrend
-                    line_st = None
+                    # =========================================================
+                    # --- RAJZOLÁS (ÚJ, KÉT PANEL + Z-SCORE) ---
+                    # =========================================================
+                    fig = self.mb_ax.figure
+                    fig.clear()
+                    
+                    # Layout: A hspace (függőleges köz) legyen nagyon kicsi (0.02), hogy összeérjenek
+                    gs = fig.add_gridspec(2, 1, height_ratios=[3, 1], hspace=0.02)
+                    ax1 = fig.add_subplot(gs[0])
+                    ax2 = fig.add_subplot(gs[1], sharex=ax1)
+                    
+                    # --- FELSŐ PANEL ---
+                    if bb_up_s is not None:
+                        ax1.fill_between(df["dt"], bb_up_s, bb_dn_s, color="gray", alpha=0.1)
+                        ax1.plot(df["dt"], bb_up_s, color="gray", linestyle="--", linewidth=0.5)
+                        ax1.plot(df["dt"], bb_dn_s, color="gray", linestyle="--", linewidth=0.5)
+                    
+                    ax1.plot(df["dt"], ema_f, color="tab:orange", linewidth=1.2, label=f"EMA({fa})")
+                    ax1.plot(df["dt"], ema_s, color="tab:green", linewidth=1.2, label=f"EMA({slw})")
                     if st_line_s is not None:
-                        # Egyszerű magenta vonal a Supertrendnek
-                        (line_st,) = self.mb_ax.plot(df["dt"], st_line_s, color="magenta", linewidth=1.2, label=f"ST({st_per},{st_mul})")
+                        ax1.plot(df["dt"], st_line_s, color="violet", linewidth=1.5, label="ST")
+                    
+                    ax1.plot(df["dt"], close_s, color="tab:blue", linewidth=2.0, label="Close", alpha=0.9)
+                    
+                    # Cím balra igazítva, kisebb betűvel, közelebb a tetőhöz
+                    ax1.set_title(f"{symbol} • {tf}", loc='left', fontsize=9, fontweight='bold', pad=4)
+                    ax1.grid(True, linestyle=":", alpha=0.4)
+                    # Legend átlátszóbb és kisebb, hogy ne takarjon sokat
+                    ax1.legend(loc="upper left", fontsize="x-small", framealpha=0.4, borderpad=0.2)
+                    plt.setp(ax1.get_xticklabels(), visible=False)
 
-                    # RSI + ADX tengely
-                    if getattr(self, "mb_rsi_ax", None) is None:
-                        self.mb_rsi_ax = self.mb_ax.twinx()
-                    else:
-                        self.mb_rsi_ax.clear()
+                    # --- ALSÓ PANEL ---
+                    ax2.set_ylim(0, 100)
+                    ax2.set_yticks([30, 70])
+                    ax2.grid(True, linestyle=":", alpha=0.4)
+                    
+                    ax2.axhline(70, color="gray", linestyle=":", alpha=0.5)
+                    ax2.axhline(30, color="gray", linestyle=":", alpha=0.5)
 
-                    line_rsi = None
-                    line_adx = None
-
-                    # RSI Rajz
                     if rsi_plot is not None:
-                        (line_rsi,) = self.mb_rsi_ax.plot(df["dt"], rsi_plot, color="tab:blue", alpha=0.4, linewidth=1.2, label="RSI")
-
-                    # ADX Rajz (ugyanarra a 0-100 tengelyre)
+                        ax2.plot(df["dt"], rsi_plot, color="purple", linewidth=1.0, label="RSI", alpha=0.8)
+                    
                     if adx_series is not None:
-                        (line_adx,) = self.mb_rsi_ax.plot(df["dt"], adx_series, color="orange", alpha=0.6, linewidth=1.2, label=f"ADX({adx_len})")
+                        ax2.plot(df["dt"], adx_series, color="orange", linewidth=0.8, label="ADX", alpha=0.8)
+                    
+                    # Z-SCORE (Jobb tengely)
+                    ax2_z = ax2.twinx()
+                    ax2_z.set_ylim(-4, 4)
+                    ax2_z.grid(False)
+                    
+                    if z_score_s is not None:
+                        ax2_z.fill_between(df["dt"], z_score_s, 0, color="teal", alpha=0.15)
+                        ax2_z.plot(df["dt"], z_score_s, color="teal", linewidth=0.6, alpha=0.6, label="Z-Score")
+                        ax2_z.axhline(2, color="teal", linestyle=":", linewidth=0.5, alpha=0.3)
+                        ax2_z.axhline(-2, color="teal", linestyle=":", linewidth=0.5, alpha=0.3)
+                    
+                    # Egyesített Legend (hogy ne lógjon ki)
+                    lines1, labels1 = ax2.get_legend_handles_labels()
+                    lines2, labels2 = ax2_z.get_legend_handles_labels()
+                    ax2.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize="xx-small", framealpha=0.4, borderpad=0.2)
 
-                    # RSI/ADX skála beállítások
-                    self.mb_rsi_ax.set_ylim(0, 100)
-                    self.mb_rsi_ax.axhline(30, linestyle=":", color="tab:blue", alpha=0.3)
-                    self.mb_rsi_ax.axhline(70, linestyle=":", color="tab:blue", alpha=0.3)
-                    self.mb_rsi_ax.axhline(25, linestyle="-", color="orange", alpha=0.3, linewidth=0.8) # ADX szint
-                    self.mb_rsi_ax.set_yticks([]) # Nem kell skála felirat, hogy ne zavarjon
+                    # X tengely
+                    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+                    fig.autofmt_xdate(rotation=0, ha='center')
+                    
+                    # --- ITT A LÉNYEG: Margók minimalizálása ---
+                    # left/right: hely a feliratoknak (Y tengelyek)
+                    # top/bottom: hely a címnek és a dátumnak
+                    fig.subplots_adjust(left=0.08, right=0.92, top=0.94, bottom=0.12)
 
-                    self.mb_ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
-                    self.mb_ax.set_title(symbol + " • " + tf)
-                    self.mb_ax.grid(True, alpha=0.25)
-
-                    # Legend összeállítása
-                    handles = [line_close, line_ema_f, line_ema_s]
-                    if line_bb: handles.append(line_bb)
-                    if line_st: handles.append(line_st)
-                    if line_rsi: handles.append(line_rsi)
-                    if line_adx: handles.append(line_adx)
-
-                    labels = [h.get_label() for h in handles]
-                    self.mb_ax.legend(handles, labels, loc="lower left", fontsize="x-small")
-
+                    self.mb_ax = ax1
+                    self.mb_rsi_ax = ax2
+                    
                     self.mb_canvas.draw_idle()
 
                 except Exception as e:
-                    # csendes – ne dobáljon fel ablakot
-                    try:
-                        self._safe_log(f"Chart hiba: {e}\n")
-                    except Exception:
-                        pass
+                    print("KRITIKUS CHART HIBA (Főszál):")
+                    traceback.print_exc()
 
-            # --- on_err: háttérszál hibája, biztonságos log ---
-            def on_err(e):
-                try:
-                    self._safe_log(f"Chart hiba (bg): {e}\n")
-                except Exception:
-                    pass
-
-            # Adat a háttérben, rajz a főszálon
-            self._bg(worker, on_ok, on_err)
+            # Adatlekérés indítása
+            self._bg(worker, on_ok, lambda e: print(f"BG hiba: {e}"))
 
         except Exception as e:
-            try:
-                self._safe_log(f"Chart hiba (külső): {e}\n")
-            except Exception:
-                pass
+            print(f"Chart indítási hiba: {e}")
 
     def _mb_chart_timer(self):
         """MarginBot mini-chart periódikus frissítése a fő szálon."""
