@@ -2661,7 +2661,7 @@ class CryptoBotApp:
             getattr(self, "mb_symbol", None),
             getattr(self, "cmb_tr_pair", None),  # Új wizard widget
         ]
-        
+
         for cb in widgets:
             if cb is None: continue
             try:
@@ -4395,7 +4395,7 @@ class CryptoBotApp:
             sym = normalize_symbol(self.f_iso_sym.get())
         else:
             sym = normalize_symbol(sym)
-            
+
         if ccy is None and hasattr(self, 'f_iso_ccy'):
             ccy = self.f_iso_ccy.get().strip().upper()
         if amt is None and hasattr(self, 'f_iso_amt'):
@@ -4403,7 +4403,7 @@ class CryptoBotApp:
                 amt = float(self.f_iso_amt.get())
             except:
                 pass
-        
+
         if not sym:
              messagebox.showerror("Hiba", "Hiányzó szimbólum."); return
         if not ccy:
@@ -4671,7 +4671,7 @@ class CryptoBotApp:
         btns.grid(row=r, column=0, columnspan=2, sticky="we", pady=(10, 0))
         self.mb_start_btn = ttk.Button(btns, text="Start bot", command=self.mb_start)
         self.mb_start_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
-        self.mb_stop_btn = ttk.Button(btns, text="Stop bot", command=self.mb_stop, state=tk.DISABLED)
+        self.mb_stop_btn = ttk.Button(btns, text="Stop bot", command=self._on_mb_stop_btn_click, state=tk.DISABLED)
         self.mb_stop_btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
         r += 1
 
@@ -4691,8 +4691,8 @@ class CryptoBotApp:
 
         # ====== HALADÓ BEÁLLÍTÁSOK (adv): Z-score -> Cooldown ======
         z_title_lbl = ttk.Label(
-            adv, 
-            text="Z-score beállítások", 
+            adv,
+            text="Z-score beállítások",
             font=self.bold_font,
         )
         z_box = ttk.Labelframe(adv, labelwidget=z_title_lbl, padding=6)
@@ -4759,8 +4759,8 @@ class CryptoBotApp:
 
         # Bollinger Squeeze beállítások
         sqz_title_lbl = ttk.Label(
-            adv, 
-            text="Bollinger Squeeze beállítások", 
+            adv,
+            text="Bollinger Squeeze beállítások",
             font=self.bold_font,
         )
         sqz_box = ttk.Labelframe(adv, labelwidget=sqz_title_lbl, padding=6)
@@ -4799,8 +4799,8 @@ class CryptoBotApp:
 
         # Supertrend beállítások (Stratégia / Filter)
         st_title_lbl = ttk.Label(
-            adv, 
-            text="Supertrend (Stratégia / Filter)", 
+            adv,
+            text="Supertrend (Stratégia / Filter)",
             font=self.bold_font,
         )
 
@@ -4834,8 +4834,8 @@ class CryptoBotApp:
 
         # Fix SL / TP / Trailing – opcionális (ATR nélkül)
         fixed_title_lbl = ttk.Label(
-            adv, 
-            text="Fix SL / TP / Trailing (ATR nélkül)", 
+            adv,
+            text="Fix SL / TP / Trailing (ATR nélkül)",
             font=self.bold_font,
         )
 
@@ -4873,8 +4873,8 @@ class CryptoBotApp:
 
         # LIVE kitörés / shock (intra-bar)
         live_title_lbl = ttk.Label(
-            adv, 
-            text="LIVE kitörés / shock (intra-bar", 
+            adv,
+            text="LIVE kitörés / shock (intra-bar",
             font=self.bold_font,
         )
 
@@ -4912,8 +4912,8 @@ class CryptoBotApp:
 
         # Breakout (kitörés)
         brk_title_lbl = ttk.Label(
-            adv, 
-            text="Breakout (kitörés)", 
+            adv,
+            text="Breakout (kitörés)",
             font=self.bold_font,
         )
 
@@ -4952,8 +4952,8 @@ class CryptoBotApp:
 
         # RSI szűrő
         rsi_title_lbl = ttk.Label(
-            adv, 
-            text="RSI szűrő", 
+            adv,
+            text="RSI szűrő",
             font=self.bold_font,
         )
 
@@ -5004,8 +5004,8 @@ class CryptoBotApp:
 
         # ADX trend szűrő
         adx_title_lbl = ttk.Label(
-            adv, 
-            text="ADX trend szűrő (oldalazás ellen)", 
+            adv,
+            text="ADX trend szűrő (oldalazás ellen)",
             font=self.bold_font,
         )
 
@@ -5039,8 +5039,8 @@ class CryptoBotApp:
 
         # HTF trend filter
         htf_title_lbl = ttk.Label(
-            adv, 
-            text="HTF trend filter (EMA alapú)", 
+            adv,
+            text="HTF trend filter (EMA alapú)",
             font=self.bold_font,
         )
         htf_box = ttk.Labelframe(adv, labelwidget=htf_title_lbl, padding=6)
@@ -5069,8 +5069,8 @@ class CryptoBotApp:
 
         # ATR menedzsment
         atr_title_lbl = ttk.Label(
-            adv, 
-            text="ATR alapú menedzsment (TP1/TP2 + trailing)", 
+            adv,
+            text="ATR alapú menedzsment (TP1/TP2 + trailing)",
             font=self.bold_font,
         )
 
@@ -5198,9 +5198,9 @@ class CryptoBotApp:
         # 2. Alsó rész: Mini-diagram
         # Labelframe létrehozása, de nem grid-eljük, hanem add() a pane-hez
         ch_box = ttk.Labelframe(self.right_pane, text="Diagram (aktuális pár)", padding=6)
-        
+
         # Itt állítjuk be, hogy az alsó rész (chart) dominánsabb legyen (weight=3 vagy 4)
-        self.right_pane.add(ch_box, weight=4) 
+        self.right_pane.add(ch_box, weight=4)
 
         self.mb_fig = Figure(figsize=(6, 4), dpi=100) # Nagyobb figsize, hogy kitöltse a teret
         self.mb_ax = self.mb_fig.add_subplot(111)
@@ -5355,15 +5355,15 @@ class CryptoBotApp:
                         # Ez gyakorlatilag ugyanaz, mint a Bollinger alapja
                         basis = close_for_ema.rolling(sqz_len).mean()
                         dev = close_for_ema.rolling(sqz_len).std()
-                        
+
                         bb_up_s = basis + bb_mult * dev
                         bb_dn_s = basis - bb_mult * dev
-                        
+
                         # Z-Score számítása
                         # Ha a dev 0 (pl. nincs mozgás), kezeljük a hibát
                         z_score_s = (close_for_ema - basis) / dev
                         z_score_s = z_score_s.fillna(0) # Vagy hagyjuk NaN-nak az elején
-                        
+
                     except Exception:
                         pass
 
@@ -5414,7 +5414,7 @@ class CryptoBotApp:
                             rsi_raw = self._mb_rsi(close_for_rsi, n=rsi_len)
                             rsi_raw = pd.Series(rsi_raw.values, index=df.index)
                             rsi_plot = rsi_raw.copy()
-                            
+
                             # Warmup logika (hagyjuk meg az eredetit, mert jól működik)
                             warmup_n = rsi_len
                             mask_ok = (~np.isnan(rsi_raw)) & (rsi_raw > 0)
@@ -5429,25 +5429,25 @@ class CryptoBotApp:
                     # =========================================================
                     fig = self.mb_ax.figure
                     fig.clear()
-                    
+
                     # Layout: A hspace (függőleges köz) legyen nagyon kicsi (0.02), hogy összeérjenek
                     gs = fig.add_gridspec(2, 1, height_ratios=[3, 1], hspace=0.02)
                     ax1 = fig.add_subplot(gs[0])
                     ax2 = fig.add_subplot(gs[1], sharex=ax1)
-                    
+
                     # --- FELSŐ PANEL ---
                     if bb_up_s is not None:
                         ax1.fill_between(df["dt"], bb_up_s, bb_dn_s, color="gray", alpha=0.1)
                         ax1.plot(df["dt"], bb_up_s, color="gray", linestyle="--", linewidth=0.5)
                         ax1.plot(df["dt"], bb_dn_s, color="gray", linestyle="--", linewidth=0.5)
-                    
+
                     ax1.plot(df["dt"], ema_f, color="tab:orange", linewidth=1.2, label=f"EMA({fa})")
                     ax1.plot(df["dt"], ema_s, color="tab:green", linewidth=1.2, label=f"EMA({slw})")
                     if st_line_s is not None:
                         ax1.plot(df["dt"], st_line_s, color="violet", linewidth=1.5, label="ST")
-                    
+
                     ax1.plot(df["dt"], close_s, color="tab:blue", linewidth=2.0, label="Close", alpha=0.9)
-                    
+
                     # Cím balra igazítva, kisebb betűvel, közelebb a tetőhöz
                     ax1.set_title(f"{symbol} • {tf}", loc='left', fontsize=9, fontweight='bold', pad=4)
                     ax1.grid(True, linestyle=":", alpha=0.4)
@@ -5459,27 +5459,27 @@ class CryptoBotApp:
                     ax2.set_ylim(0, 100)
                     ax2.set_yticks([30, 70])
                     ax2.grid(True, linestyle=":", alpha=0.4)
-                    
+
                     ax2.axhline(70, color="gray", linestyle=":", alpha=0.5)
                     ax2.axhline(30, color="gray", linestyle=":", alpha=0.5)
 
                     if rsi_plot is not None:
                         ax2.plot(df["dt"], rsi_plot, color="purple", linewidth=1.0, label="RSI", alpha=0.8)
-                    
+
                     if adx_series is not None:
                         ax2.plot(df["dt"], adx_series, color="orange", linewidth=0.8, label="ADX", alpha=0.8)
-                    
+
                     # Z-SCORE (Jobb tengely)
                     ax2_z = ax2.twinx()
                     ax2_z.set_ylim(-4, 4)
                     ax2_z.grid(False)
-                    
+
                     if z_score_s is not None:
                         ax2_z.fill_between(df["dt"], z_score_s, 0, color="teal", alpha=0.15)
                         ax2_z.plot(df["dt"], z_score_s, color="teal", linewidth=0.6, alpha=0.6, label="Z-Score")
                         ax2_z.axhline(2, color="teal", linestyle=":", linewidth=0.5, alpha=0.3)
                         ax2_z.axhline(-2, color="teal", linestyle=":", linewidth=0.5, alpha=0.3)
-                    
+
                     # Egyesített Legend (hogy ne lógjon ki)
                     lines1, labels1 = ax2.get_legend_handles_labels()
                     lines2, labels2 = ax2_z.get_legend_handles_labels()
@@ -5488,7 +5488,7 @@ class CryptoBotApp:
                     # X tengely
                     ax2.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
                     fig.autofmt_xdate(rotation=0, ha='center')
-                    
+
                     # --- ITT A LÉNYEG: Margók minimalizálása ---
                     # left/right: hely a feliratoknak (Y tengelyek)
                     # top/bottom: hely a címnek és a dátumnak
@@ -5496,7 +5496,7 @@ class CryptoBotApp:
 
                     self.mb_ax = ax1
                     self.mb_rsi_ax = ax2
-                    
+
                     self.mb_canvas.draw_idle()
 
                 except Exception as e:
@@ -6562,7 +6562,7 @@ class CryptoBotApp:
 
             # 2. ÚJ RÉSZ: Pozíciók betöltése DB-ből (CSAK ÉLES MÓDBAN!)
             used_capital = 0.0
-            
+
             # Ellenőrizzük a Dry Run állapotát a GUI változóból (biztonságos getterrel is lehetne, de mb_dry tk.BooleanVar)
             try:
                 is_dry = bool(self.mb_dry.get())
@@ -6605,12 +6605,12 @@ class CryptoBotApp:
                             p_size   = float(pos.get('size', 0.0))
                             p_entry  = float(pos.get('entry', 0.0))
                             p_commit = float(pos.get('commit_usdt', 0.0))
-                            
+
                             p_lev = 1.0
                             if p_commit > 0:
                                 # lev = notional / margin
                                 p_lev = (p_size * p_entry) / p_commit
-                            
+
                             # Kerekítés egészre, ha közel van (pl. 9.99 -> 10)
                             if abs(p_lev - round(p_lev)) < 0.1:
                                 p_lev = float(round(p_lev))
@@ -6625,7 +6625,7 @@ class CryptoBotApp:
                             # 3) Hozzáadás a history-hoz (PnL még üres/becsült)
                             # A ts lehet float vagy string, kezeljük rugalmasan
                             p_ts = pos.get('ts')
-                            
+
                             self._mb_hist_add_open(
                                 order_id=pos.get('oid'),
                                 side=side,
@@ -6702,7 +6702,7 @@ class CryptoBotApp:
         self._mb_thread = threading.Thread(target=_loop, daemon=True)
         self._mb_thread.start()
 
-    def mb_stop(self):
+    def mb_stop(self, close_positions: bool = True):
         """Margin bot leállítása + biztonságos pozíciózárás (SIM/LIVE – egységesen, központi close használatával)."""
         if not getattr(self, "_mb_running", False):
             self._safe_log("ℹ️ A bot nem fut.\n")
@@ -6718,97 +6718,101 @@ class CryptoBotApp:
 
         self._safe_log("⏹️ Bot leállítása folyamatban...\n")
 
+        if not close_positions:
+            self._safe_log("ℹ️ Pozíciók NYITVA maradnak (felhasználói kérésre).\n")
+
         try:
             sym   = normalize_symbol(self._mb_get_str("mb_symbol", self._mb_get_str("mt_symbol", DEFAULT_SYMBOL)))
             dry   = self._mb_get_bool("mb_dry", True)
             lev   = self._mb_get_int("mb_leverage", 10)
             mode  = self._mb_get_str("mb_mode", "isolated")
 
-            # Utolsó ismert élő ár – egységes helperrel: WS → cache → REST
-            last_px = None
-            try:
-                rt = float(self.get_best_price(sym))
-                if self._is_pos_num(rt) and rt > 0:
-                    last_px = rt
-            except Exception:
+            if close_positions:
+                # Utolsó ismert élő ár – egységes helperrel: WS → cache → REST
                 last_px = None
+                try:
+                    rt = float(self.get_best_price(sym))
+                    if self._is_pos_num(rt) and rt > 0:
+                        last_px = rt
+                except Exception:
+                    last_px = None
 
-            if last_px is None or last_px <= 0:
-                self._safe_log("⚠️ Ár lekérés nem sikerült, fallback az entry/peak alapján.\n")
+                if last_px is None or last_px <= 0:
+                    self._safe_log("⚠️ Ár lekérés nem sikerült, fallback az entry/peak alapján.\n")
 
-            # Mindkét oldal zárása egységesen, SNAPSHOT segítségével (race condition elkerülése)
-            for side in ("buy", "sell"):
-                # snapshot a SIM pozíciókról lock alatt
-                with self._mb_lock:
-                    if side == "buy":
-                        snapshot = list(self._sim_pos_long)
-                    else:
-                        snapshot = list(self._sim_pos_short)
-
-                for pos in snapshot:
-                    try:
-                        # ár fallback: last_px -> peak -> entry
-                        px = float(
-                            last_px
-                            if last_px is not None and last_px > 0
-                            else pos.get("peak", pos.get("entry", 0.0))
-                        )
-
-                        close_side = "sell" if side == "buy" else "buy"
-                        self._safe_log(
-                            f"🔻 Pozíció zárása ({close_side.upper()}) @ {px:.6f} | dry={dry}\n"
-                        )
-
-                        if dry:
-                            # SIM: központi záró helperrel (history/pool/fee konzisztensek),
-                            # pos_obj alapján keresi meg az aktuális indexet, így nem zavarja a GUI-s törlés
-                            try:
-                                self._close_sim_by_index(
-                                    side=side,
-                                    idx=-1,
-                                    exit_px=px,
-                                    reason="mb_stop",
-                                    pos_obj=pos,
-                                )
-                            except Exception as e:
-                                self._safe_log(f"⚠️ SIM stop zárás hiba: {e}\n")
-                            continue
-
-                        # LIVE eset – KIZÁRÓLAG a központi _live_close_pos hívódik
-                        ok = False
-                        try:
-                            ok = self._live_close_pos(
-                                side=side,
-                                pos=pos,
-                                close_px=px,
-                                symbol=sym,
-                                mode=mode,
-                                lev=lev,
-                                is_sl_tp=False,
-                                is_manual=True,
-                            )
-                        except Exception as e:
-                            self._safe_log(f"❌ LIVE zárási hiba (stop): {e}\n")
-                            ok = False
-
-                        if ok:
-                            # csak sikeres LIVE zárás után tükörzárunk a SIM-ben
-                            try:
-                                self._close_sim_by_index(
-                                    side=side,
-                                    idx=-1,
-                                    exit_px=px,
-                                    reason="mb_stop",
-                                    pos_obj=pos,
-                                )
-                            except Exception as e:
-                                self._safe_log(f"⚠️ SIM tükrözés hiba (stop): {e}\n")
+                # Mindkét oldal zárása egységesen, SNAPSHOT segítségével (race condition elkerülése)
+                for side in ("buy", "sell"):
+                    # snapshot a SIM pozíciókról lock alatt
+                    with self._mb_lock:
+                        if side == "buy":
+                            snapshot = list(self._sim_pos_long)
                         else:
-                            self._safe_log("❗ LIVE zárás sikertelen – a pozíció nyitva marad.\n")
+                            snapshot = list(self._sim_pos_short)
 
-                    except Exception as e:
-                        self._safe_log(f"❌ Stop loop hiba (side={side}): {e}\n")
-                        continue
+                    for pos in snapshot:
+                        try:
+                            # ár fallback: last_px -> peak -> entry
+                            px = float(
+                                last_px
+                                if last_px is not None and last_px > 0
+                                else pos.get("peak", pos.get("entry", 0.0))
+                            )
+
+                            close_side = "sell" if side == "buy" else "buy"
+                            self._safe_log(
+                                f"🔻 Pozíció zárása ({close_side.upper()}) @ {px:.6f} | dry={dry}\n"
+                            )
+
+                            if dry:
+                                # SIM: központi záró helperrel (history/pool/fee konzisztensek),
+                                # pos_obj alapján keresi meg az aktuális indexet, így nem zavarja a GUI-s törlés
+                                try:
+                                    self._close_sim_by_index(
+                                        side=side,
+                                        idx=-1,
+                                        exit_px=px,
+                                        reason="mb_stop",
+                                        pos_obj=pos,
+                                    )
+                                except Exception as e:
+                                    self._safe_log(f"⚠️ SIM stop zárás hiba: {e}\n")
+                                continue
+
+                            # LIVE eset – KIZÁRÓLAG a központi _live_close_pos hívódik
+                            ok = False
+                            try:
+                                ok = self._live_close_pos(
+                                    side=side,
+                                    pos=pos,
+                                    close_px=px,
+                                    symbol=sym,
+                                    mode=mode,
+                                    lev=lev,
+                                    is_sl_tp=False,
+                                    is_manual=True,
+                                )
+                            except Exception as e:
+                                self._safe_log(f"❌ LIVE zárási hiba (stop): {e}\n")
+                                ok = False
+
+                            if ok:
+                                # csak sikeres LIVE zárás után tükörzárunk a SIM-ben
+                                try:
+                                    self._close_sim_by_index(
+                                        side=side,
+                                        idx=-1,
+                                        exit_px=px,
+                                        reason="mb_stop",
+                                        pos_obj=pos,
+                                    )
+                                except Exception as e:
+                                    self._safe_log(f"⚠️ SIM tükrözés hiba (stop): {e}\n")
+                            else:
+                                self._safe_log("❗ LIVE zárás sikertelen – a pozíció nyitva marad.\n")
+
+                        except Exception as e:
+                            self._safe_log(f"❌ Stop loop hiba (side={side}): {e}\n")
+                            continue
 
             # összegzés (egyszer)
             try:
@@ -10336,15 +10340,84 @@ class CryptoBotApp:
         return self._mb_get([name], _cast, default)
 
     # ======= ABLAK BEZÁRÁS (piros X) – kulturált leállítás =======
+    def _query_stop_intent(self, action_label="leállítás") -> bool | None:
+        """
+        Lekérdezi a felhasználót, ha vannak nyitott pozíciók a futó botnál.
+        Visszatér:
+          - True: Stop/Exit + Pozíciók zárása (IGEN vagy nincs nyitott pozi)
+          - False: Stop/Exit + Pozíciók NYITVA hagyása (NEM)
+          - None: Mégse (Cancel)
+        """
+        try:
+            is_mb_running = getattr(self, "_mb_running", False)
+            if not is_mb_running:
+                return True
+
+            open_positions_exist = False
+            lock = getattr(self, "_mb_lock", None)
+            if lock:
+                with lock:
+                    lng = len(getattr(self, "_sim_pos_long", []) or [])
+                    sht = len(getattr(self, "_sim_pos_short", []) or [])
+                    if lng + sht > 0:
+                        open_positions_exist = True
+
+            if not open_positions_exist:
+                return True
+
+            # Kérdés a felhasználóhoz
+            ans = messagebox.askyesnocancel(
+                title="Megerősítés",
+                message=f"A Margin Bot fut és vannak nyitott pozíciók.\n\n"
+                        f"IGEN: Pozíciók zárása és {action_label}\n"
+                        f"NEM: {action_label.capitalize()} pozíciók zárása nélkül (nyitva maradnak!)\n"
+                        f"MÉGSE: Vissza"
+            )
+
+            if ans is None: return None
+            return bool(ans) # True/False
+
+        except Exception as e:
+            self._safe_log(f"⚠️ Hiba stop/exit ellenőrzéskor: {e}\n")
+            return True
+
+    def _on_mb_stop_btn_click(self):
+        """A 'Stop bot' gomb eseménykezelője."""
+        intent = self._query_stop_intent("leállítás")
+        if intent is None:
+            return
+
+        # Gomb letiltása, hogy ne lehessen spammelni
+        try:
+            if hasattr(self, "mb_stop_btn"):
+                self.mb_stop_btn.config(state=tk.DISABLED)
+        except Exception:
+            pass
+
+        def _do_stop():
+            self.mb_stop(close_positions=intent)
+            # Gomb visszaállítása (bár ha leállt, a start gomb lesz aktív)
+            # A GUI frissítést az mb_stop vagy a worker végzi.
+
+        # Futtassuk háttérszálon, hogy ne fagyjon a GUI a zárások alatt
+        threading.Thread(target=_do_stop, daemon=True).start()
+
     def on_close(self):
         """
         Piros X-re:
-          1) mindkét bot + WS kulturált leállítása,
-          2) futó frissítések megvárása nem-blokkoló módon,
+          1) Kérdezés, ha van nyitott pozi.
+          2) mindkét bot + WS kulturált leállítása,
           3) végül ablak bezárása.
         """
         if getattr(self, "_closing", False):
             return
+
+        # 0. Lépés: Szándék lekérdezése
+        intent = self._query_stop_intent("kilépés")
+        if intent is None:
+            return
+
+        # Ha idáig eljutottunk, akkor kilépünk
         self._closing = True
         try:
             self._safe_log("🧹 Bezárás kérése – botok leállítása…\n")
@@ -10362,7 +10435,7 @@ class CryptoBotApp:
         try:
             # Margin bot leállítása
             if getattr(self, "_mb_running", False):
-                self.mb_stop()
+                self.mb_stop(close_positions=intent)
         except Exception as e:
             try: self._safe_log(f"⚠️ mb_stop hiba: {e}\n")
             except Exception: pass
