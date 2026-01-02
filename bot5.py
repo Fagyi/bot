@@ -10082,18 +10082,28 @@ class CryptoBotApp:
     def _set_widget_val(self, widget, val):
         """Helper a különböző widget típusok beállításához."""
         try:
-            if isinstance(widget, (ttk.Entry, ttk.Spinbox)):
+            # Check for Combobox by type or class name (robustness)
+            is_combo = isinstance(widget, ttk.Combobox)
+            if not is_combo:
+                 # Fallback check for ttkbootstrap or other wrappers
+                 cls_name = getattr(widget, "__class__", "").__name__
+                 if "Combobox" in cls_name:
+                     is_combo = True
+
+            if isinstance(widget, (ttk.Entry, ttk.Spinbox)) and not is_combo:
                 # Spinbox/Entry esetén delete + insert
                 try:
                     widget.delete(0, tk.END)
                     widget.insert(0, str(val))
                 except Exception:
                     pass
-            elif isinstance(widget, ttk.Combobox):
+            elif is_combo:
                 try:
-                    widget.set(str(val))
-                except Exception:
-                    pass
+                    # Biztosítjuk, hogy string legyen és whitespace nélkül
+                    s_val = str(val).strip()
+                    widget.set(s_val)
+                except Exception as e:
+                    print(f"Combobox set error: {e}")
             elif isinstance(widget, (tk.BooleanVar, tk.StringVar, tk.IntVar, tk.DoubleVar)):
                 try:
                     widget.set(val)
