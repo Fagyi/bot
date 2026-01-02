@@ -4551,7 +4551,7 @@ class CryptoBotApp:
         self.mb_strategy = tk.StringVar(value="EMA")
         self.mb_strategy_cb = ttk.Combobox(
             basic, textvariable=self.mb_strategy, state="readonly", width=15,
-            values=["EMA", "Z-Score", "Bollinger Squeeze", "Supertrend"]
+            values=["EMA", "Z-Score", "Bollinger Squeeze", "Supertrend", "MACD"]
         )
         self.mb_strategy_cb.grid(row=r, column=1, sticky="w", pady=(4, 0))
         self.mb_strategy_cb.bind("<<ComboboxSelected>>", self._mb_on_strategy_change)
@@ -4830,6 +4830,48 @@ class CryptoBotApp:
         self.mb_st_mult.delete(0, tk.END)
         self.mb_st_mult.insert(0, "3.0")
         self.mb_st_mult.pack(side=tk.LEFT, padx=(2, 0))
+        r_adv += 1
+
+        # MACD beállítások (Stratégia / Filter)
+        macd_title_lbl = ttk.Label(
+            adv,
+            text="MACD beállítások",
+            font=self.bold_font,
+        )
+        macd_box = ttk.Labelframe(adv, labelwidget=macd_title_lbl, padding=6)
+        macd_box.grid(row=r_adv, column=0, columnspan=2, sticky="we", pady=(8, 0))
+
+        macd_row1 = ttk.Frame(macd_box)
+        macd_row1.pack(anchor="w")
+
+        self.mb_use_macd_filter = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            macd_row1,
+            text="Használd Filterként (ha más a stratégia)",
+            variable=self.mb_use_macd_filter,
+            command=self._mb_on_strategy_change,
+        ).pack(side=tk.LEFT)
+
+        macd_row2 = ttk.Frame(macd_box)
+        macd_row2.pack(anchor="w", pady=(4, 0))
+
+        ttk.Label(macd_row2, text="Fast:").pack(side=tk.LEFT)
+        self.mb_macd_fast = ttk.Spinbox(macd_row2, from_=2, to=100, width=5)
+        self.mb_macd_fast.delete(0, tk.END)
+        self.mb_macd_fast.insert(0, "12")
+        self.mb_macd_fast.pack(side=tk.LEFT, padx=(2, 6))
+
+        ttk.Label(macd_row2, text="Slow:").pack(side=tk.LEFT)
+        self.mb_macd_slow = ttk.Spinbox(macd_row2, from_=2, to=100, width=5)
+        self.mb_macd_slow.delete(0, tk.END)
+        self.mb_macd_slow.insert(0, "26")
+        self.mb_macd_slow.pack(side=tk.LEFT, padx=(2, 6))
+
+        ttk.Label(macd_row2, text="Signal:").pack(side=tk.LEFT)
+        self.mb_macd_signal = ttk.Spinbox(macd_row2, from_=2, to=100, width=5)
+        self.mb_macd_signal.delete(0, tk.END)
+        self.mb_macd_signal.insert(0, "9")
+        self.mb_macd_signal.pack(side=tk.LEFT, padx=(2, 6))
         r_adv += 1
 
         # Fix SL / TP / Trailing – opcionális (ATR nélkül)
@@ -7285,6 +7327,7 @@ class CryptoBotApp:
             adx_blocked: bool,
             st_blocked: bool,
             sqz_blocked: bool,
+            macd_blocked: bool,
             short_disabled_blocked: bool,
             ema_up: bool,
             ema_dn: bool,
@@ -7324,6 +7367,9 @@ class CryptoBotApp:
             if sqz_blocked:
                 reasons.append("bollinger_block")
 
+            if macd_blocked:
+                reasons.append("macd_block")
+
             # 3. Egyéb (pl. nincs trend, ha az volt a stratégia alapja)
             # Ha EMA stratégiát használunk és nincs trend, az is egyfajta "hold reason"
             # De itt nem tudjuk biztosan, mi a stratégia.
@@ -7350,6 +7396,7 @@ class CryptoBotApp:
             use_zscore: bool,
             use_st_filter: bool,
             use_sqz_filter: bool,
+            use_macd_filter: bool,
             st_trend_dir: int,
             cd_left: int,
         ) -> str:
@@ -7386,6 +7433,9 @@ class CryptoBotApp:
             # Bollinger squeeze
             parts.append(f"Bollinger={'ON' if use_sqz_filter else 'OFF'}")
 
+            # MACD filter
+            parts.append(f"MACD={'ON' if use_macd_filter else 'OFF'}")
+
             # ST filter
             st_icon = "⚪"
             if st_trend_dir == 1: st_icon = "🟢"
@@ -7421,6 +7471,10 @@ class CryptoBotApp:
             is_sqz_strat: bool,     # ÚJ: Bollinger Squeeze aktív-e
             sqz_is_on: bool,        # ÚJ: Squeeze állapot (True/False)
             sqz_mom: float,         # ÚJ: Momentum érték
+            is_macd_strat: bool,    # ÚJ: MACD aktív stratégia-e
+            macd_val: float = 0.0,
+            macd_sig: float = 0.0,
+            macd_hist: float = 0.0,
             bb_up: float = 0.0,
             bb_dn: float = 0.0,
             kc_up: float = 0.0,
@@ -7463,6 +7517,10 @@ class CryptoBotApp:
                 if z_dir == "buy": z_display = "Buy"
                 if z_dir == "sell": z_display = "Sell"
                 parts.append(f"Z-score={z_display}")
+
+            # MACD adatok (ha aktív stratégia)
+            if is_macd_strat:
+                parts.append(f"MACD={macd_val:.4f} Sig={macd_sig:.4f} Hist={macd_hist:.4f}")
 
             # Bollinger Squeeze adatok (csak ha aktív a stratégia)
             if is_sqz_strat:
@@ -7581,6 +7639,12 @@ class CryptoBotApp:
                 use_st_filter=bool(cfg.get("use_st_filter", False)),
                 st_period=int(cfg.get("st_period", 10)),
                 st_mult=float(cfg.get("st_mult", 3.0)),
+
+            # MACD
+            use_macd_filter=bool(cfg.get("use_macd_filter", False)),
+            macd_fast=int(cfg.get("macd_fast", 12)),
+            macd_slow=int(cfg.get("macd_slow", 26)),
+            macd_signal=int(cfg.get("macd_signal", 9)),
 
                 # Squeeze
                 use_sqz_filter=bool(cfg.get("use_sqz_filter", False)),
@@ -7990,6 +8054,11 @@ class CryptoBotApp:
                     st_period     = cfg_ns.st_period
                     st_mult       = cfg_ns.st_mult
 
+                    use_macd_filter = cfg_ns.use_macd_filter
+                    macd_fast       = cfg_ns.macd_fast
+                    macd_slow       = cfg_ns.macd_slow
+                    macd_signal     = cfg_ns.macd_signal
+
                     use_live       = cfg_ns.use_live
                     live_shock_pct = cfg_ns.live_shock_pct
                     live_shock_atr = cfg_ns.live_shock_atr
@@ -8059,7 +8128,7 @@ class CryptoBotApp:
                             need_refresh = True
 
                     # OHLCV beszerzési limit számítása
-                    need_n = max(200, adx_len * 4, z_len * 3 + z_points, slw * 3)
+                    need_n = max(200, adx_len * 4, z_len * 3 + z_points, slw * 3, macd_slow * 3)
 
                     # Van-e újrahasznosítható DF?
                     current_df = getattr(self, "_mb_last_df", None)
@@ -8348,7 +8417,50 @@ class CryptoBotApp:
                     except Exception:
                         pass
 
-                    # 4. Stratégia alapú elágazás
+                    # 4. MACD számítása (mindig fusson, kellhet szűrőnek vagy stratégiának)
+                    macd_val = 0.0
+                    macd_sig_line = 0.0
+                    macd_hist = 0.0
+                    macd_sig = "hold"
+                    try:
+                        # Paraméterek olvasása
+                        m_fast = int(cfg_ns.macd_fast)
+                        m_slow = int(cfg_ns.macd_slow)
+                        m_sign = int(cfg_ns.macd_signal)
+                        macd_val, macd_sig_line, macd_hist = self._mb_macd(df_rt, fast=m_fast, slow=m_slow, signal=m_sign)
+
+                        # Crossover detektálás (előző gyertya alapján)
+                        # Kell az előző érték is a pontos crossoverhez
+                        # Egyszerűsítve: ha most metszett át. De mivel df_rt az utolsó gyertya,
+                        # érdemes megnézni az utolsó lezártat is (df_ind).
+                        # Itt egyszerűsítve a MACD > Signal logikát nézzük a filterhez,
+                        # és a keresztezést a stratégiához.
+
+                        # Előző gyertya (closed) MACD értékei
+                        prev_macd_val, prev_macd_sig, _ = self._mb_macd(df_rt.iloc[:-1], fast=m_fast, slow=m_slow, signal=m_sign)
+
+                        # Cross Up: Előzőleg alatta volt vagy egyenlő, most felette
+                        # ZERO-LINE Feltétel: Csak akkor BUY, ha a keresztezés 0 alatt történik (macd_val < 0)
+                        if prev_macd_val <= prev_macd_sig and macd_val > macd_sig_line:
+                            if macd_val < 0:
+                                macd_sig = "buy"
+                            else:
+                                macd_sig = "hold"  # Ignoráljuk a 0 feletti buy cross-t
+
+                        # Cross Down: Előzőleg felette volt vagy egyenlő, most alatta
+                        # ZERO-LINE Feltétel: Csak akkor SELL, ha a keresztezés 0 felett történik (macd_val > 0)
+                        elif prev_macd_val >= prev_macd_sig and macd_val < macd_sig_line:
+                            if macd_val > 0:
+                                macd_sig = "sell"
+                            else:
+                                macd_sig = "hold"  # Ignoráljuk a 0 alatti sell cross-t
+                        else:
+                            macd_sig = "hold"
+
+                    except Exception:
+                        pass
+
+                    # 5. Stratégia alapú elágazás
                     strategy_mode = getattr(cfg_ns, "strategy", "EMA")
 
                     if strategy_mode == "Z-Score":
@@ -8357,6 +8469,8 @@ class CryptoBotApp:
                         combined_sig_base = sqz_sig
                     elif strategy_mode == "Supertrend":
                         combined_sig_base = st_sig
+                    elif strategy_mode == "MACD":
+                        combined_sig_base = macd_sig
                     else:
                         # EMA (Alapértelmezett)
                         combined_sig_base = brk_sig if brk_sig in ("buy", "sell") else sig
@@ -8384,6 +8498,7 @@ class CryptoBotApp:
                     adx_blocked = False
                     st_blocked = False
                     sqz_blocked = False
+                    macd_blocked = False
                     short_disabled_blocked = False
 
                     # Csak akkor futtatjuk a szűrőket, ha van alapjel (buy/sell)
@@ -8425,7 +8540,7 @@ class CryptoBotApp:
                             elif combined_sig_raw == "sell" and st_trend == 1: # Trend is Bullish -> Block Sell
                                 st_blocked = True
 
-                        # 5. Bollinger Filter
+                        # 6. Bollinger Filter
                         # Csak akkor szűr, ha NEM Bollinger a stratégia
                         if use_sqz_filter and strategy_mode != "Bollinger Squeeze":
                             if combined_sig_raw == "buy" and sqz_sig  != "buy":
@@ -8433,9 +8548,19 @@ class CryptoBotApp:
                             elif combined_sig_raw == "sell" and sqz_sig  != "sell":
                                 sqz_blocked = True
 
+                        # 7. MACD Filter
+                        # Csak akkor szűr, ha NEM MACD a stratégia
+                        if use_macd_filter and strategy_mode != "MACD":
+                            # Long csak akkor, ha MACD > Signal
+                            if combined_sig_raw == "buy" and not (macd_val > macd_sig_line):
+                                macd_blocked = True
+                            # Short csak akkor, ha MACD < Signal
+                            elif combined_sig_raw == "sell" and not (macd_val < macd_sig_line):
+                                macd_blocked = True
+
                     # 2. LÉPÉS: Blokkolók alkalmazása
                     # Ha bármelyik blokkoló aktív, a jel 'hold'-ra vált, DE a változó értéke (True) megmarad a loghoz!
-                    if htf_blocked or rsi_blocked or zscore_blocked or adx_blocked or st_blocked or sqz_blocked or short_disabled_blocked:
+                    if htf_blocked or rsi_blocked or zscore_blocked or adx_blocked or st_blocked or sqz_blocked or macd_blocked or short_disabled_blocked:
                         combined_sig = 'hold'
 
                     # Breakout Override (Force Signal)
@@ -8467,6 +8592,7 @@ class CryptoBotApp:
                         zscore_blocked=zscore_blocked,
                         st_blocked=st_blocked,
                         sqz_blocked=sqz_blocked,
+                        macd_blocked=macd_blocked,
                         short_disabled_blocked=short_disabled_blocked,
                         adx_blocked=adx_blocked,
                         ema_up=ema_up,
@@ -8491,6 +8617,9 @@ class CryptoBotApp:
                         elif strategy_mode == "Supertrend":
                             reasons.insert(0, "HOLD | waiting_for_st_flip")
 
+                        elif strategy_mode == "MACD":
+                            reasons.insert(0, "HOLD | waiting_for_macd_cross")
+
                         elif strategy_mode == "EMA":
                             # Ha EMA a stratégia, és nincs keresztezés
                             reasons.insert(0, "HOLD | waiting_for_ema_cross")
@@ -8513,6 +8642,7 @@ class CryptoBotApp:
                         use_zscore=use_zscore,
                         use_st_filter=use_st_filter,
                         use_sqz_filter=use_sqz_filter,
+                        use_macd_filter=use_macd_filter,
                         st_trend_dir=st_trend,
                         cd_left=cd_left,
                     )
@@ -8548,6 +8678,10 @@ class CryptoBotApp:
                         is_sqz_strat=(strategy_mode == "Bollinger Squeeze"),
                         sqz_is_on=is_sqz,
                         sqz_mom=mom_val,
+                        is_macd_strat=(strategy_mode == "MACD"),
+                        macd_val=macd_val,
+                        macd_sig=macd_sig_line,
+                        macd_hist=macd_hist,
                         bb_up=bb_up,
                         bb_dn=bb_dn,
                         kc_up=kc_up,
@@ -9179,6 +9313,14 @@ class CryptoBotApp:
                 try: w.configure(state=sqz_state)
                 except Exception: pass
 
+        # 3) MACD widgetek
+        is_macd = (strat == "MACD")
+        macd_state = "normal" if is_macd else "disabled"
+        for w in (getattr(self, "mb_macd_fast", None), getattr(self, "mb_macd_slow", None), getattr(self, "mb_macd_signal", None)):
+            if w:
+                try: w.configure(state=macd_state)
+                except Exception: pass
+
     # ============ NEW: Leállításkori / ad-hoc összegzés ============
     def _mb_summary(self):
         """Összegző statisztika (SIM trade-ek alapján)."""
@@ -9543,6 +9685,37 @@ class CryptoBotApp:
             except Exception:
                 pass
             return None
+
+    # ---------- MACD számítás ----------
+    def _mb_macd(self, df: pd.DataFrame, fast: int = 12, slow: int = 26, signal: int = 9) -> tuple[float, float, float]:
+        """
+        MACD számítás (EMA alapú).
+        Vissza: (macd_line, signal_line, histogram) az utolsó gyertyára.
+        Ha hiba van, (0.0, 0.0, 0.0) tér vissza.
+        """
+        try:
+            if df is None or len(df) < max(fast, slow, signal) + 2:
+                return 0.0, 0.0, 0.0
+
+            close = df["c"].astype(float)
+
+            # EMA Fast / Slow
+            ema_fast = close.ewm(span=fast, adjust=False).mean()
+            ema_slow = close.ewm(span=slow, adjust=False).mean()
+
+            # MACD Line
+            macd_line = ema_fast - ema_slow
+
+            # Signal Line
+            signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+
+            # Histogram
+            hist = macd_line - signal_line
+
+            return float(macd_line.iloc[-1]), float(signal_line.iloc[-1]), float(hist.iloc[-1])
+
+        except Exception:
+            return 0.0, 0.0, 0.0
 
     # ---------- HTF trend filter (Biztonságosabb) ----------
     def _mb_trend_filter(
@@ -10185,6 +10358,11 @@ class CryptoBotApp:
             "st_period": getattr(self, "mb_st_period", None),
             "st_mult": getattr(self, "mb_st_mult", None),
 
+            "use_macd_filter": getattr(self, "mb_use_macd_filter", None),
+            "macd_fast": getattr(self, "mb_macd_fast", None),
+            "macd_slow": getattr(self, "mb_macd_slow", None),
+            "macd_signal": getattr(self, "mb_macd_signal", None),
+
             "max_open": self.mb_max_open,
             "pause_new": self.mb_pause_new,
 
@@ -10291,6 +10469,12 @@ class CryptoBotApp:
             "use_st_filter": bool(getattr(self, "mb_use_st_filter", tk.BooleanVar(value=False)).get()),
             "st_period": self._mb_get_int('mb_st_period', 10),
             "st_mult": self._mb_get_float('mb_st_mult', 3.0),
+
+            # MACD
+            "use_macd_filter": bool(getattr(self, "mb_use_macd_filter", tk.BooleanVar(value=False)).get()),
+            "macd_fast": self._mb_get_int('mb_macd_fast', 12),
+            "macd_slow": self._mb_get_int('mb_macd_slow', 26),
+            "macd_signal": self._mb_get_int('mb_macd_signal', 9),
 
             # Max nyitott, pause new
             "max_open": self._mb_get_int('mb_max_open', 0),
