@@ -3236,11 +3236,11 @@ class CryptoBotApp:
         self.mt_pct.set(0)
         self.mt_size.delete(0, tk.END); self.mt_funds.delete(0, tk.END)
         # enforce leverage bounds
-        max_lev = 5 if self.mt_mode.get() == 'cross' else 10
-        self.mt_lev.config(from_=1, to=max_lev)
+        max_leverage = 5 if self.mt_mode.get() == 'cross' else 10
+        self.mt_lev.config(from_=1, to=max_leverage)
         cur = int(self.mt_lev.get() or "1")
-        if cur > max_lev:
-            self.mt_lev.delete(0, tk.END); self.mt_lev.insert(0, str(max_lev))
+        if cur > max_leverage:
+            self.mt_lev.delete(0, tk.END); self.mt_lev.insert(0, str(max_leverage))
         self._mt_on_input_change()
 
     def _mt_on_input_change(self):
@@ -3464,8 +3464,8 @@ class CryptoBotApp:
             funds = float(funds_s) if funds_s else None
             px_ui = float(price_s) if price_s else None
 
-            lev = int(self.mt_lev.get()) if self.mt_lev.get() else 1
-            lev = min(max(1, lev), 5 if self.mt_mode.get() == 'cross' else 10)
+            leverage = int(self.mt_lev.get()) if self.mt_lev.get() else 1
+            leverage = min(max(1, leverage), 5 if self.mt_mode.get() == 'cross' else 10)
             auto = bool(self.mt_autobr.get())
             mode = self.mt_mode.get()
         except Exception as e:
@@ -3478,7 +3478,7 @@ class CryptoBotApp:
                 pass
             return
 
-        def worker(p_sym, p_side, p_typ, p_px_ui, p_size, p_funds, p_lev, p_auto, p_mode):
+        def worker(p_sym, p_side, p_typ, p_px_ui, p_size, p_funds, p_leverage, p_auto, p_mode):
             try:
                 # Ár előkészítése:
                 # - Limitnél KÖTELEZŐ, a usertől jön (p_px_ui)
@@ -3530,7 +3530,7 @@ class CryptoBotApp:
                             p_mode, p_sym, p_side,
                             size_base=size_to_send,
                             funds_quote=funds_to_send,
-                            leverage=p_lev,
+                            leverage=p_leverage,
                             auto_borrow=p_auto,
                             auto_repay=True
                         )
@@ -3552,7 +3552,7 @@ class CryptoBotApp:
                         with self._ex_lock:
                             resp = self.exchange.place_margin_limit_order(  # type: ignore[attr-defined]
                                 p_mode, p_sym, p_side, price=str(px),
-                                size_base=str(sb), leverage=p_lev,
+                                size_base=str(sb), leverage=p_leverage,
                                 auto_borrow=p_auto, auto_repay=True
                             )
                     else:
@@ -3566,7 +3566,7 @@ class CryptoBotApp:
                         with self._ex_lock:
                             resp = self.exchange.place_margin_limit_order(  # type: ignore[attr-defined]
                                 p_mode, p_sym, p_side, price=str(px),
-                                size_base=str(sb), leverage=p_lev,
+                                size_base=str(sb), leverage=p_leverage,
                                 auto_borrow=p_auto, auto_repay=True
                             )
 
@@ -3581,7 +3581,7 @@ class CryptoBotApp:
                         pass
                     self.margin_log.insert(
                         tk.END,
-                        f"✅ {p_mode} {p_typ} {p_side} – {p_sym} | size={size_to_send} funds={funds_to_send} lev={p_lev} auto={p_auto} | orderId={oid}\n"
+                        f"✅ {p_mode} {p_typ} {p_side} – {p_sym} | size={size_to_send} funds={funds_to_send} leverage={p_leverage} auto={p_auto} | orderId={oid}\n"
                     )
                     self.margin_log.see(tk.END)
                     messagebox.showinfo("Margin order",
@@ -3607,7 +3607,7 @@ class CryptoBotApp:
 
         threading.Thread(
             target=worker,
-            args=(sym, side, typ, px_ui, size, funds, lev, auto, mode),
+            args=(sym, side, typ, px_ui, size, funds, leverage, auto, mode),
             daemon=True
         ).start()
 
@@ -4214,15 +4214,15 @@ class CryptoBotApp:
 
         # 6) Leverage az UI-ból (ha nincs, 10)
         try:
-            lev = max(1, int(self._mb_get_int('mb_leverage', 10)))
+            leverage = max(1, int(self._mb_get_int('mb_leverage', 10)))
         except Exception:
-            lev = 10
+            leverage = 10
 
         # 7) Market close küldése; auto_repay=True, auto_borrow=False
         payload_dbg = {
             "mode": "isolated", "symbol": symbol, "side": side,
             "size_base": size_arg, "funds_quote": funds_arg,
-            "leverage": lev, "auto_borrow": False, "auto_repay": True
+            "leverage": leverage, "auto_borrow": False, "auto_repay": True
         }
         self._safe_log(f"🐞 SEND MANUAL CLOSE: {self._mb_pp(payload_dbg)}\n")
 
@@ -4231,7 +4231,7 @@ class CryptoBotApp:
                 "isolated", symbol, side,
                 size_base=size_arg,
                 funds_quote=funds_arg,
-                leverage=lev,
+                leverage=leverage,
                 auto_borrow=False,
                 auto_repay=True
             )
@@ -5986,7 +5986,7 @@ class CryptoBotApp:
 
     # --- LIVE Trade History helper-ek ---
     def _mb_hist_add_open(self, *, order_id: str | None, side: str, entry: float,
-                          size: float, lev: float, fee: float | None,
+                          size: float, leverage: float, fee: float | None,
                           ts: float | None = None, pnl_est: float | None = None):
         """
         Új sor felvétele OPEN-nél.
@@ -6003,7 +6003,7 @@ class CryptoBotApp:
                 f"{entry:.6f}",         # Entry
                 "",                     # Exit (még üres)
                 f"{size:.6f}",          # Size
-                f"{lev:g}",             # Leverage
+                f"{leverage:g}",        # Leverage
                 ("" if fee is None else f"{float(fee):.6f}"),    # Fee (open est)
                 ("" if pnl_est is None else f"{float(pnl_est):.6f}"),  # PnL (est)
                 oid                     # orderId
@@ -6168,11 +6168,11 @@ class CryptoBotApp:
         tv.selection_set(row_id)
 
         vals = tv.item(row_id, "values") or ()
-        # Várjuk: (timestamp, side, entry, exit, size, lev, fee, pnl, orderId)
+        # Várjuk: (timestamp, side, entry, exit, size, leverage, fee, pnl, orderId)
         if len(vals) < 9:
             return
 
-        ts, side, entry, exit_px, size, lev, fee, pnl, oid = vals
+        ts, side, entry, exit_px, size, leverage, fee, pnl, oid = vals
         exit_px_s = str(exit_px or "").strip()
         status = "open" if exit_px_s == "" else "closed"
 
@@ -6197,7 +6197,7 @@ class CryptoBotApp:
     def _mb_hist_show_details(self, row_vals):
         """Részletek egy history sorhoz – közvetlenül a Treeview értékeiből."""
         try:
-            ts, side, entry, exit_px, size, lev, fee, pnl, oid = row_vals
+            ts, side, entry, exit_px, size, leverage, fee, pnl, oid = row_vals
         except Exception:
             messagebox.showinfo("Pozíció részletei", "Nem sikerült beolvasni a sor adatait.")
             return
@@ -6212,7 +6212,7 @@ class CryptoBotApp:
             f"Belépő ár: {entry}",
             f"Kilépő ár: {exit_s or '-'}",
             f"Méret: {size}",
-            f"Tőkeáttét: {lev}",
+            f"Tőkeáttét: {leverage}",
             f"Díj: {fee}",
             f"PNL: {pnl}",
             f"Order ID: {oid}",
@@ -6246,7 +6246,7 @@ class CryptoBotApp:
             messagebox.showerror("Manuális zárás", "A history sor formátuma nem megfelelő.")
             return
 
-        ts, side_txt, entry_s, exit_s, size_s, lev_s, fee_s, pnl_s, oid_row = vals
+        ts, side_txt, entry_s, exit_s, size_s, leverage_s, fee_s, pnl_s, oid_row = vals
         exit_s = str(exit_s or "").strip()
         status = "open" if exit_s == "" else "closed"
 
@@ -6315,7 +6315,7 @@ class CryptoBotApp:
         # 5) Margin mód + leverage a cfg-ből
         cfg = getattr(self, "_mb_cfg", {}) or {}
         mode = cfg.get("mode", "isolated")
-        lev = int(cfg.get("leverage", 10))
+        leverage = int(cfg.get("leverage", 10))
 
         # 6) LIVE zárás CSAK erre a pozícióra
         ok_live = False
@@ -6326,7 +6326,7 @@ class CryptoBotApp:
                 close_px=last_px,
                 symbol=symbol,
                 mode=mode,
-                lev=lev,
+                leverage=leverage,
                 is_sl_tp=False,
                 is_manual=True,
             )
@@ -6606,14 +6606,14 @@ class CryptoBotApp:
                             p_entry  = float(pos.get('entry', 0.0))
                             p_commit = float(pos.get('commit_usdt', 0.0))
 
-                            p_lev = 1.0
+                            p_leverage = 1.0
                             if p_commit > 0:
-                                # lev = notional / margin
-                                p_lev = (p_size * p_entry) / p_commit
+                                # leverage = notional / margin
+                                p_leverage = (p_size * p_entry) / p_commit
 
                             # Kerekítés egészre, ha közel van (pl. 9.99 -> 10)
-                            if abs(p_lev - round(p_lev)) < 0.1:
-                                p_lev = float(round(p_lev))
+                            if abs(p_leverage - round(p_leverage)) < 0.1:
+                                p_leverage = float(round(p_leverage))
 
                             # 2) Fee meghatározása (actual > est > reserved)
                             p_fee = float(pos.get('fee_open_actual', 0.0))
@@ -6631,7 +6631,7 @@ class CryptoBotApp:
                                 side=side,
                                 entry=p_entry,
                                 size=p_size,
-                                lev=p_lev,
+                                leverage=p_leverage,
                                 fee=p_fee,
                                 ts=p_ts,
                                 pnl_est=None # Majd a következő árfrissítésnél kiszámolja
@@ -6724,7 +6724,7 @@ class CryptoBotApp:
         try:
             sym   = normalize_symbol(self._mb_get_str("mb_symbol", self._mb_get_str("mt_symbol", DEFAULT_SYMBOL)))
             dry   = self._mb_get_bool("mb_dry", True)
-            lev   = self._mb_get_int("mb_leverage", 10)
+            leverage = self._mb_get_int("mb_leverage", 10)
             mode  = self._mb_get_str("mb_mode", "isolated")
 
             if close_positions:
@@ -6787,7 +6787,7 @@ class CryptoBotApp:
                                     close_px=px,
                                     symbol=sym,
                                     mode=mode,
-                                    lev=lev,
+                                    leverage=leverage,
                                     is_sl_tp=False,
                                     is_manual=True,
                                 )
@@ -6978,7 +6978,7 @@ class CryptoBotApp:
                         *,                   # Innentől keyword-only argumentumok
                         symbol: str,
                         mode: str,
-                        lev: int,
+                        leverage: int,
                         is_sl_tp: bool = False,
                         is_manual: bool = False) -> bool:
 
@@ -7038,7 +7038,7 @@ class CryptoBotApp:
                 "side": close_side,
                 "size_base": size_to_send,
                 "funds_quote": funds_to_send,
-                "leverage": lev,
+                "leverage": leverage,
                 "auto_borrow": use_auto_borrow_on_close,
                 "auto_repay": True,
             }
@@ -7055,7 +7055,7 @@ class CryptoBotApp:
                         mode, symbol, close_side,
                         size_base=size_to_send,
                         funds_quote=funds_to_send,
-                        leverage=lev,
+                        leverage=leverage,
                         auto_borrow=use_auto_borrow_on_close,
                         auto_repay=True,
                     )
@@ -7244,34 +7244,34 @@ class CryptoBotApp:
             except Exception:
                 return 0
 
-        def _cooldown_status(last_cross_ts: int | None, cd_s: int) -> tuple[int, bool]:
+        def _cooldown_status(last_cross_ts: int | None, cooldown_s: int) -> tuple[int, bool]:
             """
             Vissza: (cd_left_sec, cd_ok)
             - cd_left_sec: hátralévő cooldown másodperc (min. 0)
             - cd_ok: True, ha már letelt a cooldown
             """
-            if not last_cross_ts or cd_s <= 0:
+            if not last_cross_ts or cooldown_s <= 0:
                 return 0, True
             now_ts = _safe_now_ts()
             elapsed = now_ts - last_cross_ts
-            cd_left = max(0, cd_s - elapsed)
-            cd_ok = (elapsed >= cd_s)
+            cd_left = max(0, cooldown_s - elapsed)
+            cd_ok = (elapsed >= cooldown_s)
             return cd_left, cd_ok
 
-        def _drift_status(drift_pct: float, drift_max_ui: float) -> tuple[bool, str | None]:
+        def _drift_status(drift_pct: float, drift_max_pct: float) -> tuple[bool, str | None]:
             """
             Vissza: (drift_ok, drift_over_txt)
-            - drift_ok: True, ha abs(drift_pct) <= drift_max_ui, vagy nincs limit
+            - drift_ok: True, ha abs(drift_pct) <= drift_max_pct, vagy nincs limit
             - drift_over_txt: pl. 'drift>0.50%' ha túl nagy
             """
             try:
-                if drift_max_ui <= 0:
+                if drift_max_pct <= 0:
                     return True, None
                 if drift_pct != drift_pct:  # NaN
                     return True, None
-                if abs(drift_pct) <= drift_max_ui:
+                if abs(drift_pct) <= drift_max_pct:
                     return True, None
-                return False, f"drift>{drift_max_ui:.2f}%"
+                return False, f"drift>{drift_max_pct:.2f}%"
             except Exception:
                 return True, None
 
@@ -7400,8 +7400,8 @@ class CryptoBotApp:
         def _log_status_line(
             symbol: str,
             tf: str,
-            fa: int,
-            slw: int,
+            ma_fast: int,
+            ma_slow: int,
             last_px: float,
             last_px_rt: float,
             ef_l: float,
@@ -7441,7 +7441,7 @@ class CryptoBotApp:
             parts: list[str] = [
                 f"[{symbol} {tf}] Élő ár={last_px_rt:.6f}",
                 f"Gyertya ár={last_px:.6f}",
-                f"EMA({fa})={ef_l:.4f}/EMA({slw})={es_l:.4f}",
+                f"EMA({ma_fast})={ef_l:.4f}/EMA({ma_slow})={es_l:.4f}",
             ]
 
             # HTF érték megjelenítése a felső logban
@@ -7535,16 +7535,16 @@ class CryptoBotApp:
                 raw=cfg,
                 symbol=normalize_symbol(cfg.get("symbol", DEFAULT_SYMBOL)),
                 tf=cfg.get("tf", "1m"),
-                fa=int(cfg.get("ma_fast", 9)),
-                slw=int(cfg.get("ma_slow", 21)),
-                sizep=float(cfg.get("size_pct", 50.0)),
-                inpm=cfg.get("input_mode", "quote"),
+                ma_fast=int(cfg.get("ma_fast", 9)),
+                ma_slow=int(cfg.get("ma_slow", 21)),
+                size_pct=float(cfg.get("size_pct", 50.0)),
+                input_mode=cfg.get("input_mode", "quote"),
                 mode=cfg.get("mode", "isolated"),
-                lev=int(cfg.get("leverage", 10)),
-                tpct=float(cfg.get("tp_pct", 2.0)),
-                spct=float(cfg.get("sl_pct", 1.0)),
-                trpct=float(cfg.get("trail_pct", 0.5)),
-                cd_s=int(cfg.get("cooldown_s", 30)),
+                leverage=int(cfg.get("leverage", 10)),
+                tp_pct=float(cfg.get("tp_pct", 2.0)),
+                sl_pct=float(cfg.get("sl_pct", 1.0)),
+                trail_pct=float(cfg.get("trail_pct", 0.5)),
+                cooldown_s=int(cfg.get("cooldown_s", 30)),
                 dry=bool(cfg.get("dry", True)),
                 budget_ui=float(cfg.get("budget_ui", 0.0)),
 
@@ -7596,7 +7596,7 @@ class CryptoBotApp:
                 use_live=bool(cfg.get("use_live", True)),
                 live_shock_pct=float(cfg.get("live_shock_pct", 1.0)),
                 live_shock_atr=float(cfg.get("live_shock_atr", 1.2)),
-                drift_max_ui=float(cfg.get("drift_max_pct", 0.0)),
+                drift_max_pct=float(cfg.get("drift_max_pct", 0.0)),
                 max_open=int(cfg.get("max_open", 0)),
                 pause_new=bool(cfg.get("pause_new", False)),
                 auto_borrow=bool(cfg.get("auto_borrow", False)),
@@ -7677,7 +7677,7 @@ class CryptoBotApp:
                                 px_for_mgmt,
                                 symbol=(pos.get("symbol") or symbol),
                                 mode=mode,
-                                lev=lev,
+                                leverage=leverage,
                             )
                         except Exception as e:
                             self._safe_log(
@@ -7762,8 +7762,8 @@ class CryptoBotApp:
                     tp2 = entry_px - mul_tp2*atr_val
                 pos.update({'sl': sl, 'tp1': tp1, 'tp2': tp2, 'trail_mul': trail_mul, 'half_closed': False, 'mgmt': 'atr'})
             elif fixed_pack is not None:
-                tpct, spct, trpct = fixed_pack
-                pos.update({'tp_pct': tpct, 'sl_pct': spct, 'trail_pct': trpct, 'mgmt': 'fixed'})
+                tp_pct, sl_pct, trail_pct = fixed_pack
+                pos.update({'tp_pct': tp_pct, 'sl_pct': sl_pct, 'trail_pct': trail_pct, 'mgmt': 'fixed'})
             with self._mb_lock:
                 _pos_list(side).append(pos)
                 # Javítás: Decimal + float hiba elkerülése
@@ -7896,10 +7896,10 @@ class CryptoBotApp:
             if side == 'buy' and last_px > pos['peak']: pos['peak'] = float(last_px)
             if side == 'sell' and last_px < pos['peak']: pos['peak'] = float(last_px)
 
-            tpct = float(pos.get('tp_pct', 0.0)); spct = float(pos.get('sl_pct', 0.0)); trpct = float(pos.get('trail_pct', 0.0))
-            tp_r = max(0.0, tpct) / 100.0
-            sl_r = max(0.0, spct) / 100.0
-            tr_r = max(0.0, trpct) / 100.0
+            tp_pct = float(pos.get('tp_pct', 0.0)); sl_pct = float(pos.get('sl_pct', 0.0)); trail_pct = float(pos.get('trail_pct', 0.0))
+            tp_r = max(0.0, tp_pct) / 100.0
+            sl_r = max(0.0, sl_pct) / 100.0
+            tr_r = max(0.0, trail_pct) / 100.0
 
             if side == 'buy':
                 sl_px = entry * (1.0 - sl_r) if sl_r > 0 else -float('inf')
@@ -7934,16 +7934,16 @@ class CryptoBotApp:
 
                     symbol = cfg_ns.symbol
                     tf     = cfg_ns.tf
-                    fa     = cfg_ns.fa
-                    slw    = cfg_ns.slw
-                    sizep  = cfg_ns.sizep
-                    inpm   = cfg_ns.inpm
+                    ma_fast = cfg_ns.ma_fast
+                    ma_slow = cfg_ns.ma_slow
+                    size_pct = cfg_ns.size_pct
+                    input_mode = cfg_ns.input_mode
                     mode   = cfg_ns.mode
-                    lev    = cfg_ns.lev
-                    tpct   = cfg_ns.tpct
-                    spct   = cfg_ns.spct
-                    trpct  = cfg_ns.trpct
-                    cd_s   = cfg_ns.cd_s
+                    leverage = cfg_ns.leverage
+                    tp_pct = cfg_ns.tp_pct
+                    sl_pct = cfg_ns.sl_pct
+                    trail_pct = cfg_ns.trail_pct
+                    cooldown_s = cfg_ns.cooldown_s
                     dry    = cfg_ns.dry
                     budget_ui = cfg_ns.budget_ui
 
@@ -7993,7 +7993,7 @@ class CryptoBotApp:
                     use_live       = cfg_ns.use_live
                     live_shock_pct = cfg_ns.live_shock_pct
                     live_shock_atr = cfg_ns.live_shock_atr
-                    drift_max_ui   = cfg_ns.drift_max_ui
+                    drift_max_pct  = cfg_ns.drift_max_pct
                     max_open       = cfg_ns.max_open
                     pause_new      = cfg_ns.pause_new
                     auto_borrow    = cfg_ns.auto_borrow
@@ -8059,7 +8059,7 @@ class CryptoBotApp:
                             need_refresh = True
 
                     # OHLCV beszerzési limit számítása
-                    need_n = max(200, adx_len * 4, z_len * 3 + z_points, slw * 3)
+                    need_n = max(200, adx_len * 4, z_len * 3 + z_points, ma_slow * 3)
 
                     # Van-e újrahasznosítható DF?
                     current_df = getattr(self, "_mb_last_df", None)
@@ -8209,14 +8209,14 @@ class CryptoBotApp:
                     # hiszterézis mult kivonva cfg-ből → nincs Tk az _mb_signal_from_ema_live-ben
                     atr_eps_mult = max(0.0, ema_hyst_pct) / 100.0
                     sig_raw, ef_l, es_l = self._mb_signal_from_ema_live(
-                        closes_for_sig, fa, slw, last_px_rt,
+                        closes_for_sig, ma_fast, ma_slow, last_px_rt,
                         atr_eps_mult=atr_eps_mult,
                         invert=invert_ema,            # <<< invert flag cfg-ből
                     )
                     trend_htf = 0
                     if use_htf:
                         trend_htf = self._mb_trend_filter(
-                            symbol, htf_tf, fa, slw,
+                            symbol, htf_tf, ma_fast, ma_slow,
                             invert=invert_ema           # <<< itt is cfg-ből
                         )
 
@@ -8443,12 +8443,12 @@ class CryptoBotApp:
                         combined_sig = brk_sig
 
                     # --- Cooldown + drift ---
-                    cd_left, cd_ok = _cooldown_status(self._mb_last_cross_ts, cd_s)
+                    cd_left, cd_ok = _cooldown_status(self._mb_last_cross_ts, cooldown_s)
 
                     ema_up = (ef_l > es_l)
                     ema_dn = (ef_l < es_l)
 
-                    drift_ok, drift_over_txt = _drift_status(drift_pct, drift_max_ui)
+                    drift_ok, drift_over_txt = _drift_status(drift_pct, drift_max_pct)
 
                     # Ha Cooldown vagy Drift blokkol, akkor is hold
                     if combined_sig in ("buy", "sell"):
@@ -8527,8 +8527,8 @@ class CryptoBotApp:
                     log_line = _log_status_line(
                         symbol=symbol,
                         tf=tf,
-                        fa=fa,
-                        slw=slw,
+                        ma_fast=ma_fast,
+                        ma_slow=ma_slow,
                         last_px=last_px,
                         last_px_rt=last_px_rt,
                         ef_l=ef_l,
@@ -8655,7 +8655,7 @@ class CryptoBotApp:
 
                     # --- ÚJ NYITÁS (cooldown + pool limit) ---
                     now = int(time.time())
-                    if combined_sig in ('buy','sell') and (now - self._mb_last_cross_ts >= cd_s):
+                    if combined_sig in ('buy','sell') and (now - self._mb_last_cross_ts >= cooldown_s):
                         if pause_new:
                             self._safe_log(f"⏸️ Új nyitás szüneteltetve (Checkbox). Jel ({combined_sig}) átugorva.\n")
                             opened = False
@@ -8728,7 +8728,7 @@ class CryptoBotApp:
                             _pool_bal = float(self._pool_balance_quote)
                             _pool_used = float(self._pool_used_quote)
                         free_pool = max(0.0, _pool_bal - _pool_used)
-                        sizep_to_use = max(0.0, min(100.0, float(sizep)))
+                        sizep_to_use = max(0.0, min(100.0, float(size_pct)))
 
                         size = None
                         funds = None
@@ -8747,10 +8747,10 @@ class CryptoBotApp:
                                 symbol=cfg_ns.symbol,
                                 side=combined_sig,
                                 price=px_for_mgmt,
-                                size_pct=cfg_ns.sizep,
-                                input_mode=cfg_ns.inpm,
+                                size_pct=cfg_ns.size_pct,
+                                input_mode=cfg_ns.input_mode,
                                 mode=cfg_ns.mode,
-                                leverage=cfg_ns.lev,
+                                leverage=cfg_ns.leverage,
                                 budget_quote=cfg_ns.budget_ui,
                                 dry=cfg_ns.dry,
                                 auto_borrow=cfg_ns.auto_borrow,
@@ -8764,13 +8764,13 @@ class CryptoBotApp:
                             if funds is not None and funds > 0:
                                 # QUOTE mód: funds = commit_usdt
                                 commit_usdt = float(funds)
-                                nominal_q   = commit_usdt * max(1, lev)
+                                nominal_q   = commit_usdt * max(1, leverage)
                                 open_size   = nominal_q / max(px_for_mgmt, 1e-12)
                             elif size is not None and size > 0:
                                 # BASE mód: size = darabszám
                                 open_size   = float(size)
                                 nominal_q   = open_size * px_for_mgmt
-                                commit_usdt = nominal_q / max(1, lev)
+                                commit_usdt = nominal_q / max(1, leverage)
                             else:
                                 open_size = 0.0
                                 commit_usdt = 0.0
@@ -8778,7 +8778,7 @@ class CryptoBotApp:
 
                             # --- POOL CLAMP: commit/nominal/size ráhúzása a free_pool-ra ---
                             try:
-                                lev_eff = max(1, int(lev))
+                                leverage_eff = max(1, int(leverage))
                                 free_pool_eff = max(0.0, float(free_pool))
 
                                 # 1) fee headroom becslés
@@ -8793,7 +8793,7 @@ class CryptoBotApp:
                                     commit_usdt = max_commit
 
                                 # 3) újraszámolás
-                                nominal_q = float(commit_usdt) * float(lev_eff)
+                                nominal_q = float(commit_usdt) * float(leverage_eff)
                                 open_size = float(nominal_q) / max(float(px_for_mgmt), 1e-12)
 
                                 # 4) lépésre kerekítés után korrekció
@@ -8807,7 +8807,7 @@ class CryptoBotApp:
                                 else:
                                     nominal_q = float(open_size) * float(px_for_mgmt)
 
-                                commit_usdt = float(nominal_q) / float(lev_eff)
+                                commit_usdt = float(nominal_q) / float(leverage_eff)
                             except Exception:
                                 pass
 
@@ -8816,7 +8816,7 @@ class CryptoBotApp:
                             self._safe_log(
                                 f"📈 Jel: {combined_sig.upper()} | price={px_for_mgmt:.6f} | size%={sizep_to_use:.2f} | "
                                 f"nominal={nominal_q:.2f} | commit={commit_usdt:.2f} | free_pool={free_pool:.2f} | "
-                                f"lev={lev} | mode={mode} dry={dry}\n"
+                                f"leverage={leverage} | mode={mode} dry={dry}\n"
                             )
 
                             opened = False
@@ -8858,14 +8858,14 @@ class CryptoBotApp:
                                             sz_sim = float(size_to_send)
                                         else:
                                             sz_sim = float(funds_to_send) / max(float(px_for_mgmt), 1e-12)
-                                        commit_sim = float(funds_to_send) / max(lev, 1)
+                                        commit_sim = float(funds_to_send) / max(leverage, 1)
                                     else:
                                         sz_sim = float(size_to_send)
-                                        commit_sim = (sz_sim * float(px_for_mgmt)) / max(lev, 1)
+                                        commit_sim = (sz_sim * float(px_for_mgmt)) / max(leverage, 1)
 
                                     # Csomagok előkészítése
                                     atr_pack_arg = (mul_sl, mul_tp1, mul_tp2, mul_tr, atr_val) if (use_atr and atr_val) else None
-                                    fixed_pack_arg = (tpct, spct, trpct) if use_fixed else None
+                                    fixed_pack_arg = (tp_pct, sl_pct, trail_pct) if use_fixed else None
 
                                     if dry:
                                         _open_sim(
@@ -8880,7 +8880,7 @@ class CryptoBotApp:
                                         _payload = {
                                             "mode": mode, "symbol": symbol, "side": combined_sig,
                                             "size_base": size_to_send, "funds_quote": funds_to_send,
-                                            "leverage": lev, "auto_borrow": auto_borrow
+                                            "leverage": leverage, "auto_borrow": auto_borrow
                                         }
                                         self._safe_log(f"🐞 SEND OPEN: {self._mb_pp(_payload)}\n")
 
@@ -8930,7 +8930,7 @@ class CryptoBotApp:
                                                     req_price=entry_px,
                                                     req_size=req_sz_f,
                                                     req_funds=req_fu_f,
-                                                    lev=lev,
+                                                    leverage=leverage,
                                                     lot_step=float(ls_now or 0.0),
                                                 )
 
@@ -8941,11 +8941,11 @@ class CryptoBotApp:
                                                 else:
                                                     # Fallback becslés
                                                     if funds_to_send:
-                                                        commit_used = float(funds_to_send) / max(lev, 1)
+                                                        commit_used = float(funds_to_send) / max(leverage, 1)
                                                         size_now = self._sdiv(float(funds_to_send), px_for_mgmt, 0.0)
                                                     else:
                                                         size_now = float(size_to_send)
-                                                        commit_used = self._sdiv(size_now * float(px_for_mgmt), lev, 0.0)
+                                                        commit_used = self._sdiv(size_now * float(px_for_mgmt), leverage, 0.0)
 
                                                     # Padlózás
                                                     size_now = self._mb_floor_to_step_dec(size_now, float(ls_now or 0.0))
@@ -8971,7 +8971,7 @@ class CryptoBotApp:
                                                 self._mb_hist_add_open(
                                                     order_id=str(order_key),
                                                     side=combined_sig, entry=entry_px,
-                                                    size=size_now, lev=lev, fee=float(_fee_final),
+                                                    size=size_now, leverage=leverage, fee=float(_fee_final),
                                                     pnl_est=pnl_est
                                                 )
 
@@ -9916,8 +9916,8 @@ class CryptoBotApp:
         """
         try:
             # tőkeáttét korlát (isolated: max 10, cross: max 5)
-            lev_max = 10 if mode == "isolated" else 5
-            leverage = int(max(1, min(lev_max, int(leverage or 1))))
+            leverage_max = 10 if mode == "isolated" else 5
+            leverage = int(max(1, min(leverage_max, int(leverage or 1))))
 
             # százalék normálás
             pct = max(0.0, min(100.0, float(size_pct))) / 100.0
@@ -10679,7 +10679,7 @@ class CryptoBotApp:
                               req_price: float,
                               req_size,
                               req_funds,
-                              lev: int,
+                              leverage: int,
                               lot_step: float = 0.0) -> tuple[float, float, float]:
         """
         Open-order realtime fill / fee feloldása.
@@ -10820,7 +10820,7 @@ class CryptoBotApp:
 
             px = float(req_price) if req_price and req_price > 0 else 1.0
             nominal = filled_quote if filled_quote > 0 else filled_base * px
-            commit_real = nominal / max(lev, 1)
+            commit_real = nominal / max(leverage, 1)
 
             return float(filled_base), float(commit_real), float(fee or 0.0)
 
