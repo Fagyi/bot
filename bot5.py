@@ -10091,7 +10091,9 @@ class CryptoBotApp:
                     pass
             elif isinstance(widget, ttk.Combobox):
                 try:
-                    widget.set(str(val))
+                    # Biztosítjuk, hogy string legyen és whitespace nélkül
+                    s_val = str(val).strip()
+                    widget.set(s_val)
                 except Exception:
                     pass
             elif isinstance(widget, (tk.BooleanVar, tk.StringVar, tk.IntVar, tk.DoubleVar)):
@@ -10116,6 +10118,7 @@ class CryptoBotApp:
         mapping = {
             "symbol": self.mb_symbol,
             "tf": self.mb_tf,
+            "mb_tf": self.mb_tf,  # Alias támogatás, ha a user véletlenül a változónevet használta
             "ma_fast": self.mb_ma_fast,
             "ma_slow": self.mb_ma_slow,
             "size_pct": self.mb_size_pct,
