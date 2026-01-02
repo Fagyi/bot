@@ -7258,20 +7258,20 @@ class CryptoBotApp:
             cd_ok = (elapsed >= cd_s)
             return cd_left, cd_ok
 
-        def _drift_status(drift_pct: float, drift_max_ui: float) -> tuple[bool, str | None]:
+        def _drift_status(drift_pct: float, drift_max_pct: float) -> tuple[bool, str | None]:
             """
             Vissza: (drift_ok, drift_over_txt)
-            - drift_ok: True, ha abs(drift_pct) <= drift_max_ui, vagy nincs limit
+            - drift_ok: True, ha abs(drift_pct) <= drift_max_pct, vagy nincs limit
             - drift_over_txt: pl. 'drift>0.50%' ha túl nagy
             """
             try:
-                if drift_max_ui <= 0:
+                if drift_max_pct <= 0:
                     return True, None
                 if drift_pct != drift_pct:  # NaN
                     return True, None
-                if abs(drift_pct) <= drift_max_ui:
+                if abs(drift_pct) <= drift_max_pct:
                     return True, None
-                return False, f"drift>{drift_max_ui:.2f}%"
+                return False, f"drift>{drift_max_pct:.2f}%"
             except Exception:
                 return True, None
 
@@ -7762,8 +7762,8 @@ class CryptoBotApp:
                     tp2 = entry_px - mul_tp2*atr_val
                 pos.update({'sl': sl, 'tp1': tp1, 'tp2': tp2, 'trail_mul': trail_mul, 'half_closed': False, 'mgmt': 'atr'})
             elif fixed_pack is not None:
-                tpct, spct, trpct = fixed_pack
-                pos.update({'tp_pct': tpct, 'sl_pct': spct, 'trail_pct': trpct, 'mgmt': 'fixed'})
+                tp_pct, sl_pct, trail_pct = fixed_pack
+                pos.update({'tp_pct': tp_pct, 'sl_pct': sl_pct, 'trail_pct': trail_pct, 'mgmt': 'fixed'})
             with self._mb_lock:
                 _pos_list(side).append(pos)
                 # Javítás: Decimal + float hiba elkerülése
@@ -7896,10 +7896,10 @@ class CryptoBotApp:
             if side == 'buy' and last_px > pos['peak']: pos['peak'] = float(last_px)
             if side == 'sell' and last_px < pos['peak']: pos['peak'] = float(last_px)
 
-            tpct = float(pos.get('tp_pct', 0.0)); spct = float(pos.get('sl_pct', 0.0)); trpct = float(pos.get('trail_pct', 0.0))
-            tp_r = max(0.0, tpct) / 100.0
-            sl_r = max(0.0, spct) / 100.0
-            tr_r = max(0.0, trpct) / 100.0
+            tp_pct = float(pos.get('tp_pct', 0.0)); sl_pct = float(pos.get('sl_pct', 0.0)); trail_pct = float(pos.get('trail_pct', 0.0))
+            tp_r = max(0.0, tp_pct) / 100.0
+            sl_r = max(0.0, sl_pct) / 100.0
+            tr_r = max(0.0, trail_pct) / 100.0
 
             if side == 'buy':
                 sl_px = entry * (1.0 - sl_r) if sl_r > 0 else -float('inf')
@@ -8728,7 +8728,7 @@ class CryptoBotApp:
                             _pool_bal = float(self._pool_balance_quote)
                             _pool_used = float(self._pool_used_quote)
                         free_pool = max(0.0, _pool_bal - _pool_used)
-                        sizep_to_use = max(0.0, min(100.0, float(sizep)))
+                        sizep_to_use = max(0.0, min(100.0, float(size_pct)))
 
                         size = None
                         funds = None
