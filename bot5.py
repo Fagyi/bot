@@ -10176,9 +10176,14 @@ class CryptoBotApp:
             "z_len": self.mb_z_len,
             "z_points": self.mb_z_points,
 
+            "use_sqz_filter": getattr(self, "mb_use_sqz_filter", None),
             "sqz_len": getattr(self, "mb_sqz_len", None),
             "sqz_bb_mult": getattr(self, "mb_sqz_bb_mult", None),
             "sqz_kc_mult": getattr(self, "mb_sqz_kc_mult", None),
+
+            "use_st_filter": getattr(self, "mb_use_st_filter", None),
+            "st_period": getattr(self, "mb_st_period", None),
+            "st_mult": getattr(self, "mb_st_mult", None),
 
             "max_open": self.mb_max_open,
             "pause_new": self.mb_pause_new,
