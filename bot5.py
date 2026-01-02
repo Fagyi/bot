@@ -6326,7 +6326,7 @@ class CryptoBotApp:
                 close_px=last_px,
                 symbol=symbol,
                 mode=mode,
-                lev=lev,
+                leverage=lev,
                 is_sl_tp=False,
                 is_manual=True,
             )
@@ -6724,7 +6724,7 @@ class CryptoBotApp:
         try:
             sym   = normalize_symbol(self._mb_get_str("mb_symbol", self._mb_get_str("mt_symbol", DEFAULT_SYMBOL)))
             dry   = self._mb_get_bool("mb_dry", True)
-            lev   = self._mb_get_int("mb_leverage", 10)
+            leverage = self._mb_get_int("mb_leverage", 10)
             mode  = self._mb_get_str("mb_mode", "isolated")
 
             if close_positions:
@@ -6787,7 +6787,7 @@ class CryptoBotApp:
                                     close_px=px,
                                     symbol=sym,
                                     mode=mode,
-                                    lev=lev,
+                                    leverage=leverage,
                                     is_sl_tp=False,
                                     is_manual=True,
                                 )
@@ -6978,7 +6978,7 @@ class CryptoBotApp:
                         *,                   # Innentől keyword-only argumentumok
                         symbol: str,
                         mode: str,
-                        lev: int,
+                        leverage: int,
                         is_sl_tp: bool = False,
                         is_manual: bool = False) -> bool:
 
@@ -7038,7 +7038,7 @@ class CryptoBotApp:
                 "side": close_side,
                 "size_base": size_to_send,
                 "funds_quote": funds_to_send,
-                "leverage": lev,
+                "leverage": leverage,
                 "auto_borrow": use_auto_borrow_on_close,
                 "auto_repay": True,
             }
@@ -7055,7 +7055,7 @@ class CryptoBotApp:
                         mode, symbol, close_side,
                         size_base=size_to_send,
                         funds_quote=funds_to_send,
-                        leverage=lev,
+                        leverage=leverage,
                         auto_borrow=use_auto_borrow_on_close,
                         auto_repay=True,
                     )
@@ -7244,18 +7244,18 @@ class CryptoBotApp:
             except Exception:
                 return 0
 
-        def _cooldown_status(last_cross_ts: int | None, cd_s: int) -> tuple[int, bool]:
+        def _cooldown_status(last_cross_ts: int | None, cooldown_s: int) -> tuple[int, bool]:
             """
             Vissza: (cd_left_sec, cd_ok)
             - cd_left_sec: hátralévő cooldown másodperc (min. 0)
             - cd_ok: True, ha már letelt a cooldown
             """
-            if not last_cross_ts or cd_s <= 0:
+            if not last_cross_ts or cooldown_s <= 0:
                 return 0, True
             now_ts = _safe_now_ts()
             elapsed = now_ts - last_cross_ts
-            cd_left = max(0, cd_s - elapsed)
-            cd_ok = (elapsed >= cd_s)
+            cd_left = max(0, cooldown_s - elapsed)
+            cd_ok = (elapsed >= cooldown_s)
             return cd_left, cd_ok
 
         def _drift_status(drift_pct: float, drift_max_pct: float) -> tuple[bool, str | None]:
@@ -7677,7 +7677,7 @@ class CryptoBotApp:
                                 px_for_mgmt,
                                 symbol=(pos.get("symbol") or symbol),
                                 mode=mode,
-                                lev=lev,
+                                leverage=leverage,
                             )
                         except Exception as e:
                             self._safe_log(
