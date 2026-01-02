@@ -8255,6 +8255,9 @@ class CryptoBotApp:
 
                     px_for_mgmt = last_px_rt if (self._is_pos_num(last_px_rt) and last_px_rt > 0) else last_px
 
+                    # --- 1. Fázis: Inicializálás és alap adatok ---
+                    strategy_mode = getattr(cfg_ns, "strategy", "EMA")
+
                     # --- drift csak akkor, ha TÉNYLEG WS árunk van ---  ### WS-DRIFT
                     try:
                         if used_ws_price and self._is_pos_num(last_px):
@@ -8268,28 +8271,19 @@ class CryptoBotApp:
                     with self._mb_lock:
                         open_now = len(self._sim_pos_long) + len(self._sim_pos_short)
 
+                    # --- 2. Fázis: Közös Indikátorok számítása (amik filterekhez kellenek) ---
                     atr_val = None
                     if use_atr:
                         atr_series = self._mb_atr(df_rt, n=atr_n)
                         atr_val = float(atr_series.iloc[-1])
                         self._mb_last_atr_val = atr_val
 
-                    closes_for_sig = df_rt['c'].astype(float).tolist()
-                    # hiszterézis mult kivonva cfg-ből → nincs Tk az _mb_signal_from_ema_live-ben
-                    atr_eps_mult = max(0.0, ema_hyst_pct) / 100.0
-                    sig_raw, ef_l, es_l = self._mb_signal_from_ema_live(
-                        closes_for_sig, ma_fast, ma_slow, last_px_rt,
-                        atr_eps_mult=atr_eps_mult,
-                        invert=invert_ema,            # <<< invert flag cfg-ből
-                    )
                     trend_htf = 0
                     if use_htf:
                         trend_htf = self._mb_trend_filter(
                             symbol, htf_tf, ma_fast, ma_slow,
                             invert=invert_ema           # <<< itt is cfg-ből
                         )
-
-                    sig = sig_raw
 
                     rsi_val = None
                     if use_rsi:
@@ -8359,8 +8353,7 @@ class CryptoBotApp:
                     except Exception:
                         pass
 
-                    # --- STRATÉGIA VÁLASZTÁS ÉS ALAPJEL KÉPZÉS ---
-                    # 1. Z-Score számítása (mindig fusson)
+                    # 3. Z-Score számítása (mindig fusson, ha filter vagy strat)
                     z_dir = "hold"
                     z_quad = None
                     try:
@@ -8381,7 +8374,7 @@ class CryptoBotApp:
                     else:
                         z_dir = "hold"
 
-                    # 2. Bollinger Squeeze számítása (mindig fusson)
+                    # 4. Bollinger Squeeze számítása (mindig fusson)
                     sqz_sig = "hold"
                     is_sqz = False
                     mom_val = 0.0
@@ -8396,7 +8389,7 @@ class CryptoBotApp:
                     except Exception:
                         pass
 
-                    # 3. Supertrend számítása (mindig fusson, kellhet szűrőnek)
+                    # 5. Supertrend számítása (mindig fusson)
                     st_trend_series = None
                     st_line_series = None
                     st_trend = 0
@@ -8417,7 +8410,7 @@ class CryptoBotApp:
                     except Exception:
                         pass
 
-                    # 4. MACD számítása (mindig fusson, kellhet szűrőnek vagy stratégiának)
+                    # 6. MACD számítása (mindig fusson)
                     macd_val = 0.0
                     macd_sig_line = 0.0
                     macd_hist = 0.0
@@ -8460,25 +8453,7 @@ class CryptoBotApp:
                     except Exception:
                         pass
 
-                    # 5. Stratégia alapú elágazás
-                    strategy_mode = getattr(cfg_ns, "strategy", "EMA")
-
-                    if strategy_mode == "Z-Score":
-                        combined_sig_base = z_dir
-                    elif strategy_mode == "Bollinger Squeeze":
-                        combined_sig_base = sqz_sig
-                    elif strategy_mode == "Supertrend":
-                        combined_sig_base = st_sig
-                    elif strategy_mode == "MACD":
-                        combined_sig_base = macd_sig
-                    else:
-                        # EMA (Alapértelmezett)
-                        combined_sig_base = brk_sig if brk_sig in ("buy", "sell") else sig
-
-                    combined_sig = combined_sig_base
-                    combined_sig_raw = combined_sig_base  # Ez a nyers jel a filterek előtt
-
-                    # --- ADX számítása ---
+                    # 7. ADX számítása
                     adx_val = None
                     adx_ok = True
                     if use_adx:
@@ -8489,7 +8464,34 @@ class CryptoBotApp:
                             adx_val = None
                             adx_ok = True
 
-                    # --- KÖZÖS FILTEREK (Corrected Logic) ---
+                    # --- 3. Fázis: Stratégia specifikus jelképzés ---
+                    sig_raw = "hold"
+                    ef_l = 0.0
+                    es_l = 0.0
+
+                    if strategy_mode == "Z-Score":
+                        combined_sig_base = z_dir
+                    elif strategy_mode == "Bollinger Squeeze":
+                        combined_sig_base = sqz_sig
+                    elif strategy_mode == "Supertrend":
+                        combined_sig_base = st_sig
+                    elif strategy_mode == "MACD":
+                        combined_sig_base = macd_sig
+                    else:
+                        # EMA (Alapértelmezett) - CSAK AKKOR SZÁMOLJUK, HA EZ A STRATÉGIA!
+                        closes_for_sig = df_rt['c'].astype(float).tolist()
+                        atr_eps_mult = max(0.0, ema_hyst_pct) / 100.0
+                        sig_raw, ef_l, es_l = self._mb_signal_from_ema_live(
+                            closes_for_sig, ma_fast, ma_slow, last_px_rt,
+                            atr_eps_mult=atr_eps_mult,
+                            invert=invert_ema,
+                        )
+                        combined_sig_base = brk_sig if brk_sig in ("buy", "sell") else sig_raw
+
+                    combined_sig = combined_sig_base
+                    combined_sig_raw = combined_sig_base  # Ez a nyers jel a filterek előtt
+
+                    # --- 4. Fázis: KÖZÖS FILTEREK (Corrected Logic) ---
 
                     # 1. LÉPÉS: Inicializálás (Itt nullázunk le mindent EGYETLEN EGYSZER)
                     htf_blocked = False
@@ -8647,7 +8649,7 @@ class CryptoBotApp:
                         cd_left=cd_left,
                     )
 
-                    # --- Log sor felépítés ---
+                    # --- 5. Fázis: Log sor felépítés ---
                     # pool snapshot loghoz
                     with self._mb_lock:
                         pool_used_for_log = float(self._pool_used_quote)
@@ -8702,14 +8704,10 @@ class CryptoBotApp:
                     # --- Végső sor (Suffix) formázása ---
                     final_suffix = ""
 
-                    # Determine true raw signal for logging
-                    true_raw_signal = "hold"
-                    if use_brk and brk_sig_raw in ("buy", "sell"):
-                        true_raw_signal = brk_sig_raw
-                    elif combined_sig_raw in ("buy", "sell"):
-                        true_raw_signal = combined_sig_raw
-                    elif sig_raw in ("buy", "sell"):
-                        true_raw_signal = sig_raw
+                    # LOGIC FIX: Logolásnál MINDIG az aktív stratégia nyers jelét (combined_sig_raw) használjuk "nyers" jelként.
+                    # Mivel az EMA számítást már korlátoztuk az 'if strategy_mode == "EMA"' blokkba,
+                    # így a 'combined_sig_raw' mindig a helyes, releváns jelet tartalmazza.
+                    true_raw_signal = combined_sig_raw
 
                     if combined_sig in (None, "", "hold"):
                         reasons_str = ", ".join(reasons) if reasons else ""
