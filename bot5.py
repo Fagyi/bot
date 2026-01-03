@@ -38,7 +38,10 @@ import ttkbootstrap as tb
 # Matplotlib
 import matplotlib
 import matplotlib.pyplot as plt
-matplotlib.use('TkAgg')
+try:
+    matplotlib.use('TkAgg')
+except Exception:
+    pass
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.dates as mdates
@@ -7702,7 +7705,12 @@ class CryptoBotApp:
 
                     # ATR / FIXED menedzsment (közös long/short logika)
                     if pos.get('mgmt') == 'atr' and atr_val is not None:
-                        need_close = _manage_atr_on_pos(pos, px_for_mgmt, atr_val)
+                        # VÉDELEM: Ha ATR <= 0 (pl. warmup alatt), akkor NE zárjunk!
+                        if atr_val > 0.00000001:
+                            need_close = _manage_atr_on_pos(pos, px_for_mgmt, atr_val)
+                        else:
+                            # Ha 0 az ATR, de épp fut a menedzsment, akkor HOLD-oljuk.
+                            need_close = False
                     elif pos.get('mgmt') == 'fixed':
                         need_close = _manage_fixed_on_pos(pos, px_for_mgmt)
 
@@ -8127,8 +8135,8 @@ class CryptoBotApp:
                         if now_ts >= (prev_ts + tf_sec):
                             need_refresh = True
 
-                    # OHLCV beszerzési limit számítása
-                    need_n = max(200, adx_len * 4, z_len * 3 + z_points, ma_slow * 3, macd_slow * 3)
+                    # OHLCV beszerzési limit számítása (min. 500 a warmup miatt)
+                    need_n = max(500, adx_len * 4, z_len * 3 + z_points, ma_slow * 3, macd_slow * 3)
 
                     # Van-e újrahasznosítható DF?
                     current_df = getattr(self, "_mb_last_df", None)
@@ -8166,6 +8174,14 @@ class CryptoBotApp:
                         else:
                             # Első kör / szimbólum váltás: teljes DF építés
                             df = pd.DataFrame(ohlcv, columns=['ts','o','h','l','c','v'])
+
+                        # --- ADATHIÁNY ELLENŐRZÉS (Warmup) ---
+                        # Ha a DF túl rövid, ne számoljon tovább, mert az indikátorok (pl. ATR) 0-k lesznek.
+                        min_warmup = max(ma_slow + 20, 50)
+                        if len(df) < min_warmup:
+                            self._safe_log(f"⏳ Adatra várás... ({len(df)}/{min_warmup} gyertya). Ciklus kihagyva.\n")
+                            time.sleep(2)
+                            continue
 
                         # Kulcs mentése a következő körhöz
                         self._mb_last_df_key = key
