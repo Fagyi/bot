@@ -38,7 +38,10 @@ import ttkbootstrap as tb
 # Matplotlib
 import matplotlib
 import matplotlib.pyplot as plt
-matplotlib.use('TkAgg')
+try:
+    matplotlib.use('TkAgg')
+except Exception:
+    pass
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.dates as mdates
@@ -1584,7 +1587,9 @@ class CryptoBotApp:
         self.root.geometry("1280x930")
 
         self._ohlcv_cache: dict[tuple[str,str], dict[str, object]] = {}
-        self._ohlcv_cache_maxlen = 600  # igény szerint (200-nál nagyobb legyen)
+        self._ohlcv_cache_maxlen = 800  # OHLCV cache: legalább 500-hoz legyen puffer
+        self._ohlcv_seed_n = 500         # induláskor ennyi gyertyát seed-elünk REST-ből (ha kell)
+        self._ohlcv_ws_depth = 600       # K-Line WS buffer mélység
 
         # ---- Funds / Margin cache alapértelmezett állapota ----
         # Így az _mb_refresh_available hívható akkor is, ha még nem volt teljes "Összes egyenleg frissítése".
@@ -3046,7 +3051,7 @@ class CryptoBotApp:
                     symbol=req_sym,
                     tfs=req_tfs,
                     log_fn=self._safe_log,
-                    depth=300,
+                    depth=int(getattr(self, "_ohlcv_ws_depth", 600)),
                 )
                 self._mb_kline_ws.start()
             except Exception as e:
@@ -3091,7 +3096,7 @@ class CryptoBotApp:
             rec["rows"] = rows
             rec["last_ts"] = int(rows[-1][0]) if rows else 0
 
-    def _ohlcv_seed_if_needed(self, symbol: str, tf: str, seed_n: int = 200):
+    def _ohlcv_seed_if_needed(self, symbol: str, tf: str, seed_n: int = 500):
         symbol = normalize_symbol(symbol)
         key = (symbol, tf)
 
@@ -3124,7 +3129,8 @@ class CryptoBotApp:
         symbol = normalize_symbol(symbol)
 
         # 1) seed
-        self._ohlcv_seed_if_needed(symbol, tf, seed_n=200)
+        seed_n = int(max(getattr(self, "_ohlcv_seed_n", 500), limit or 0, 200))
+        self._ohlcv_seed_if_needed(symbol, tf, seed_n=seed_n)
 
         # 2) ws merge
         self._ohlcv_update_from_ws(symbol, tf)
@@ -6716,6 +6722,29 @@ class CryptoBotApp:
             with self._mb_lock:
                 self._mb_cfg = new_cfg
             self._safe_log(f"🧩 MarginBot cfg snapshot: {self._mb_cfg}\n")
+
+            # --- OHLCV SEED: induláskor töltsük fel a cache-t, hogy ATR/BB/EMA stb. mindig kapjon elég adatot ---
+            try:
+                with self._mb_lock:
+                    cfg_seed = dict(getattr(self, "_mb_cfg", {}) or {})
+                sym_seed = normalize_symbol(cfg_seed.get("symbol", DEFAULT_SYMBOL))
+                tf_seed = str(cfg_seed.get("tf", "3m") or "3m")
+                seed_n = int(getattr(self, "_ohlcv_seed_n", 500))
+
+                tfs = [tf_seed]
+                if bool(cfg_seed.get("use_htf", False)):
+                    htf_tf = str(cfg_seed.get("htf_tf", "15m") or "15m")
+                    tfs.append(htf_tf)
+
+                # K-Line WS-t is indítsuk / frissítsük a megfelelő TF-ekre (buffer mélység: _ohlcv_ws_depth)
+                self._ensure_kline_ws(sym_seed, tfs)
+
+                # REST seed mindkét TF-re (csak ha még nincs meg seed_n darab a cache-ben)
+                for _tf in tfs:
+                    self._ohlcv_seed_if_needed(sym_seed, _tf, seed_n=seed_n)
+            except Exception as _e:
+                self._safe_log(f"⚠ OHLCV seed indításkor hiba: {_e}\n")
+
         except Exception as e:
             self._safe_log(f"❌ MarginBot cfg építési hiba: {e}\n")
             messagebox.showerror("Hiba", f"MarginBot beállítások nem olvashatók ki: {e}")
@@ -7702,7 +7731,12 @@ class CryptoBotApp:
 
                     # ATR / FIXED menedzsment (közös long/short logika)
                     if pos.get('mgmt') == 'atr' and atr_val is not None:
-                        need_close = _manage_atr_on_pos(pos, px_for_mgmt, atr_val)
+                        # VÉDELEM: Ha ATR <= 0 (pl. warmup alatt), akkor NE zárjunk!
+                        if atr_val > 0.00000001:
+                            need_close = _manage_atr_on_pos(pos, px_for_mgmt, atr_val)
+                        else:
+                            # Ha 0 az ATR, de épp fut a menedzsment, akkor HOLD-oljuk.
+                            need_close = False
                     elif pos.get('mgmt') == 'fixed':
                         need_close = _manage_fixed_on_pos(pos, px_for_mgmt)
 
@@ -7894,9 +7928,11 @@ class CryptoBotApp:
                 })
 
                 # commit + fee arányos része felszabadul a poolból
+                # Javítás: Decimal - float hiba elkerülése
+                sub_amount = Decimal(str(float(release))) + Decimal(str(float(fee_release)))
                 self._pool_used_quote = max(
-                    0.0,
-                    self._pool_used_quote - (release + fee_release),
+                    Decimal('0'),
+                    self._pool_used_quote - sub_amount,
                 )
 
             try:
@@ -7940,12 +7976,13 @@ class CryptoBotApp:
                     _partial_close_50(pos, side, last_px)
 
             peak = pos['peak']; trail_mul = pos.get('trail_mul', 1.0)
-            if side == 'buy':
-                trail_px = peak - trail_mul*atr_val
-                if last_px <= trail_px: return True
-            else:
-                trail_px = peak + trail_mul*atr_val
-                if last_px >= trail_px: return True
+            if trail_mul > 0:
+                if side == 'buy':
+                    trail_px = peak - trail_mul*atr_val
+                    if last_px <= trail_px: return True
+                else:
+                    trail_px = peak + trail_mul*atr_val
+                    if last_px >= trail_px: return True
 
             tp2 = pos['tp2']; sl = pos['sl']
             if (side == 'buy' and (last_px >= tp2 or last_px <= sl)) or \
@@ -9437,7 +9474,7 @@ class CryptoBotApp:
         # --- adat ellenőrzés ---
         s = pd.Series(series, dtype="float64").copy()
         if len(s) < max(fast, slow) + 5:
-            return "hold", float("nan"), float("nan")
+            return "hold", 0.0, 0.0
 
         # --- EMA-k számítása ---
         ema_f = s.ewm(span=fast, adjust=False).mean()
