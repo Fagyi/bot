@@ -1587,7 +1587,9 @@ class CryptoBotApp:
         self.root.geometry("1280x930")
 
         self._ohlcv_cache: dict[tuple[str,str], dict[str, object]] = {}
-        self._ohlcv_cache_maxlen = 600  # igény szerint (200-nál nagyobb legyen)
+        self._ohlcv_cache_maxlen = 800  # OHLCV cache: legalább 500-hoz legyen puffer
+        self._ohlcv_seed_n = 500         # induláskor ennyi gyertyát seed-elünk REST-ből (ha kell)
+        self._ohlcv_ws_depth = 600       # K-Line WS buffer mélység
 
         # ---- Funds / Margin cache alapértelmezett állapota ----
         # Így az _mb_refresh_available hívható akkor is, ha még nem volt teljes "Összes egyenleg frissítése".
@@ -3049,7 +3051,7 @@ class CryptoBotApp:
                     symbol=req_sym,
                     tfs=req_tfs,
                     log_fn=self._safe_log,
-                    depth=300,
+                    depth=int(getattr(self, "_ohlcv_ws_depth", 600)),
                 )
                 self._mb_kline_ws.start()
             except Exception as e:
@@ -3094,7 +3096,7 @@ class CryptoBotApp:
             rec["rows"] = rows
             rec["last_ts"] = int(rows[-1][0]) if rows else 0
 
-    def _ohlcv_seed_if_needed(self, symbol: str, tf: str, seed_n: int = 200):
+    def _ohlcv_seed_if_needed(self, symbol: str, tf: str, seed_n: int = 500):
         symbol = normalize_symbol(symbol)
         key = (symbol, tf)
 
@@ -3127,7 +3129,8 @@ class CryptoBotApp:
         symbol = normalize_symbol(symbol)
 
         # 1) seed
-        self._ohlcv_seed_if_needed(symbol, tf, seed_n=200)
+        seed_n = int(max(getattr(self, "_ohlcv_seed_n", 500), limit or 0, 200))
+        self._ohlcv_seed_if_needed(symbol, tf, seed_n=seed_n)
 
         # 2) ws merge
         self._ohlcv_update_from_ws(symbol, tf)
@@ -6719,6 +6722,29 @@ class CryptoBotApp:
             with self._mb_lock:
                 self._mb_cfg = new_cfg
             self._safe_log(f"🧩 MarginBot cfg snapshot: {self._mb_cfg}\n")
+
+            # --- OHLCV SEED: induláskor töltsük fel a cache-t, hogy ATR/BB/EMA stb. mindig kapjon elég adatot ---
+            try:
+                with self._mb_lock:
+                    cfg_seed = dict(getattr(self, "_mb_cfg", {}) or {})
+                sym_seed = normalize_symbol(cfg_seed.get("symbol", DEFAULT_SYMBOL))
+                tf_seed = str(cfg_seed.get("tf", "3m") or "3m")
+                seed_n = int(getattr(self, "_ohlcv_seed_n", 500))
+
+                tfs = [tf_seed]
+                if bool(cfg_seed.get("use_htf", False)):
+                    htf_tf = str(cfg_seed.get("htf_tf", "15m") or "15m")
+                    tfs.append(htf_tf)
+
+                # K-Line WS-t is indítsuk / frissítsük a megfelelő TF-ekre (buffer mélység: _ohlcv_ws_depth)
+                self._ensure_kline_ws(sym_seed, tfs)
+
+                # REST seed mindkét TF-re (csak ha még nincs meg seed_n darab a cache-ben)
+                for _tf in tfs:
+                    self._ohlcv_seed_if_needed(sym_seed, _tf, seed_n=seed_n)
+            except Exception as _e:
+                self._safe_log(f"⚠ OHLCV seed indításkor hiba: {_e}\n")
+
         except Exception as e:
             self._safe_log(f"❌ MarginBot cfg építési hiba: {e}\n")
             messagebox.showerror("Hiba", f"MarginBot beállítások nem olvashatók ki: {e}")
@@ -8135,8 +8161,8 @@ class CryptoBotApp:
                         if now_ts >= (prev_ts + tf_sec):
                             need_refresh = True
 
-                    # OHLCV beszerzési limit számítása (min. 500 a warmup miatt)
-                    need_n = max(500, adx_len * 4, z_len * 3 + z_points, ma_slow * 3, macd_slow * 3)
+                    # OHLCV beszerzési limit számítása
+                    need_n = max(200, adx_len * 4, z_len * 3 + z_points, ma_slow * 3, macd_slow * 3)
 
                     # Van-e újrahasznosítható DF?
                     current_df = getattr(self, "_mb_last_df", None)
@@ -8174,14 +8200,6 @@ class CryptoBotApp:
                         else:
                             # Első kör / szimbólum váltás: teljes DF építés
                             df = pd.DataFrame(ohlcv, columns=['ts','o','h','l','c','v'])
-
-                        # --- ADATHIÁNY ELLENŐRZÉS (Warmup) ---
-                        # Ha a DF túl rövid, ne számoljon tovább, mert az indikátorok (pl. ATR) 0-k lesznek.
-                        min_warmup = max(ma_slow + 20, 50)
-                        if len(df) < min_warmup:
-                            self._safe_log(f"⏳ Adatra várás... ({len(df)}/{min_warmup} gyertya). Ciklus kihagyva.\n")
-                            time.sleep(2)
-                            continue
 
                         # Kulcs mentése a következő körhöz
                         self._mb_last_df_key = key
