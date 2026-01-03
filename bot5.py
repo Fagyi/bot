@@ -7928,9 +7928,11 @@ class CryptoBotApp:
                 })
 
                 # commit + fee arányos része felszabadul a poolból
+                # Javítás: Decimal - float hiba elkerülése
+                sub_amount = Decimal(str(float(release))) + Decimal(str(float(fee_release)))
                 self._pool_used_quote = max(
-                    0.0,
-                    self._pool_used_quote - (release + fee_release),
+                    Decimal('0'),
+                    self._pool_used_quote - sub_amount,
                 )
 
             try:
@@ -9471,7 +9473,7 @@ class CryptoBotApp:
         # --- adat ellenőrzés ---
         s = pd.Series(series, dtype="float64").copy()
         if len(s) < max(fast, slow) + 5:
-            return "hold", float("nan"), float("nan")
+            return "hold", 0.0, 0.0
 
         # --- EMA-k számítása ---
         ema_f = s.ewm(span=fast, adjust=False).mean()
