@@ -7976,12 +7976,13 @@ class CryptoBotApp:
                     _partial_close_50(pos, side, last_px)
 
             peak = pos['peak']; trail_mul = pos.get('trail_mul', 1.0)
-            if side == 'buy':
-                trail_px = peak - trail_mul*atr_val
-                if last_px <= trail_px: return True
-            else:
-                trail_px = peak + trail_mul*atr_val
-                if last_px >= trail_px: return True
+            if trail_mul > 0:
+                if side == 'buy':
+                    trail_px = peak - trail_mul*atr_val
+                    if last_px <= trail_px: return True
+                else:
+                    trail_px = peak + trail_mul*atr_val
+                    if last_px >= trail_px: return True
 
             tp2 = pos['tp2']; sl = pos['sl']
             if (side == 'buy' and (last_px >= tp2 or last_px <= sl)) or \
